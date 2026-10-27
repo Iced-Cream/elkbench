@@ -19,7 +19,9 @@ Rules it enforces:
   a click on a dialog on this PC's desktop creates (approve_plan); each item is used once;
 - release writes the elklock handoff note and a row in the unit's runs\\test-log.md, and asks
   for the stock OS back first;
-- never restarts Overbridge, never breaks a claim, never power-cycles a unit.
+- never restarts Overbridge, never breaks a claim, never power-cycles a unit;
+- keeps the PC from sleeping while a unit is claimed, a run or emulator is going or a go is
+  being asked (keep_awake), so a run or a remote session isn't cut off halfway.
 
 Stdlib only. Windows and Linux (no Overbridge Total Recall on Linux: there is no Engine).
 
@@ -171,6 +173,7 @@ def load_config(path=CONFIG):
         approval_fallback=c.get('approval_fallback') or 'popup',
         batch_slots=int(c.get('batch_max_emulators') or batch.SLOTS_DEFAULT),
         write_policy=(policy or '(ANALOGHEALTH_POLICY is empty)') if c.get('require_write_policy') else None,
+        keep_awake=c.get('keep_awake', True) is not False,
         units=units)
 
 
@@ -779,6 +782,19 @@ class Daemon:
                 why.append('%s is claimed' % u)
             elif elklock.tickets(u):
                 why.append('%s has a claim queued' % u)
+        return why
+
+    def keeps_awake(self):
+        """Why the PC must not sleep now (empty: it may): a unit claimed or queued for, a run, an
+        emulator, a go being asked or its dialog open. Sleep would cut a flash or a listening test
+        short and drop the client's remote session."""
+        with self.lock:
+            why = (['a run is going'] if self.running() else []) + \
+                  (['a go is being asked'] if any(j.state == 'asking' for j in self.jobs.values()) else []) + \
+                  (['an emulator runs'] if any(e['proc'].poll() is None for e in self.emulators.values()) else [])
+        if self.dialog.locked():
+            why.append('an approval dialog is open')
+        why += ['%s is claimed' % u for u in UNITS if elklock.holder(u) is not None or elklock.tickets(u)]
         return why
 
     def code_starts(self, t):
@@ -2492,6 +2508,48 @@ def idle_watch():
             return
 
 
+class Awake:
+    """Holds off system sleep (not the display's) while set. Windows: the execution state of the
+    thread that calls it; Linux: a systemd-inhibit child, if there is one. Elsewhere it does nothing."""
+    def __init__(self):
+        self.on, self.proc = False, None
+
+    def set(self, on):
+        if on == self.on:
+            return
+        self.on = on
+        if WINDOWS:
+            C.windll.kernel32.SetThreadExecutionState(0x80000000 | (0x1 if on else 0))  # CONTINUOUS | SYSTEM_REQUIRED
+        elif on and shutil.which('systemd-inhibit'):
+            try:
+                # the child waits for its stdin to close, so the inhibit ends with this daemon too
+                self.proc = subprocess.Popen(['systemd-inhibit', '--what=sleep:idle', '--who=elkbench',
+                                              '--why=a test run or claim is going', sys.executable, '-c',
+                                              'import sys; sys.stdin.read()'], stdin=subprocess.PIPE,
+                                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            except OSError:
+                self.proc = None
+        elif not on and self.proc:
+            self.proc.stdin.close()
+            self.proc.wait(10)
+            self.proc = None
+
+
+def awake_watch():
+    """Re-checks every 15 s, from this one thread (the Windows state is per thread)."""
+    a = Awake()
+    while True:
+        try:
+            why = D.keeps_awake()
+        except Exception:                 # elklock unreadable for a moment: keep the last state
+            why = None
+        if why is not None and bool(why) != a.on:
+            a.set(bool(why))
+            D.log_line({'session': 'daemon', 'daemon': 'keeps the PC awake' if why else 'lets the PC sleep',
+                        'reason': '; '.join(why)})
+        time.sleep(15)
+
+
 def main():
     global D, SECRET, SERVER, STARTED
     if sys.argv[1:] == ['--check']:
@@ -2509,6 +2567,8 @@ def main():
     D.log_line({'session': 'daemon', 'daemon': 'started', 'pid': os.getpid(), 'version': VERSION,
                 'approvals_kept': sum(time.time() < a['expires'] for a in D.approvals.values())})
     threading.Thread(target=idle_watch, daemon=True).start()
+    if CFG['keep_awake']:
+        threading.Thread(target=awake_watch, daemon=True).start()
     try:
         SERVER.serve_forever(poll_interval=0.5)
     finally:
