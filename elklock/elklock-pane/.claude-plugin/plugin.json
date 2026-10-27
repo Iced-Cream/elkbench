@@ -1,0 +1,1 @@
+{"name": "elklock-pane", "version": "0.1.0", "description": "A pane showing who holds each Elektron unit (elklock), the queue and the last handoff", "types": "./types/index.d.ts", "userConfig": {"python": {"type": "string", "title": "Python", "description": "The Python (3.11+) that runs elklock.py: a command on PATH or a full path", "default": "python"}}}

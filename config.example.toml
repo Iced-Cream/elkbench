@@ -1,0 +1,58 @@
+# elkbench configuration: copy to %LOCALAPPDATA%\elkbench\config.toml (or point
+# ELKBENCH_CONFIG at it). Every key is optional. A tool left out is off, and the MCP tools that
+# need it say so; the server has no idea of your folder layout beyond what is here.
+
+# Named in the approval dialog and in refusals ("needs a go from ...").
+person = "the person at this PC"
+
+# When the MCP client cannot show the approval prompt (for example a remote session that declines
+# it unseen): 'popup' asks on this PC; 'thread' has the session ask in the chat it reports to
+# (any thread or channel) and pass the reply on with its id or link (weaker: elkbench cannot
+# tell who wrote it); 'both' does both, the first answer counts.
+# approval_fallback = 'popup'
+
+# How many emulators batches (the batch tool) may run at once on this PC, across sessions.
+# batch_max_emulators = 8
+
+# Where evidence goes when a unit sets no `evidence` of its own: <root>\<unit>\runs.
+# Default: Documents\elkbench.
+# evidence_root = 'C:\Users\me\Documents\elkbench'
+
+# Refuse hardware calls unless analoghealth has a local write policy installed (its
+# writepolicy.py: ANALOGHEALTH_POLICY, else policy.py in %LOCALAPPDATA%\analoghealth).
+# require_write_policy = false
+
+[tools]
+# elklock.py; default: elklock\elklock.py in this folder.
+# elklock = 'C:\tools\elklock\elklock.py'
+# analoghealth checkout (tools\analogrun.py, testplan.py): plans, steps, screens.
+# analoghealth = 'C:\src\analoghealth'
+# analog-emu's binaries (rytm.exe, a4.exe): the emulator tool starts them headless.
+# analog_emu = 'C:\src\analog-emu\target\release'
+# elkflash checkout to run `python -m elkflash` in; leave out if elkflash is pip-installed.
+# elkflash = 'C:\src\elkflash'
+# The audio scripts (asio_rec.py, asio_tone.py, audiocheck.py: audio_record, audio_check) are
+# bundled in audio\ here; set this only to use another copy.
+# usb_audio = 'C:\src\elkbench\audio'
+# A Python with numpy and scipy for the audio scripts; default: the one running elkbench.
+# audio_python = ['C:\Python312\python.exe']
+# Overbridge Total Recall (recall_take, recall_restore) is built in: obtr.py in this folder.
+
+# elklock reads this file too: tools.elkflash and tools.analoghealth for its handoff snapshot.
+# [elklock]
+# More command names its Bash hook treats as device tools, beside the built-in analogusb,
+# analogrun, elkflash and obtr (for example your own scripts).
+# guard = ['my_record_script']
+
+# Per unit (rytm, a4): any built-in fact (port, emu, asio, engine) can be
+# overridden too.
+# [units.rytm]
+# evidence = 'C:\tests\rytm\runs'          # run folders and test-log.md
+# refs = 'C:\tests\rytm\refs'              # default folder for expect_screen references
+# stock = ['C:\os\Analog-Rytm_MKII_OS1.74.syx']   # what counts as "stock" at release
+# no_stats = ['C:\os\remote-only.syx']     # builds whose runner channel has no stats command:
+#                                          # plans and steps with a stats step are refused on them
+# emu_card = 'C:\tests\rytm\card.img'      # the emulator tool boots a fresh copy of it
+# din = 'USB MIDI Interface'               # the MIDI interface cabled to its DIN ports (both ways, a
+#                                          # name or 'IN,OUT'): hardware steps and plans with
+#                                          # send/capture ... din use it (Rytm and A4); unset: refused

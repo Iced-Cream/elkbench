@@ -1,0 +1,4 @@
+# menus-flash.txt in the Rytm emulator.
+include = menus-flash.txt
+emulator = yes
+port = rytm-emu usb out,rytm-emu usb in

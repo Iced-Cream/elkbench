@@ -1,0 +1,5 @@
+# menus.txt in the Rytm emulator.
+include = menus.txt
+emulator = yes
+port = rytm-emu usb out,rytm-emu usb in
+record-refs = no

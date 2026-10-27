@@ -1,0 +1,5 @@
+# menus.txt after flashing a test build (a stand-in file here: the tests never send it).
+include = menus.txt
+name = menus after test build flash
+flash = ../os/test-build.syx
+note = test build flashed; menus closed, pattern stopped

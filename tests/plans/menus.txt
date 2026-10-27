@@ -1,0 +1,40 @@
+# Sample plan for the offline tests (and a template for your own): menus look as recorded,
+# the analoghealth channel answers, and on the unit a steady tone survives a playing pattern.
+# Emulator twin: menus-emu.txt
+format = 1
+name = menus
+unit = rytm
+refs = refs/menus
+out = runs
+note = menus closed, pattern stopped
+
+[start]
+# The emulator boots with two prompts (missing calibration, run calibration?);
+# NO at the unit's home screen does nothing.
+wait 1
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+
+[global menu]
+tap GLOBAL
+expect-screen global-menu 2
+
+[project menu]
+tap YES
+expect-screen project-menu 2
+tap NO
+tap NO
+wait 0.5
+
+[analoghealth answers]
+stats
+
+[pattern and tone (hardware)]
+tap PLAY
+audio-tone 6 tone
+tap STOP
+audio-dropouts tone 1,2

@@ -1,0 +1,11 @@
+# Leave the unit on its stock OS (the last step of a run).
+format = 1
+name = stock restore
+unit = rytm
+out = runs
+flash = ../os/stock.syx
+note = stock OS restored
+
+[home screen]
+wait 2
+shot home.png

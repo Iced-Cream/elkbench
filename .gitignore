@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+# written by Claude Code when it loads the pane
+elklock/elklock-pane/.claude-plugin/types/
+
+# firmware, OS files, screens and recordings never go in the repo
+*.syx
+*.bin
+*.img
+*.elemod
+*.wav
