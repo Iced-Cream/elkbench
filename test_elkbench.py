@@ -411,6 +411,26 @@ class InProcess(unittest.TestCase):
         self.d.save_jobs()
         self.assertEqual(daemon.Daemon().t_status(self.s, {'run_id': job.id})[1:], ['PASS x'])
 
+    def test_keeps_the_pc_awake_while_a_unit_is_claimed_or_a_run_goes(self):
+        self.assertEqual(self.d.keeps_awake(), [])
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        self.assertEqual(self.d.keeps_awake(), ['rytm is claimed'])
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'release', 'rytm', '--no-snapshot'],
+                       env=self.s.env(), capture_output=True)
+        with self.d.lock:                         # an open go alone lets the PC sleep
+            self.d.approvals['ap-awake'] = dict(session=self.s.sid, created=time.time(),
+                                                expires=time.time() + 60, text='t', items=[
+                                                    dict(item=('flash', 'rytm', 'ab' * 32), used=False,
+                                                         label='flash z on rytm')])
+        self.assertEqual(self.d.keeps_awake(), [])
+        del self.d.approvals['ap-awake']
+        job = daemon.Job(self.s, 'plan', 'rytm', 'emulator', 'x.txt')
+        self.d.jobs[job.id] = job
+        self.assertEqual(self.d.keeps_awake(), ['a run is going'])
+        job.state = 'pass'
+        self.assertEqual(self.d.keeps_awake(), [])
+
     @needs_runner
     def test_one_go_per_run(self):
         plan = os.path.join(PLANS, 'menus.txt')

@@ -65,6 +65,11 @@ own claim (elklock).
 
 ## 3. During a run
 
+- **Prove the precondition before the check that needs it.** A plan that checks a feature
+  first shows that the feature is on and the unit is where the check expects it (the right
+  page, pattern or slot on screen) with a screen check or a readback step, before the step whose
+  result depends on it. Otherwise a pass can come from the wrong state. A "done" that has no
+  step result or screen behind it is a report, not proof.
 - **No key stays held.** Every key session ends with a cancel, and a failed run still lets go
   of keys and the claim.
 - **Audio at a safe level.** Never touch the main volume, keep test signals at about -24 dBFS,
