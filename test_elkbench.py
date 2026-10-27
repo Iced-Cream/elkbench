@@ -817,55 +817,165 @@ class InProcess(unittest.TestCase):
         self.assertNotIn(os.path.basename(recent[-2]), left)
         self.assertFalse(os.path.exists(old + '.json'))
 
+    def test_digitone_emulator_steps_need_no_claim(self):
+        proc = type('P', (), {'poll': lambda self: None, 'pid': 98})()
+        ran = []
+        saved = daemon.DIGIHEALTH, daemon.subprocess.run
+        daemon.DIGIHEALTH = TMP
+        daemon.subprocess.run = lambda cmd, **kw: (ran.append(cmd), subprocess.CompletedProcess(cmd, 0, '  hi\n', ''))[1]
+        try:
+            with self.assertRaisesRegex(daemon.Refused, 'no digitone emulator'):
+                self.d.t_steps(self.s, {'unit': 'digitone', 'target': 'emulator', 'steps': 'say hi'})
+            self.d.emulators[(self.s.sid, 'digitone')] = dict(proc=proc, session=self.s.sid, build='b',
+                                                              address='tcp:127.0.0.1:7401')
+            out =self.d.t_steps(self.s, {'unit': 'digitone', 'target': 'emulator', 'steps': 'say hi'})
+        finally:
+            daemon.DIGIHEALTH, daemon.subprocess.run = saved
+        self.assertEqual(out[0], 'ok: 1 step(s) done\n  hi')
+        self.assertEqual(ran[0][2:5], ['--port', 'tcp:127.0.0.1:7401', 'do'])
+        self.assertNotIn(daemon.ELKLOCK, ran[0])
+
+    def test_digitone_emulator_audio(self):
+        import socket, struct as st, threading
+        srv = socket.socket()
+        srv.bind(('127.0.0.1', 0))
+        srv.listen(1)
+
+        def serve():
+            c, _ = srv.accept()
+            frame = st.pack('>12i', *([1 << 30, -(1 << 29)] + [0] * 10))
+            try:
+                c.sendall(frame * 48000)
+            finally:
+                c.close()
+        threading.Thread(target=serve, daemon=True).start()
+        proc = type('P', (), {'poll': lambda self: None, 'pid': 98})()
+        with self.assertRaisesRegex(daemon.Refused, 'no digitone emulator'):
+            self.d.t_audio_record(self.s, {'unit': 'digitone', 'target': 'emulator', 'seconds': 1})
+        self.d.emulators[(self.s.sid, 'digitone')] = dict(proc=proc, session=self.s.sid, build='b',
+                                                          address='tcp:127.0.0.1:7401', ob_audio=None)
+        with self.assertRaisesRegex(daemon.Refused, 'gives no audio'):
+            self.d.t_audio_record(self.s, {'unit': 'digitone', 'target': 'emulator', 'seconds': 1})
+        self.d.emulators[(self.s.sid, 'digitone')]['ob_audio'] = srv.getsockname()[1]
+        out = self.d.t_audio_record(self.s, {'unit': 'digitone', 'target': 'emulator', 'seconds': 0.5,
+                                             'name': 'emu'})
+        srv.close()
+        self.assertTrue(out[0].startswith('ok: ') and out[0].endswith('(0.50 s, 12 channels)'), out)
+        self.assertEqual(out[1], 'peaks: Main L 0.500, Main R 0.250')
+        wav = out[0][4:].split(' (')[0]
+        with open(wav, 'rb') as fh:
+            head = fh.read(44)
+        self.assertEqual(st.unpack('<HHI', head[20:28]), (3, 12, 48000))
+        self.assertEqual(st.unpack('<I', head[40:44])[0], 24000 * 48)
+
+    def test_digitone_plans(self):
+        plan = os.path.join(TMP, 'dn-plan.txt')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write('unit = digitone\n[home]\nexpect-screen home 2\n')
+        saved = daemon.DIGIHEALTH
+        try:
+            daemon.DIGIHEALTH = None
+            with self.assertRaisesRegex(daemon.Refused, 'tools.digihealth'):
+                self.d.plan_info(plan)
+            daemon.DIGIHEALTH = TMP
+            self.assertEqual(self.d.plan_info(plan)['unit'], 'digitone')
+            with open(plan, 'a', encoding='utf-8') as fh:
+                fh.write('[save]\nsave-kit SAVE\n')
+            with self.assertRaisesRegex(daemon.Refused, 'cannot save-kit'):
+                self.d.plan_info(plan)
+        finally:
+            daemon.DIGIHEALTH = saved
+
     @needs_runner
     def test_data_writes_go_through_the_runner(self):
         proc = type('P', (), {'poll': lambda self: None, 'pid': 98})()
         ran = []
-        saved = daemon.subprocess.run
-        self.d.emulators[(self.s.sid, 'rytm')] = dict(proc=proc, session=self.s.sid, build='b',
-                                                      address='tcp:127.0.0.1:7401')
+        saved = daemon.DIGIHEALTH, daemon.subprocess.run
+        daemon.DIGIHEALTH = TMP
+        self.d.emulators[(self.s.sid, 'digitone')] = dict(proc=proc, session=self.s.sid, build='b',
+                                                          address='tcp:127.0.0.1:7401')
         results = iter([subprocess.CompletedProcess([], 2, '\nrefused (write policy): slot 5 is not a test slot\n', ''),
                         subprocess.CompletedProcess([], 0, '  100.0 %\nwrote 232 bytes to /soundbanks/H/128, named '
                                                            "'~T SND'\n", '')])
         daemon.subprocess.run = lambda cmd, **kw: (ran.append(cmd), next(results))[1]
-        obj = os.path.join(self.s.folder('rytm'), 'snd.bin')
+        obj = os.path.join(self.s.folder('digitone'), 'snd.bin')
         with open(obj, 'wb') as fh:
             fh.write(b'x')
         try:
             with self.assertRaisesRegex(daemon.Refused, 'to is for roundtrip'):
-                self.d.t_data(self.s, {'unit': 'rytm', 'target': 'emulator', 'op': 'put', 'path': '/x', 'to': '/y'})
-            out = self.d.t_data(self.s, {'unit': 'rytm', 'target': 'emulator', 'op': 'put',
+                self.d.t_data(self.s, {'unit': 'digitone', 'target': 'emulator', 'op': 'put', 'path': '/x', 'to': '/y'})
+            out = self.d.t_data(self.s, {'unit': 'digitone', 'target': 'emulator', 'op': 'put',
                                          'path': '/projects/5', 'file': 'snd.bin', 'slot_name': '~T X'})
             self.assertEqual(out[0], 'refused: refused (write policy): slot 5 is not a test slot')
-            out = self.d.t_data(self.s, {'unit': 'rytm', 'target': 'emulator', 'op': 'put',
+            out = self.d.t_data(self.s, {'unit': 'digitone', 'target': 'emulator', 'op': 'put',
                                          'path': '/soundbanks/H/128', 'file': 'snd.bin', 'slot_name': '~T SND'})
         finally:
-            daemon.subprocess.run = saved
+            daemon.DIGIHEALTH, daemon.subprocess.run = saved
         self.assertEqual(out[0], "ok: wrote 232 bytes to /soundbanks/H/128, named '~T SND'")
         self.assertEqual(ran[1][1], daemon.RUNNER)               # analogrun applies the write policy
         self.assertEqual(ran[1][2:], ['--port', 'tcp:127.0.0.1:7401', 'data', 'put', '/soundbanks/H/128',
                                       obj, '--name', '~T SND', '--yes'])
 
-    @needs_runner
     def test_data_store_listing(self):
         proc = type('P', (), {'poll': lambda self: None, 'pid': 98})()
         ran = []
-        saved = daemon.subprocess.run
+        saved = daemon.DIGIHEALTH, daemon.subprocess.run
+        daemon.DIGIHEALTH = TMP
         daemon.subprocess.run = lambda cmd, **kw: (ran.append(cmd), subprocess.CompletedProcess(
             cmd, 0, '/projects\n/sounds\n', ''))[1]
         try:
             with self.assertRaisesRegex(daemon.Refused, 'op is one of'):
-                self.d.t_data(self.s, {'unit': 'rytm', 'target': 'emulator', 'op': 'move', 'path': '/x'})
-            with self.assertRaisesRegex(daemon.Refused, 'claim rytm first'):
-                self.d.t_data(self.s, {'unit': 'rytm', 'target': 'hardware', 'op': 'ls', 'path': '/'})
-            self.d.emulators[(self.s.sid, 'rytm')] = dict(proc=proc, session=self.s.sid, build='b',
-                                                          address='tcp:127.0.0.1:7401')
-            out = self.d.t_data(self.s, {'unit': 'rytm', 'target': 'emulator', 'op': 'ls', 'path': '/'})
+                self.d.t_data(self.s, {'unit': 'digitone', 'target': 'emulator', 'op': 'move', 'path': '/x'})
+            with self.assertRaisesRegex(daemon.Refused, 'claim digitone first'):
+                self.d.t_data(self.s, {'unit': 'digitone', 'target': 'hardware', 'op': 'ls', 'path': '/'})
+            self.d.emulators[(self.s.sid, 'digitone')] = dict(proc=proc, session=self.s.sid, build='b',
+                                                              address='tcp:127.0.0.1:7401')
+            out = self.d.t_data(self.s, {'unit': 'digitone', 'target': 'emulator', 'op': 'ls', 'path': '/'})
         finally:
-            daemon.subprocess.run = saved
+            daemon.DIGIHEALTH, daemon.subprocess.run = saved
         self.assertEqual(out[:3], ['ok: 2 line(s) for /:', '  /projects', '  /sounds'])
         self.assertEqual(ran[0][2:7], ['--port', 'tcp:127.0.0.1:7401', 'data', 'ls', '/'])
         self.assertTrue(os.path.isfile(out[-1].split(': ', 1)[1]))
+
+    def test_digitakt_reuses_the_digitone_path(self):
+        img = self.saved['stock'][0]
+        with self.assertRaisesRegex(daemon.Refused, r'unknown unit .*digitakt'):
+            self.d.unit('digitakt2')
+        with self.assertRaisesRegex(daemon.Refused, 'no digitakt emulator with USB MIDI yet'):
+            self.d.t_emulator(self.s, {'action': 'start', 'unit': 'digitakt'})
+        saved = daemon.DIGIHEALTH
+        daemon.DIGIHEALTH = TMP
+        try:
+            with self.assertRaisesRegex(daemon.Refused, 'no digitakt emulator with USB MIDI'):
+                self.d.t_steps(self.s, {'unit': 'digitakt', 'target': 'emulator', 'steps': 'say hi'})
+        finally:
+            daemon.DIGIHEALTH = saved
+        with self.assertRaisesRegex(daemon.Refused, "step 'turn' is not allowed"):
+            self.d.t_steps(self.s, {'unit': 'digitakt', 'target': 'hardware', 'steps': 'turn A 3'})
+        with self.assertRaisesRegex(daemon.Refused, "step 'save-kit' is not allowed"):
+            self.d.t_steps(self.s, {'unit': 'digitakt', 'target': 'hardware', 'steps': 'save-kit'})
+        # the flash gate without a build is digiemu's emu.fwcheck, as on the Digitone
+        with self.assertRaisesRegex(daemon.Refused, 'emulator check \\(digiemu\\)'):
+            self.d.t_flash(self.s, {'unit': 'digitakt', 'image': img, 'target': 'emulator'})
+        with self.assertRaisesRegex(daemon.Refused, 'no digitakt emulator with USB MIDI yet'):
+            self.d.t_flash(self.s, {'unit': 'digitakt', 'image': img, 'target': 'emulator', 'build': img})
+        with self.assertRaisesRegex(daemon.Refused, 'no emulator for digitakt'):
+            self.d.t_batch(self.s, {'image': img, 'unit': 'digitakt', 'build': img, 'variants': [{}]})
+        with self.assertRaisesRegex(daemon.Refused, 'no ASIO driver known for digitakt'):
+            self.d.t_audio_record(self.s, {'unit': 'digitakt', 'seconds': 1})
+        with self.assertRaisesRegex(daemon.Refused, 'no Total Recall for digitakt' if daemon.WINDOWS
+                                    else 'Overbridge Engine'):
+            self.d.t_recall_take(self.s, {'unit': 'digitakt'})
+
+    def test_digiemu_paths_in_wsl(self):
+        saved = daemon.DIGIEMU, daemon.DIGIEMU_PY
+        daemon.DIGIEMU, daemon.DIGIEMU_PY = TMP, ['wsl', '~/py']
+        try:
+            cmd = self.d.digiemu_cmd([daemon.Path(r'D:\x\y.syx'), '7400'])
+        finally:
+            daemon.DIGIEMU, daemon.DIGIEMU_PY = saved
+        self.assertEqual(cmd[:4], ['wsl', '-e', 'bash', '-lc'])
+        self.assertTrue(cmd[4].endswith('~/py /mnt/d/x/y.syx 7400'), cmd[4])
 
     def test_release_asks_for_stock(self):
         subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
@@ -1057,6 +1167,10 @@ class InProcess(unittest.TestCase):
         self.assertEqual(testplan.parse(self.d.batch_plan(info, work, 'batch run 1'))[0]['din'], '')
         self.assertEqual(testplan.parse(plan)[0]['din'], 'USB MIDI Interface')    # the plan itself keeps it
 
+    def test_din_not_on_the_digitone(self):
+        with self.assertRaisesRegex(daemon.Refused, 'Rytm and A4 only'):
+            self.d.device_do(self.s, 'digitone', 'emulator', 'send %s din' % self.kit_request())
+
     def test_no_stats_build(self):
         build = daemon.sha256(os.path.join(TMP, 'os', 'remote-only.syx'))
         stock = daemon.sha256(os.path.join(TMP, 'os', 'stock.syx'))
@@ -1091,7 +1205,7 @@ class InProcess(unittest.TestCase):
         with self.assertRaisesRegex(daemon.Refused, 'set tools.obtr'):
             daemon.need(None, 'obtr', 'Total Recall')
 
-    def test_engine_needs_every_unit(self):
+    def test_engine_needs_all_three(self):
         subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
                        env=self.s.env(), capture_output=True)
         with self.assertRaisesRegex(daemon.Refused, 'claim a4 first' if daemon.WINDOWS else 'Overbridge Engine'):
@@ -1102,6 +1216,7 @@ class InProcess(unittest.TestCase):
         for a, why in (({'image': img, 'unit': 'rytm'}, 'variants is a list'),
                        ({'image': img, 'plan': 'p', 'variants': [{}]}, 'give plan .* or image'),
                        ({'image': img, 'unit': 'rytm', 'variants': [{}]}, 'variant 1: build'),
+                       ({'image': img, 'unit': 'digitone', 'build': img, 'variants': [{}]}, 'tools.digiemu'),
                        ({'image': img, 'unit': 'rytm', 'build': img, 'variants': [{'name': 'x'}, {'name': 'x'}]},
                         'names must differ'),
                        ({'image': img, 'unit': 'rytm', 'build': img, 'variants': [{}], 'parallel': 9}, 'parallel 1-8')):

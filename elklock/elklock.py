@@ -15,7 +15,7 @@
     elklock.py break DEVICE --yes                  the person frees a stuck claim
     elklock.py hook                                PreToolUse hook (reads JSON on stdin)
 
-DEVICE: rytm, a4 (see DEVICES), or "all".
+DEVICE: rytm, a4, digitone, digitakt (see DEVICES), or "all".
 
 The lock is Windows' own: a small background holder process opens DEVICE.lock with no
 sharing and keeps it open. While it does, nobody else can open that file, so a second claim
@@ -52,6 +52,8 @@ DIR = os.environ.get('ELKLOCK_DIR') or os.path.join(
 DEVICES = {
     'rytm': (r'rytm|armkii', 'Analog Rytm'),
     'a4': (r'analog.?four|a4mkii|\ba4\b', 'Analog Four'),
+    'digitone': (r'digitone|digiusb', 'Digitone'),   # digiusb (digihealth) talks to the Digitone
+    'digitakt': (r'digitakt', 'Digitakt'),           # digiusb with a Digitakt: name it, or claim both
 }
 
 
@@ -77,7 +79,7 @@ ELKFLASH_REPO = CFG.get('tools', {}).get('elkflash')          # None: an install
 ANALOGHEALTH = CFG.get('tools', {}).get('analoghealth')
 RUNNER_DIR = os.path.join(ANALOGHEALTH, 'tools') if ANALOGHEALTH else None
 # commands that talk to a unit: the hook requires a claim before they run
-GUARD = ['analogusb', 'analogrun', 'elkflash', 'obtr',
+GUARD = ['analogusb', 'analogrun', 'digiusb', 'digirun', 'elkflash', 'obtr',
          'asio_rec', 'asio_tone', 'asio_loop', 'wavein_rec', 'loopback.py'] + list(CFG.get('elklock', {}).get('guard', []))
 # a tool's name as a word of its own (analogrun, analogrun.py, tools\\analogrun.py), not inside a longer
 # name (test_analogusb.py) or a folder (analoghealth-gap10)
@@ -89,7 +91,7 @@ ENGINE_TOOLS = re.compile(r'obtr|overbridge engine|taskkill.*overbridge', re.I)
 OFFLINE = re.compile(r'selftest|--self-test|--help|\bdecode\b|\bencode\b|\bbootstrap\b|'
                      r'--from-file|unittest|pytest|\blist\b|--list-midi|--dry-run', re.I)
 # emulator ports: the loopMIDI names, or an emulator's USB MIDI over TCP (a unit is never on TCP)
-EMULATOR = re.compile(r'rytm-emu|a4-emu|--port[ =]"?tcp:', re.I)
+EMULATOR = re.compile(r'rytm-emu|a4-emu|dn-emu|--port[ =]"?tcp:', re.I)
 # long, must-not-be-interrupted operations: the hook requires them under `elklock run`
 MUST_RUN = re.compile(r'elkflash\S*\s+upgrade', re.I)
 # file, text and git commands: a tool's name in their arguments is a path (a run's elkflash.log)
@@ -937,7 +939,7 @@ def hook():
             if holders[d] and d not in ours:
                 lines.append('BUSY ' + describe(d, holders[d]))
         lines.append('Claim first: python "%s" claim <device> --for "<what you are testing>" '
-                     '[--wait] (rytm, a4). If it is busy, wait or tell the '
+                     '[--wait] (rytm, a4, digitone, digitakt). If it is busy, wait or tell the '
                      'person; never stop another holder yourself. Release when done.' % me)
     elif any(holders[d] and holders[d].get('listening') for d in (named or ours)):
         for d in (named or ours):

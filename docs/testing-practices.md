@@ -1,8 +1,8 @@
 # Testing on hardware: practices
 
-How to run tests on an Elektron unit (Analog Rytm MKII, Analog Four MKII) with elkbench,
-whether a person or an AI agent session drives them. elkbench enforces some of these rules
-itself; each section says which ones. The rest is up to the session, and a session that
+How to run tests on an Elektron unit (Analog Rytm MKII, Analog Four MKII, Digitone, Digitakt) with
+elkbench, whether a person or an AI agent session drives them. elkbench enforces some of these
+rules itself; each section says which ones. The rest is up to the session, and a session that
 uses elkbench is expected to follow all of them.
 
 The aim is a run that leaves the unit as it found it, never touches the owner's own work, and
@@ -141,8 +141,10 @@ policy, `examples/write-policy/policy.py` (tests beside it).
   items already named `~T` may be touched.
 - **The active project:** the unit doesn't say which project is active, so by convention a test
   project names its kit 1 `~T ...`, and the policy checks the active kit 1 before any kit or
-  sound dump is sent. The policy never names that kit itself: after a save it can't tell which
-  project is active, so a plan names its test project's kit 1 on the unit.
+  sound dump is sent. On the Digitone and Digitakt the marker is pattern A01's name instead
+  (`~T ...`), read back with a stored-pattern dump request, and there is no key-driven kit
+  save to check. The policy never names the marker itself: after a save it can't tell which
+  project is active, so a plan names its test project's marker on the unit.
 - Names: at most 15 characters (the unit stores 16), upper case, from A-Z, 0-9, space and
   `+ - = & / # @ ? % $ ~`. The unit drops any other character silently.
 - A save into a test slot that already holds a project empties it first, keeping a copy in the
@@ -164,7 +166,7 @@ while no policy is installed.
 - Never drive Transfer's or Overbridge's own windows unattended; those steps are the person's.
   Close Transfer's use of a port before MIDI work.
 
-*elkbench enforces*: Total Recall needs claims on every unit; the elklock hook does the
+*elkbench enforces*: Total Recall needs claims on all three units; the elklock hook does the
 same for commands that drive or stop the Engine.
 
 ## 8. Remote control on stock firmware
@@ -172,7 +174,9 @@ same for commands that drive or stop the Engine.
 A stock OS has no remote keys, so a test that drives stock behaviour from a computer flashes a
 remote-only build instead: the stock OS with only the remote keys (and encoder turns) patched
 in. `standalone/patch.py` in [analoghealth](https://github.com/Iced-Cream/analoghealth) builds
-one for the Analog Rytm MKII and Analog Four MKII from your own stock OS file.
+one for the Analog Rytm MKII and Analog Four MKII, and the same in
+[digihealth](https://github.com/irpina/digihealth) for the Digitone, from your own stock OS
+file. There is none for the Digitakt yet.
 
 - It is still a build: the emulator gate, one go per run and the restore to stock all apply.
 - **Name it in results** ("stock 1.74 + remote-only build"). A result counts as stock behaviour

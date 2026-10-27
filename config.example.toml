@@ -27,8 +27,16 @@ person = "the person at this PC"
 # elklock = 'C:\tools\elklock\elklock.py'
 # analoghealth checkout (tools\analogrun.py, testplan.py): plans, steps, screens.
 # analoghealth = 'C:\src\analoghealth'
+# digihealth tree with tools\digirun.py: steps and screens on the Digitone (and Digitakt).
+# digihealth = 'C:\src\digihealth'
 # analog-emu's binaries (rytm.exe, a4.exe): the emulator tool starts them headless.
 # analog_emu = 'C:\src\analog-emu\target\release'
+# digiemu checkout with USB MIDI (tools/usbrun.py): the Digitone emulator. Builds are set up
+# once in ~/.local/state/elkbench/digiemu (inside WSL when run there); without a build,
+# `flash target emulator` runs its emu.fwcheck.
+# digiemu = 'C:\src\digiemu'
+# Its Python (digiemu needs its patched unicorn); a first item 'wsl' runs it in WSL.
+# digiemu_python = ['wsl', '~/venvs/digiemu/bin/python']
 # elkflash checkout to run `python -m elkflash` in; leave out if elkflash is pip-installed.
 # elkflash = 'C:\src\elkflash'
 # The audio scripts (asio_rec.py, asio_tone.py, audiocheck.py: audio_record, audio_check) are
@@ -41,10 +49,10 @@ person = "the person at this PC"
 # elklock reads this file too: tools.elkflash and tools.analoghealth for its handoff snapshot.
 # [elklock]
 # More command names its Bash hook treats as device tools, beside the built-in analogusb,
-# analogrun, elkflash and obtr (for example your own scripts).
+# analogrun, digiusb, digirun, elkflash and obtr (for example your own scripts).
 # guard = ['my_record_script']
 
-# Per unit (rytm, a4): any built-in fact (port, emu, asio, engine) can be
+# Per unit (rytm, a4, digitone): any built-in fact (port, emu, asio, engine) can be
 # overridden too.
 # [units.rytm]
 # evidence = 'C:\tests\rytm\runs'          # run folders and test-log.md

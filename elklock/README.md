@@ -27,7 +27,7 @@ python %D% break rytm --yes                               # the person frees a s
   the holder exits, so a claim cannot outlive it.
 - `<device>.json` beside the lock names the holder (session id, folder, purpose, running
   commands); it is a label, not the lock. `ELKLOCK_DIR` overrides the folder (tests use a scratch dir).
-- Devices: `rytm`, `a4`, or `all`. Claiming several is all-or-nothing.
+- Devices: `rytm`, `a4`, `digitone`, `digitakt`, or `all`. Claiming several is all-or-nothing.
 
 ## When a claim ends
 | Event | Ends the claim |
@@ -61,11 +61,12 @@ its handoff note, as `release` does.
 ## The hook (enforcement)
 `elklock.py hook` is a PreToolUse hook for Bash and PowerShell in Claude Code's JSON format (a
 client with its own pre-command hooks can call it the same way). It denies a command
-that runs a device tool (analogusb, analogrun, elkflash, obtr, and elkbench's audio recorders
-asio_rec, asio_tone, asio_loop, wavein_rec, loopback.py; more from `[elklock] guard` in elkbench's config.toml) unless this session holds the claim on
-the unit the command names (Rytm, Analog Four/A4), and denies `elkflash upgrade`
+that runs a device tool (analogusb, analogrun, digiusb and digirun (the Digitone), elkflash,
+obtr, and elkbench's audio recorders asio_rec, asio_tone, asio_loop, wavein_rec, loopback.py;
+more from `[elklock] guard` in elkbench's config.toml) unless this session holds the claim on
+the unit the command names (Rytm, Analog Four/A4, Digitone), and denies `elkflash upgrade`
 outside `elklock run`. Offline forms (selftest, --self-test, decode, encode, bootstrap, list,
---dry-run, unit tests) and emulator-only ports (rytm-emu, a4-emu) pass. With no unit
+--dry-run, unit tests) and emulator-only ports (rytm-emu, a4-emu, dn-emu) pass. With no unit
 named, any claim held by the session is enough. It matches a tool's name as a word of its
 own (`analogrun`, `tools\analogrun.py`; not `test_analogusb.py`), and splits the command
 line at `;`, `&&`, `||`, `|` and `&` outside quotes, keeping a heredoc with its command. It skips

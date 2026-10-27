@@ -2,8 +2,9 @@
 
 elkbench gives every AI agent session on a PC (any MCP client: Claude Code, or another LLM's
 agent) the same small set of tools for testing
-Elektron units (Analog Rytm MKII, Analog Four MKII) and their emulators: claim a unit, run a
-test plan, flash an OS, take screenshots, record and check USB audio, and take or restore
+Elektron units (Analog Rytm MKII, Analog Four MKII, Digitone, and Digitakt, which is untested on
+hardware) and their emulators: claim a unit,
+run a test plan, flash an OS, take screenshots, record and check USB audio, and take or restore
 an Overbridge Total Recall image. It enforces the rules that keep several sessions from
 tripping over each other or over the person at the unit: one owner per unit, emulator first,
 and a hardware run only after the person says go.
@@ -45,7 +46,7 @@ See `config.example.toml`.
 |---|---|---|
 | claim / release | elklock claim (prints the last handoff) / release with a note | release writes the handoff note (note + runs + OS left) and a row in the unit's `test-log.md`; refuses a non-stock OS unless `accept_non_stock` |
 | status | this session's claims and runs, or one `run_id` | |
-| emulator | start / stop / status of the emulators: one per session, headless, USB MIDI over its own TCP port (analog-emu `--usb-midi-tcp`; analogrun and elkflash take `--port tcp:HOST:PORT`), on a fresh card copy; an analog-emu with `--din-midi-tcp` also gets its DIN MIDI on a TCP port of its own | an analog-emu build with `--usb-midi-tcp` |
+| emulator | start / stop / status of the emulators: one per session, headless, USB MIDI over its own TCP port (analog-emu `--usb-midi-tcp`, digiemu's `tools/usbrun.py`; analogrun, digirun and elkflash take `--port tcp:HOST:PORT`), on a fresh card copy; an analog-emu with `--din-midi-tcp` also gets its DIN MIDI on a TCP port of its own | an analog-emu build with `--usb-midi-tcp`; for the Digitone a digiemu with USB MIDI |
 | approve_plan | one go for a whole hardware run: plans, flashes, recall restores | each item's emulator pass; the person's yes in the client, or on the popup fallback (No by default, 30 min timeout) |
 | answer_in_thread | the person's reply in the session's chat (a thread or channel) to an approval whose client prompt could not be shown | `approval_fallback` thread or both, after a fast No; the reply's id or link |
 | listen / listen_done | a listening test: the person listens to the unit; until listen_done the claim cannot time out and nothing may drive the unit. A plan's `listen TEXT` step does the same mid-run (the run waits; `status` says so); an emulator run skips it and names it in its result, and the go request lists it as not tested in the emulator | claim; listen_done: the id of the person's "finished" reply in the thread, else Claude asks them |
@@ -53,9 +54,11 @@ See `config.example.toml`.
 | flash | `elkflash upgrade --no-confirm --wait` in the background; its result keeps the sent, Committed and "back after" lines from elkflash's log | hardware: claim, a passing emulator flash of the same file, token |
 | batch | emulator only (Rytm, A4): a plan or flash run `runs` times per variant (each variant names the OS it boots and its image or plan), each run on a fresh emulator of its own, `parallel` at a time (all batches on the PC share `batch_max_emulators`, default 8), round by round in an order shuffled by a reported seed. `status` gives progress, then per variant its pass count with a 95% Wilson range and Fisher's exact p against the first variant (Holm-adjusted when there are several), and the first failures. `results.jsonl`, `summary.txt` and the folders of runs that did not pass go in `batch-<run id>` in the evidence folder. Snapshots are off by default (a resumed snapshot starts every run at the same emulated moment); `snapshot` on a plan batch with `snapshot-after` takes each variant's setup snapshot once, or reuses a stored one, and every run resumes it (in one six-step plan, 89 s a run instead of 146 s). No early stop, never an emulator pass | nothing |
 | steps / shot / expect_screen | analogrun `do` on the unit or emulator, into the session's evidence folder | hardware: claim; steps up to 2 min; `send` only carries Elektron dumps (in a plan too: an absolute path, checked and part of what an emulator pass vouches for, or a file an earlier `capture` saved); `capture NAME S [any\|none]` saves the SysEx that came back since the last `send`, written even when nothing came; `ping` reads the unit's product and OS (Rytm and A4 only, so far). A trailing `din` (`send FILE din`, `capture NAME S [any\|none] din`) sends into or listens on the unit's DIN MIDI instead of USB, each port with its own "since the last send" (Rytm and A4 only; the write policy is still asked over USB): on hardware through the interface named by `din` in the unit's config section, which must be connected; in the emulator through analog-emu's `--din-midi-tcp` (refused on a build without it). Steps, plans and batches pass analogrun `--din` only when a step uses it |
-| data | the data store: `ls PATH` (`/` gives the roots) and `get PATH` (one object as Transfer stores it), through analogrun `data`, into the evidence folder; `put FILE` into PATH, `clear PATH` and `roundtrip PATH [to]` through analogrun `data`, so the local write policy is asked first, and a copy of what is replaced goes to the evidence folder | hardware: claim |
+| (Digitone) | steps, shot and expect_screen through digihealth's `digirun.py` (`tools.digihealth`, a digihealth tree with the runner), on the unit or its emulator. Keys need a digihealth build; screens work on stock. The emulator is digiemu (`digiemu_usb.py` sets a build up once in a digiemu home, then boots a copy per session), and `flash` with `build`, or with a Digitone emulator running, upgrades it over USB with elkflash; without one, `flash target emulator` runs digiemu's `emu.fwcheck`. Plans (`unit = digitone`) run through testplan, which hands their steps to digirun in a process of its own. `send` and `save-project` ask the same local write policy (a policy can tell a Digitone session by `session.unit`; there a test project is marked by its pattern A01's name); there is no `save-kit`. Batches run on digiemu too, at most 3 at a time, without setup snapshots | hardware: claim |
+| (Digitakt) | **Untested on hardware.** The Digitone's path, through digirun: steps, shot, expect_screen, data and `flash` on the unit. digiemu runs the Digitakt (mk1, OS 1.53) but has no USB MIDI for it yet, so there is no Digitakt emulator to start: `flash target emulator` (no `build`) runs digiemu's `emu.fwcheck`, which is the gate a hardware flash needs, and plans, which need an emulator pass, can't run on it yet. digihealth turns encoders on the Digitone only, so `turn` is refused; no `audio_record` (no Overbridge channel order known) and no Total Recall (obtr knows no Digitakt state types). digirun calls every session `digitone`, so a write policy marks a Digitakt test project by pattern A01 as well | hardware: claim |
+| data | the data store: `ls PATH` (`/` gives the roots) and `get PATH` (one object as Transfer stores it), through analogrun or digirun `data`, into the evidence folder; `put FILE` into PATH, `clear PATH` and `roundtrip PATH [to]` through analogrun `data` on every unit (the data store RPC is the same on the Digitone; on the Digitakt untried), so the local write policy is asked first, and a copy of what is replaced goes to the evidence folder | hardware: claim |
 | audio_record / audio_check | asio_tone / asio_rec into the evidence folder / audiocheck verdict | record: claim; check: offline |
-| recall_take / recall_restore | obtr.py through the running Overbridge Engine | claims on every unit (the Engine is shared); restore also a token. Never starts or restarts Overbridge |
+| recall_take / recall_restore | obtr.py through the running Overbridge Engine | claims on all three units (the Engine is shared); restore also a token. Never starts or restarts Overbridge |
 
 ## Practices
 How to run hardware tests safely, what elkbench enforces and what is left to the session:
@@ -116,6 +119,11 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
 Needs Windows or Linux (see Linux below) and Python 3.11 or newer (stdlib only; `tomllib`).
 The tools it wraps are separate: an analoghealth checkout for plans, steps and screens, elkflash (a checkout, or
 `pip install`ed) for flashing, an analog-emu build with `--usb-midi-tcp` for the emulators.
+For the Digitone and Digitakt, digihealth (`tools.digihealth`, for digirun) and digiemu
+(`tools.digiemu`) come from the `elkbench-support` branches of
+[Iced-Cream/digihealth](https://github.com/Iced-Cream/digihealth/tree/elkbench-support) and
+[Iced-Cream/digiemu](https://github.com/Iced-Cream/digiemu/tree/elkbench-support) until their
+pull requests are merged upstream (irpina/digihealth, irpina/digiemu).
 The audio scripts are bundled in `audio\` (see its README); `audio_check` needs a Python with
 numpy and scipy (`tools.audio_python`), and the optional picture tools there need Pillow.
 1. Clone this repo anywhere, say `C:\src\elkbench`.
@@ -149,7 +157,8 @@ The same steps, with Linux paths: the config is `~/.config/elkbench/config.toml`
   `audio_check`). Class-compliant USB audio gives the unit's main outputs; there are no
   per-track outputs without Overbridge. `asio_loop`, `wavein_rec` and `loopback` stay Windows only.
 - **Total Recall** is off: Elektron makes the Overbridge Engine for Windows and macOS only.
-- **The emulators**: an analog-emu build for Linux (`rytm`, `a4`).
+- **The emulators**: an analog-emu build for Linux (`rytm`, `a4`); digiemu runs directly
+  (`tools.digiemu_python` is just its Python).
 - **MIDI**: analoghealth and elkflash use mido / python-rtmidi there (`pip install mido
   python-rtmidi`).
 
@@ -158,8 +167,8 @@ reached over TCP from Linux. Not yet tried on Linux: a unit on USB, audio from a
 may work (the same POSIX code) but is untested.
 
 ## To do
-- Make the MCP the only way in for sessions: once it covers the data store and kit dumps, the
-  elklock Bash hook refuses raw device commands from sessions and
+- Make the MCP the only way in for sessions: once it covers the data store, kit dumps and
+  Digitone keys and plans, the elklock Bash hook refuses raw device commands from sessions and
   points to these tools. elklock stays its own process (claims survive a daemon restart;
   `--manual`, the pane and the hook use it).
 
@@ -170,7 +179,7 @@ touched. The plan tests need an analoghealth checkout (`ELKBENCH_TEST_ANALOGHEAL
 `tools.analoghealth` in your config) and are skipped without one. They cover MCP over stdio,
 two sessions and a busy claim, the token's one use and session binding, a dialog No, emulator
 twins sharing the key, release asking for stock and writing the handoff and log, steps rules,
-the emulator-flash gate and the Engine needing every unit's claim.
+the emulator-flash gate and the Engine needing all three claims.
 `audio\`: `python -m unittest test_audiocheck` there.
 
 ## Licence
@@ -183,5 +192,5 @@ be useful, but WITHOUT ANY WARRANTY; without even the implied warranty of
 MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
 License for more details: [LICENSE](LICENSE) holds version 2.
 
-Not affiliated with Elektron. Analog Rytm, Analog Four and Overbridge are
+Not affiliated with Elektron. Analog Rytm, Analog Four, Digitone, Digitakt and Overbridge are
 trademarks of Elektron.

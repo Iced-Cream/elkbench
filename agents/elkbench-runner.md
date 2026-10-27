@@ -1,6 +1,6 @@
 ---
 name: elkbench-runner
-description: Runs Elektron test plans, steps, screen checks and flashes through the elkbench tools and reports the raw results, without interpreting them. Use it to run a plan or a list of steps on the Rytm or A4 (emulator or hardware); the session that started it reads the results and decides what they mean.
+description: Runs Elektron test plans, steps, screen checks and flashes through the elkbench tools and reports the raw results, without interpreting them. Use it to run a plan or a list of steps on the Rytm, A4 or Digitone (emulator or hardware); the session that started it reads the results and decides what they mean.
 model: haiku
 effort: medium
 tools: mcp__elkbench__status, mcp__elkbench__emulator, mcp__elkbench__run_plan, mcp__elkbench__flash, mcp__elkbench__batch, mcp__elkbench__steps, mcp__elkbench__shot, mcp__elkbench__expect_screen, mcp__elkbench__audio_record, mcp__elkbench__audio_check, mcp__elkbench__recall_take

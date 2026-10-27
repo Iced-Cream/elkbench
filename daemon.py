@@ -8,7 +8,7 @@ asio_*, audiocheck.py), obtr.py and elklock.
 
 Rules it enforces:
 - every unit-touching tool refuses unless the calling session holds the unit's elklock claim
-  (Overbridge Total Recall: every unit, since the Engine is shared); emulator and offline
+  (Overbridge Total Recall: all three units, since the Engine is shared); emulator and offline
   tools need none;
 - writes on a unit go through analogrun, so a local write policy installed for analoghealth
   (writepolicy.py) applies; with require_write_policy, hardware tools refuse without one;
@@ -36,6 +36,7 @@ import shlex
 import shutil
 import socket
 import socketserver
+import struct
 import subprocess
 import sys
 import threading
@@ -62,6 +63,9 @@ PLAN_FORMATS = ('1',)                   # `format = N` in a plan; none means 1
 APPROVAL_TTL = 2 * 3600
 DIALOG_TIMEOUT = 30 * 60
 SNAPSHOT_DAYS, SNAPSHOT_MAX = 7, 20             # setup snapshots: unused days, how many at most
+OB_CHANNELS = ('Main L', 'Main R', 'Track 1 L', 'Track 1 R', 'Track 2 L', 'Track 2 R', 'Track 3 L',
+               'Track 3 R', 'Track 4 L', 'Track 4 R', 'Input L', 'Input R')   # the Digitone's Overbridge order
+DIGI_PARALLEL_MAX = 3                          # digiemu runs one batch may have going at once
 STATUS_WAIT, STATUS_WAIT_MAX = 300, 600     # s that status run_id waits for a run to end
 IDLE_EXIT = 30 * 60
 # What the units are; config.toml can override any key, and adds where evidence goes.
@@ -72,8 +76,28 @@ UNIT_FACTS = {
     'a4': dict(port='Analog Four', emu='a4-emu usb out,a4-emu usb in', emu_exe='a4' + EXE,
                asio='Elektron Analog Four MKII', engine='Analog Four', runner=True, stock=[], no_stats=[],
                din=None),
+    'digitone': dict(port='Digitone', emu='digiemu', asio='Elektron Digitone', engine='Digitone',
+                     runner='digirun', stock=[], no_stats=[], din=None,   # digirun: steps and screens, no plans
+                     emulator='digiemu'),              # digiemu over TCP; without a build, emu.fwcheck
+    # Untested on hardware. digirun drives it as it does the Digitone; digiemu has no Digitakt
+    # USB MIDI yet, so there is no emulator to start and the flash gate is emu.fwcheck alone.
+    # digihealth turns encoders on the Digitone only; no Overbridge audio name or Total Recall.
+    'digitakt': dict(port='Digitakt', emu=None, asio=None, engine=None, runner='digirun', stock=[],
+                     no_stats=[], din=None, emulator='fwcheck', no_steps=['turn']),
 }
 DATA_OPS = ('ls', 'get', 'put', 'clear', 'roundtrip')
+# Digitone (digirun) steps that do not exist: no key-driven kit save, as a test project there is
+# marked by its pattern A01, not a kit. send and save-project ask the write policy as analogrun does.
+# capture and ping are analogrun's alone so far.
+DIGI_NO_STEPS = {'save-kit', 'capture', 'ping'}
+
+
+def no_steps(unit):
+    """The steps `unit`'s runner lacks: digirun's gaps, and any the unit's facts add."""
+    u = UNITS.get(unit) or {}
+    return (DIGI_NO_STEPS if u.get('runner') == 'digirun' else set()) | set(u.get('no_steps') or ())
+
+
 STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'wait', 'stats',
             'dump', 'send', 'capture', 'ping', 'save-project', 'save-kit', 'say'}
 
@@ -165,8 +189,8 @@ def load_config(path=CONFIG):
     return dict(
         person=c.get('person') or 'the person at this PC',
         elklock=t.get('elklock') or os.path.join(HERE, 'elklock', 'elklock.py'),
-        analoghealth=t.get('analoghealth'),
-        analog_emu=t.get('analog_emu'), elkflash=t.get('elkflash'), usb_audio=t.get('usb_audio') or os.path.join(HERE, 'audio'),
+        analoghealth=t.get('analoghealth'), digihealth=t.get('digihealth'),
+        analog_emu=t.get('analog_emu'), digiemu=t.get('digiemu'), digiemu_python=t.get('digiemu_python') or [sys.executable], elkflash=t.get('elkflash'), usb_audio=t.get('usb_audio') or os.path.join(HERE, 'audio'),
         obtr=os.path.join(HERE, 'obtr.py'), audio_python=t.get('audio_python') or [sys.executable],
         approval_fallback=c.get('approval_fallback') or 'popup',
         batch_slots=int(c.get('batch_max_emulators') or batch.SLOTS_DEFAULT),
@@ -183,7 +207,10 @@ if FALLBACK not in ('popup', 'thread', 'both'):
 ELKLOCK = CFG['elklock']
 ANALOGHEALTH = CFG['analoghealth']
 RUNNER = os.path.join(ANALOGHEALTH, 'tools', 'analogrun.py') if ANALOGHEALTH else None
+DIGIHEALTH = CFG['digihealth']            # a digihealth tree with tools/digirun.py (Digitone)
 ANALOG_EMU = CFG['analog_emu']            # folder with analog-emu's rytm.exe and a4.exe
+DIGIEMU = CFG['digiemu']                  # a digiemu checkout (emu.fwcheck)
+DIGIEMU_PY = CFG['digiemu_python']        # its Python; ['wsl', '~/venv/bin/python'] runs it in WSL
 ELKFLASH = CFG['elkflash']                # a checkout to run `-m elkflash` in, or None: installed
 USB_AUDIO = CFG['usb_audio']
 OBTR = CFG['obtr']
@@ -194,6 +221,10 @@ batch.set_slots(CFG['batch_slots'])      # emulators all batches on this PC may 
 sys.path[:0] = [os.path.dirname(ELKLOCK)] + ([os.path.join(ANALOGHEALTH, 'tools')] if ANALOGHEALTH else [])
 import elklock    # noqa: E402
 testplan = None
+
+
+class Path(str):
+    """A local path in a command that may run in WSL (digiemu_cmd converts it)."""
 
 
 def need(value, key, what):
@@ -372,7 +403,7 @@ class Daemon:
     def unit(self, name, need_runner=False):
         if name not in UNITS:
             raise Refused('unknown unit %r (%s)' % (name, ', '.join(UNITS)))
-        have = UNITS[name]['runner']     # True: analogrun (plans too)
+        have = UNITS[name]['runner']     # True: analogrun (plans too); 'digirun': steps and screens
         if need_runner is True and have is not True:
             raise Refused('test plans run on the Rytm and A4 only so far; use steps and '
                           'expect_screen on the %s' % name)
@@ -439,18 +470,19 @@ class Daemon:
             self.stop_emulator(mine)
         lines = self.t_emulator(s, {'action': 'start', 'unit': unit, 'build': build}, snapshot)
         addr = self.emu_port(s, unit)
-        # analog-emu's port listens before the OS boots: a flash sent at once got no reply
-        # to its first command. Wait until the OS answers Ping.
-        for _ in range(30):
-            try:
-                r = subprocess.run([sys.executable, '-m', 'elkflash', 'info', '--port', addr,
-                                    '--timeout', '1'], cwd=ELKFLASH, capture_output=True,
-                                   timeout=10, **NOWIN)
-                if r.returncode == 0:
-                    break
-            except subprocess.TimeoutExpired:
-                pass
-            time.sleep(1)
+        if UNITS[unit].get('emulator') != 'digiemu':   # digiemu_start waits for its OS itself
+            # analog-emu's port listens before the OS boots: a flash sent at once got no reply
+            # to its first command. Wait until the OS answers Ping.
+            for _ in range(30):
+                try:
+                    r = subprocess.run([sys.executable, '-m', 'elkflash', 'info', '--port', addr,
+                                        '--timeout', '1'], cwd=ELKFLASH, capture_output=True,
+                                       timeout=10, **NOWIN)
+                    if r.returncode == 0:
+                        break
+                except subprocess.TimeoutExpired:
+                    pass
+                time.sleep(1)
         return addr, lines[:1]
 
     def check_connected(self, unit, target):
@@ -533,6 +565,12 @@ class Daemon:
         rel = lambda p: os.path.normpath(p if os.path.isabs(p) else os.path.join(here, p))
         unit = settings.get('unit', 'rytm')
         self.unit(unit, need_runner='plan')
+        if UNITS[unit]['runner'] == 'digirun':
+            need(DIGIHEALTH, 'digihealth', 'the Digitone/Digitakt runner (digihealth)')
+            bad = sorted({l.split()[0].lower() for _, lines in steps for l in lines if l.split()}
+                         & no_steps(unit))
+            if bad:
+                raise Refused('a %s plan cannot %s (digirun has no such steps there)' % (unit, ', '.join(bad)))
         din = din_steps([l for _, lines in steps for l in lines])
         if din and UNITS[unit]['runner'] is not True:
             raise Refused('%s: DIN steps run on the Rytm and A4 only so far' % din[0])
@@ -693,6 +731,8 @@ class Daemon:
                     # A plan's `listen` step writes ANALOGRUN_LISTEN_FILE and waits until it is
                     # gone: listen_done removes it once the person has said they have finished.
                     env = dict(job.sess.env(), ANALOGRUN_LISTEN_FILE=job.listen_file)
+                    if DIGIHEALTH:                # testplan finds digirun.py for Digitone plans here
+                        env['DIGIRUN_PATH'] = os.path.join(DIGIHEALTH, 'tools')
                     if job.target == 'hardware':
                         threading.Thread(target=self.watch_listen, args=(job,), daemon=True).start()
                     # cmd is one command, or stages: commands and callables (rc, out) -> (rc,
@@ -1177,7 +1217,8 @@ class Daemon:
 
     def t_emulator(self, s, a, snapshot=None):
         """Start, stop or list the emulators: always headless (no window) and each session its
-        own, its USB MIDI port on a TCP port of its own (analog-emu --usb-midi-tcp), so emulators need no loopMIDI and never queue for one another."""
+        own, its USB MIDI port on a TCP port of its own (analog-emu --usb-midi-tcp, digiemu's
+        usbrun), so emulators need no loopMIDI and never queue for one another."""
         act = a.get('action') or 'status'
         if act == 'status':
             out = []
@@ -1191,7 +1232,10 @@ class Daemon:
                     out.append('%s emulator pid %d started outside elkbench (loopMIDI ports)' % (u, pid))
             return ['ok: %d emulator(s) running' % len(out)] + out
         u = self.unit(a.get('unit'))
-        if not u.get('emu_exe'):
+        if u.get('emulator') == 'fwcheck':
+            raise Refused('there is no %s emulator with USB MIDI yet: flash target emulator (no build) '
+                          'runs digiemu\'s emu.fwcheck as the gate' % a['unit'])
+        if not u.get('emu_exe') and u.get('emulator') != 'digiemu':
             raise Refused('there is no %s emulator' % a['unit'])
         mine = self.emulators.get((s.sid, a['unit']))
         if act == 'stop':
@@ -1205,6 +1249,8 @@ class Daemon:
             raise Refused('this session already runs a %s emulator on %s; stop it first'
                           % (a['unit'], mine['address']))
         minutes = min(max(int(a.get('minutes') or 60), 1), 240)
+        if u.get('emulator') == 'digiemu':
+            return self.digiemu_start(s, a['unit'], a.get('build'), minutes)
         exe =os.path.join(need(ANALOG_EMU, 'analog_emu', 'the analog-emu emulators'), u['emu_exe'])
         work =os.path.join(STATE, 'emulators', '%s-%s' % (a['unit'], s.sid[:8]))
         os.makedirs(work, exist_ok=True)
@@ -1278,11 +1324,117 @@ class Daemon:
                                  'as the plans do'])
 
     def stop_emulator(self, e):
+        if e.get('wsl_tag'):              # stop it inside WSL first, so it cleans up its work folder
+            subprocess.run(['wsl', '-e', 'pkill', '-f', 'digiemu_usb.py .* %s( |$)' % e['wsl_tag']],
+                           capture_output=True, timeout=20, **NOWIN)
+            try:
+                e['proc'].wait(20)
+            except subprocess.TimeoutExpired:
+                pass
         e['proc'].terminate()
         try:
             e['proc'].wait(10)
         except subprocess.TimeoutExpired:
             e['proc'].kill()
+
+    def digiemu_cmd(self, args):
+        """digiemu's Python running `args` in the digiemu checkout -> (command, path converter).
+        digiemu_python = ['wsl', PY] runs it in WSL, with Windows paths as /mnt/<drive>/..."""
+        repo = need(DIGIEMU, 'digiemu', 'the Digitone emulator (digiemu)')
+        wsl = DIGIEMU_PY[:1] == ['wsl']
+        conv = (lambda p: '/mnt/%s%s' % (p[0].lower(), p[2:].replace('\\', '/'))) if wsl else (lambda p: p)
+        args = [conv(x) if isinstance(x, Path) else x for x in args]
+        if wsl:
+            return ['wsl', '-e', 'bash', '-lc', 'cd %s && %s %s' % (
+                shlex.quote(conv(repo)), ' '.join(DIGIEMU_PY[1:]), ' '.join(shlex.quote(x) for x in args))]
+        return DIGIEMU_PY + args
+
+    def digiemu_start(self, s, unit, build, minutes):
+        """The Digitone emulator: digiemu boots `build` headless (digiemu_usb.py: set up once,
+        then a work folder per session), its USB MIDI link on a TCP port of its own."""
+        need(DIGIEMU, 'digiemu', 'the Digitone emulator (digiemu)')
+        build = os.path.abspath(build or '')
+        if not os.path.isfile(build) or not build.lower().endswith('.syx'):
+            raise Refused('build is the OS .syx to boot')
+        tag = '%s-%s' % (unit, s.sid[:8])
+        work = os.path.join(STATE, 'emulators', tag)
+        os.makedirs(work, exist_ok=True)
+        # OS files flashed into it: its reboot boots one. In the evidence folder, not under STATE:
+        # the Claude app's LocalAppData is virtualized, so WSL would not see them there
+        firmware = os.path.join(s.folder(unit), 'firmware')
+        e, text = self.digiemu_launch(build, minutes, tag, work, firmware,
+                                      lambda e: self.emulators.__setitem__((s.sid, unit), dict(e, session=s.sid)))
+        e = self.emulators[(s.sid, unit)]
+        fresh = 'already set up' not in text
+        return ['ok: digitone emulator running headless on %s, USB MIDI at %s (%s), ends by '
+                'itself after %d min' % (os.path.basename(build), e['address'],
+                                         'first boot of this build' if fresh else 'its settled boot', minutes)]
+
+    def digiemu_has_ob_audio(self):
+        """Whether this digiemu's usbrun serves Overbridge audio (--ob-audio-port)."""
+        try:
+            with open(os.path.join(DIGIEMU, 'tools', 'usbrun.py'), encoding='utf-8', errors='replace') as fh:
+                return '--ob-audio-port' in fh.read()
+        except OSError:
+            return False
+
+    def digiemu_launch(self, build, minutes, tag, work, firmware, started=None):
+        """digiemu_usb.py booting `build` (work folder `tag` in WSL), its link on a free port,
+        until its OS answers -> (emulator dict, its log text). `firmware` (WSL must see it) gets
+        the OS files flashed into it; started(e) runs as soon as the process is up. Refused, with
+        the emulator stopped, when it does not come up."""
+        with socket.socket() as probe:               # a free local port for its USB MIDI link
+            probe.bind(('127.0.0.1', 0))
+            tcp = probe.getsockname()[1]
+        ob = None
+        if self.digiemu_has_ob_audio():
+            with socket.socket() as probe:           # and one for its Overbridge audio
+                probe.bind(('127.0.0.1', 0))
+                ob = probe.getsockname()[1]
+        shutil.rmtree(firmware, ignore_errors=True)
+        os.makedirs(firmware)
+        cmd = self.digiemu_cmd([Path(os.path.join(HERE, 'digiemu_usb.py')), Path(DIGIEMU), Path(build),
+                                str(tcp), str(minutes), tag, '--firmware-dir', Path(firmware)]
+                               + (['--ob-audio-port', str(ob)] if ob else []))
+        log_path = os.path.join(work, 'emulator.log')
+        log = open(log_path, 'w', encoding='utf-8')
+        proc = subprocess.Popen(cmd, cwd=work, stdout=log, stderr=subprocess.STDOUT, **NOWIN)
+        e = dict(proc=proc, build=os.path.basename(build), sha=sha256(build),
+                 address='tcp:127.0.0.1:%d' % tcp,
+                 wsl_tag=tag if cmd[0] == 'wsl' else None, firmware=firmware, ob_audio=ob)
+        if started:
+            started(e)
+        text, end = '', time.time() + 300            # a build seen for the first time boots first
+        while proc.poll() is None and time.time() < end and '[usbrun] USB MIDI link on' not in text:
+            time.sleep(0.5)
+            with open(log_path, encoding='utf-8', errors='replace') as fh:
+                text = fh.read()
+        if '[usbrun] USB MIDI link on' in text:
+            for _ in range(20):                      # WSL forwards the port to Windows a moment later
+                try:
+                    socket.create_connection(('127.0.0.1', tcp), timeout=1).close()
+                    break
+                except OSError:
+                    time.sleep(0.5)
+            else:
+                text = ''
+        if text and DIGIHEALTH and os.path.exists(DIGIHEALTH):
+            script = os.path.join(DIGIHEALTH, 'tools', 'digirun.py')
+            for _ in range(12):                      # the OS answers its RPC a moment after the link
+                try:
+                    r = subprocess.run([sys.executable, script, '--port', e['address'], 'info'],
+                                       cwd=os.path.dirname(script), capture_output=True, text=True, timeout=5,
+                                       **NOWIN)
+                    if r.returncode == 0:
+                        break
+                except subprocess.TimeoutExpired:   # a first connection through WSL's forwarding can stall
+                    pass
+                time.sleep(1)
+        if proc.poll() is not None or '[usbrun] USB MIDI link on' not in text:
+            self.stop_emulator(e)
+            last = [l for l in text.splitlines() if l.strip()][-1:] or ['no output']
+            raise Refused('the Digitone emulator did not start (%s): see %s' % (last[0].strip(), log_path))
+        return e, text
 
     def setup_snapshot(self, s, info, a):
         """-> dict(key, store, live, have) when this emulator run can use a setup snapshot: a
@@ -1290,7 +1442,8 @@ class Daemon:
         recording references. `live` is the emulator's own copy (a stored one copied in to
         resume, or where `save` writes a new one)."""
         if not (info['setup'] and a.get('build') and not info['emulator'] and not info['flash']
-                and not a.get('record_refs') and UNITS[info['unit']].get('emu_exe')):
+                and not a.get('record_refs') and UNITS[info['unit']].get('emu_exe')
+                and UNITS[info['unit']].get('emulator') != 'digiemu'):
             return None
         if not self.emu_has_snapshots(info['unit']):
             return None
@@ -1515,6 +1668,9 @@ class Daemon:
             addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'])
             din = self.din_args(s, unit, tgt, [l for _, ls in info['steps'] for l in ls])
             port = self.busy_port('%s@%s' % (unit, addr), tgt)
+            emu = self.emulators.get((s.sid, unit)) or {}
+            if info['flash'] and emu.get('firmware'):  # digiemu reboots from the file the flash was written from
+                shutil.copyfile(info['flash'], os.path.join(emu['firmware'], os.path.basename(info['flash'])))
             if snap:
                 cmd = self.snapshot_stages(s, info, snap, addr, started, din)
             else:
@@ -1599,9 +1755,16 @@ class Daemon:
                 self.give_back(a.get('approval'), item)
                 raise
             cmd = [sys.executable, ELKLOCK, 'run', a['unit'], '--'] + base + ['--port', u['port']] + tail
+        elif (u.get('emulator') in ('digiemu', 'fwcheck') and not a.get('build')
+              and not self.emu_running(s, a['unit'])):
+            return self.digiemu_check(s, a['unit'], img, d, folder)
         else:
             addr, started = self.emu_ready(s, a['unit'], a.get('build'))
             port = self.busy_port('%s@%s' % (a['unit'], addr), tgt)
+            emu = self.emulators[(s.sid, a['unit'])]
+            if emu.get('firmware'):                 # digiemu reboots from the file the flash was written from
+                shutil.copyfile(img, os.path.join(emu['firmware'], os.path.basename(img)))
+                tail = tail + ['--wait-timeout', '400']       # a reboot is a cold boot and a settle
             if addr.startswith('tcp:'):
                 cmd = base + ['--port', addr] + tail
             else:
@@ -1648,9 +1811,48 @@ class Daemon:
 
         return (started if tgt == 'emulator' else []) + self.start(job, cmd, ELKFLASH, done, port)
 
+    def digiemu_check(self, s, unit, img, digest, folder):
+        """The Digitone's emulator gate: digiemu's own firmware check (emu.fwcheck: the
+        container, the bootstrap finding and unpacking the OS from flash, a cold boot under
+        strict mode, a scripted run), compared with the stock build, when the flash gives no
+        build to upgrade from; a pass is recorded as this file's emulator pass. With a build
+        (or a running Digitone emulator), elkflash upgrades the emulator over USB instead."""
+        repo = need(DIGIEMU, 'digiemu', 'the Digitone/Digitakt emulator check (digiemu)')
+        out = os.path.join(folder, 'fwcheck-%s-%s' % (os.path.splitext(os.path.basename(img))[0], digest[:8]))
+        stock = next((p for p in UNITS[unit]['stock'] if os.path.isfile(p) and sha256(p) != digest), None)
+        args = ['-m', 'emu.fwcheck', Path(img), '--out', Path(out), '--no-timing']
+        if stock:
+            args += ['--baseline', Path(stock)]
+        cmd = self.digiemu_cmd(args)
+        port = self.busy_port(unit, 'emulator')
+        job = Job(s, 'flash', unit, 'emulator', 'fwcheck ' + os.path.basename(img))
+
+        def done(job, rc, out_text):
+            lines = [l.strip() for l in out_text.splitlines() if l.strip()]
+            job.state = 'pass' if rc == 0 else 'fail'
+            summary = read_json(os.path.join(out, 'report.json'), {}).get('summary') or lines[-6:]
+            ref = next((i for i, l in enumerate(summary) if l.startswith('stock build')), len(summary))
+            # the build's own verdict and the comparison; the stock build's run is only a reference
+            job.lines = [l for l in summary[:ref] if not l.strip().startswith(('!', 'snap'))][:10]
+            if ref < len(summary):
+                job.lines.append(summary[ref] + ' (its quirks do not count against the build)')
+            job.lines.append('report: %s' % os.path.join(out, 'report.json'))
+            shutil.rmtree(os.path.join(out, 'work'), ignore_errors=True)    # over a gigabyte per build
+            if rc == 0:
+                self.record_pass('flash:%s:%s' % (unit, digest), {'image': img, 'unit': unit,
+                                                                  'fwcheck': out})
+                job.lines.append('recorded as the emulator pass for this file (digiemu fwcheck%s)'
+                                 % (' against stock' if stock else ''))
+
+        return self.start(job, cmd, repo, done, port)
+
     def device_do(self, s, unit, tgt, steps, timeout=180, need='steps'):
-        """analogrun do STEPS on the unit or its emulator -> (ok, one line, folder)."""
+        """analogrun (or digirun) do STEPS on the unit or its emulator -> (ok, one line, folder)."""
         self.unit(unit, need_runner=need)
+        if UNITS[unit]['runner'] == 'digirun':
+            if din_steps(steps.split(';')):
+                raise Refused('DIN steps (send/capture ... din) run on the Rytm and A4 only so far')
+            return self.digirun_do(s, unit, tgt, steps, timeout)
         runner()
         if tgt == 'hardware':
             self.check_hardware(s, [unit])
@@ -1684,6 +1886,36 @@ class Daemon:
         finally:
             port.release()
 
+    def digirun_do(self, s, unit, tgt, steps, timeout):
+        """digihealth's digirun.py do STEPS (no quiet mode: its output goes to steps.log here)."""
+        script = os.path.join(need(DIGIHEALTH, 'digihealth', 'the Digitone/Digitakt runner (digihealth)'),
+                              'tools', 'digirun.py')
+        if tgt == 'hardware':
+            self.check_hardware(s, [unit])
+            self.check_connected(unit, tgt)
+            where = UNITS[unit]['port']
+            port = self.busy_port(unit, tgt)
+        else:
+            where = self.emu_port(s, unit)           # digiemu's USB MIDI link (digirun --port tcp:)
+            port = self.busy_port('%s@%s' % (unit, where), tgt)
+        folder = s.folder(unit)
+        try:
+            cmd = [sys.executable, script, '--port', where, 'do', steps, '--out', folder]
+            if tgt == 'hardware':
+                cmd = [sys.executable, ELKLOCK, 'run', unit, '--'] + cmd
+            r = subprocess.run(cmd, cwd=os.path.dirname(script), env=s.env(), capture_output=True,
+                               text=True, timeout=timeout, **NOWIN)
+            with open(os.path.join(folder, 'steps.log'), 'a', encoding='utf-8') as fh:
+                fh.write('$ digirun do %s\n%s%s' % (steps, r.stdout, r.stderr))
+            lines = [l.strip() for l in (r.stdout + r.stderr).splitlines() if l.strip()]
+            if r.returncode:
+                return False, lines[-1] if lines else 'exit %d' % r.returncode, folder
+            said = [l.strip() for l in r.stdout.splitlines() if re.match(r'  \D', l)]
+            return True, '%d step(s) done%s' % (steps.count(';') + 1,
+                                                ''.join('\n  ' + l for l in said[-4:])), folder
+        finally:
+            port.release()
+
     def t_steps(self, s, a):
         tgt = self.target(a.get('target'))
         text = a.get('steps', '')
@@ -1697,7 +1929,7 @@ class Daemon:
             if not w:
                 continue
             op = w[0].lower()
-            allowed = STEP_OPS
+            allowed = STEP_OPS - no_steps(a.get('unit'))
             if op not in allowed:
                 raise Refused('step %r is not allowed here (allowed: %s; screens: expect_screen)'
                               % (op, ', '.join(sorted(allowed))))
@@ -1766,8 +1998,9 @@ class Daemon:
 
     def t_data(self, s, a):
         """The data store on the unit or its emulator, into or from the evidence folder: ls and
-        get, and put, clear and roundtrip through analogrun's `data`, which asks the local write
-        policy first and keeps a copy of what it replaces."""
+        get (analogrun, or digirun on the Digitone), and put, clear and roundtrip through
+        analogrun's `data`, which asks the local write policy first (on the Digitone too: the
+        data store RPC is the same) and keeps a copy of what it replaces."""
         tgt = self.target(a.get('target'))
         op = a.get('op')
         path = a.get('path') or ''
@@ -1779,7 +2012,11 @@ class Daemon:
         write = op in ('put', 'clear', 'roundtrip')
         if a.get('to') and op != 'roundtrip':
             raise Refused('to is for roundtrip')
-        script = runner()
+        if u['runner'] == 'digirun' and not write:
+            script = os.path.join(need(DIGIHEALTH, 'digihealth', 'the Digitone/Digitakt runner (digihealth)'),
+                                  'tools', 'digirun.py')
+        else:
+            script = runner()
         slug = re.sub(r'[^\w-]+', '_', path.strip('/'))[:40] or 'root'
         now = time.strftime('%H%M%S')
         folder = s.folder(a['unit'])
@@ -1838,7 +2075,54 @@ class Daemon:
         return ['ok: %d line(s) for %s%s' % (len(lines), path, ', the first 40:' if cut else ':')] + \
             ['  ' + l for l in lines[:40]] + ['listing: %s' % out]
 
+    def emu_audio_record(self, s, a):
+        """The Digitone emulator's twelve Overbridge channels (digiemu's --ob-audio-port:
+        frames of 12 big-endian int32 at 48 kHz) into a 32-bit float WAV, as asio_rec
+        writes one, with its .channels.txt."""
+        unit = a.get('unit')
+        e = self.emulators.get((s.sid, unit)) or {}
+        if not e or e['proc'].poll() is not None:
+            raise Refused('no %s emulator of this session is running: emulator start first' % unit)
+        if not e.get('ob_audio'):
+            raise Refused('this %s emulator gives no audio (its digiemu has no --ob-audio-port)' % unit)
+        if a.get('tone'):
+            raise Refused('the emulator has no audio input to play a tone into')
+        secs = float(a.get('seconds') or 0)
+        if not 0 < secs <= 120:
+            raise Refused('seconds is 1..120')
+        name = a.get('name') or 'rec-%s' % time.strftime('%H%M%S')
+        if re.search(r'[\\/:]', name):
+            raise Refused('name is a bare file name')
+        wav = os.path.join(s.folder(unit), name if name.endswith('.wav') else name + '.wav')
+        frames, want = 12 * 4, int(secs * 48000)
+        data = bytearray()
+        try:
+            with socket.create_connection(('127.0.0.1', e['ob_audio']), timeout=10) as sock:
+                sock.settimeout(30)                  # the emulator may run slower than real time
+                while len(data) < want * frames:
+                    got = sock.recv(1 << 16)
+                    if not got:
+                        break
+                    data += got
+        except OSError as exc:
+            raise Refused('the emulator\'s audio link: %s' % exc)
+        n = min(len(data) // frames, want)
+        samples = struct.unpack('>%di' % (n * 12), bytes(data[:n * frames]))
+        body = struct.pack('<%df' % len(samples), *(v / 2147483648.0 for v in samples))
+        with open(wav, 'wb') as fh:
+            fh.write(b'RIFF' + struct.pack('<I', 36 + len(body)) + b'WAVEfmt ' +
+                     struct.pack('<IHHIIHH', 16, 3, 12, 48000, 48000 * 48, 48, 32) +
+                     b'data' + struct.pack('<I', len(body)) + body)
+        with open(os.path.splitext(wav)[0] + '.channels.txt', 'w', encoding='utf-8') as fh:
+            fh.write('\n'.join(OB_CHANNELS) + '\n')
+        peaks = [max((abs(v) for v in samples[c::12]), default=0) / 2147483648.0 for c in range(12)]
+        loud = ['%s %.3f' % (OB_CHANNELS[c], p) for c, p in enumerate(peaks) if p > 0.001]
+        return ['%s: %s (%.2f s, 12 channels)' % ('ok' if n == want else 'fail', wav, n / 48000.0),
+                'peaks: %s' % (', '.join(loud) or 'all silent')]
+
     def t_audio_record(self, s, a):
+        if self.target(a.get('target') or 'hardware') == 'emulator':
+            return self.emu_audio_record(s, a)
         u = self.unit(a.get('unit'))
         need(USB_AUDIO, 'usb_audio', 'audio recording')
         if not u['asio']:
@@ -1983,7 +2267,16 @@ class Daemon:
             raise Refused('every variant runs on one unit' if flash or len(units) > 1 else 'give unit')
         unit = units.pop()
         u = self.unit(unit)
-        if not u.get('emu_exe'):
+        digi = u.get('emulator') == 'digiemu'
+        if digi:
+            # each run copies a settled card (~300 MB) and boots digiemu in WSL: a few at a time
+            need(DIGIEMU, 'digiemu', 'the Digitone emulator (digiemu)')
+            if not a.get('parallel'):
+                parallel = min(parallel, DIGI_PARALLEL_MAX)
+            if parallel > DIGI_PARALLEL_MAX:
+                raise Refused('Digitone batches run at most %d at a time (each digiemu copies ~300 MB '
+                              'and takes a CPU core)' % DIGI_PARALLEL_MAX)
+        elif not u.get('emu_exe'):
             raise Refused('no emulator for %s' % unit)
         else:
             need(ANALOG_EMU, 'analog_emu', 'the analog-emu emulators')
@@ -1992,6 +2285,8 @@ class Daemon:
         if not flash and any(v['info']['din'] for v in variants) and not self.emu_has_din(unit):
             raise Refused(self.no_emu_din(unit))
         snapshot = bool(a.get('snapshot'))
+        if snapshot and digi:
+            raise Refused('no setup snapshots on the Digitone emulator (digiemu resumes only its settled boot)')
         if snapshot:
             # Every resumed run starts at the same emulated moment: for steps whose timing does not
             # matter, never to measure something timing-dependent (that is why it is off by default)
@@ -2058,7 +2353,15 @@ class Daemon:
         """A fresh headless emulator of `build` for one batch run, in `work`, on a port of its own;
         with `snapshot`, resuming that file (or, if it does not exist, saving to it on `save`);
         with `din`, its DIN MIDI on a port of its own too. -> (proc, address, None, DIN address or
-        None), or (proc or None, None, why, None) when it did not come up."""
+        None), or (proc or None, None, why, None) when it did not come up. For the Digitone, proc
+        is digiemu's emulator dict (end_emulator stops either)."""
+        if UNITS[unit].get('emulator') == 'digiemu':
+            try:
+                e, _ = self.digiemu_launch(build, minutes, 'b-%s' % hashlib.sha256(work.encode()).hexdigest()[:12],
+                                           work, os.path.join(work, 'firmware'))
+            except Refused as why:
+                return None, None, str(why), None
+            return e, e['address'], None, None
         exe = os.path.join(ANALOG_EMU, UNITS[unit]['emu_exe'])
         cmd = [exe, build, '--flash', os.path.join(work, 'flash.img'), '--no-audio', '--headless',
                '--no-midi', '--after', str(minutes * 60 + 120)]
@@ -2102,7 +2405,9 @@ class Daemon:
         return proc, None, 'the emulator\'s OS never answered', None
 
     def end_emulator(self, proc):
-        if proc:
+        if isinstance(proc, dict):                # a Digitone emulator: stop it inside WSL too
+            self.stop_emulator(proc)
+        elif proc:
             proc.terminate()
             try:
                 proc.wait(10)
@@ -2196,18 +2501,24 @@ class Daemon:
         try:
             if why:
                 return dict(outcome='error', line=why, folder=work)
+            image = v['image'] if flash else v['info']['flash']
+            if isinstance(proc, dict) and image:       # digiemu reboots from the file the flash was written from
+                shutil.copyfile(image, os.path.join(proc['firmware'], os.path.basename(image)))
             if flash:
                 cmd, cwd = [sys.executable, '-m', 'elkflash', 'upgrade', v['image'], '--port', addr, '--yes',
                             '--no-confirm', '--wait', '--quiet', '--log', os.path.join(work, 'elkflash.log'),
                             '--screenshot', os.path.join(work, 'after.png')], ELKFLASH
+                if isinstance(proc, dict):
+                    cmd += ['--wait-timeout', '400']     # a reboot is a cold boot and a settle
             else:
                 info = v['info']
                 plan = self.batch_plan(info, work, 'batch run %d' % n,
                                        sections=info['steps'][info['setup']:] if snap else None)
                 cmd, cwd = [sys.executable, RUNNER, '--port', addr] + (['--din', din] if din else []) + [
                     '--quiet', 'run', plan], ANALOGHEALTH
+            env = dict(s.env(), **({'DIGIRUN_PATH': os.path.join(DIGIHEALTH, 'tools')} if DIGIHEALTH else {}))
             try:
-                p = subprocess.run(cmd, cwd=cwd, env=s.env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                p = subprocess.run(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                    text=True, encoding='utf-8', errors='replace', timeout=minutes * 60, **NOWIN)
             except subprocess.TimeoutExpired:
                 return dict(outcome='hang', line='no end after %d min' % minutes, folder=work)
@@ -2263,9 +2574,9 @@ EMU_BUILD = lambda: {'type': 'string', 'description': 'emulator only: boot a fre
                                                      '.syx first (replaces yours), instead of an emulator call'}
 TOOLS = [
     ('claim', 'Claim units through elklock before any hardware call (prints the last handoff). '
-              'Overbridge Total Recall needs all of them.',
+              'Overbridge Total Recall needs all three.',
      S(unit={'type': ['string', 'array'], 'items': {'type': 'string'}, 'req': True,
-             'description': 'rytm, a4, all, or a list'},
+             'description': 'rytm, a4, digitone, digitakt, all, or a list'},
        purpose={'type': 'string', 'req': True}, wait_minutes={'type': 'integer', 'description': '0-10, queue for a busy unit'})),
     ('release', 'Release units: writes the elklock handoff note and a test-log row in the unit\'s runs folder. '
                 'Asks for the stock OS back first.',
@@ -2299,10 +2610,11 @@ TOOLS = [
                     'in the thread that they have finished: pass the id of that reply. Without one, '
                     'the client asks them.' % PERSON,
      S(unit=UNIT(), message_id={'type': 'string', 'description': 'the id or link of their "finished" reply'})),
-    ('emulator', 'Start, stop or list the emulators (analog-emu for the Rytm / A4), always headless with their USB MIDI ports, on a fresh card copy; they end by '
+    ('emulator', 'Start, stop or list the emulators (analog-emu for the Rytm / A4, digiemu for the '
+                 'Digitone), always headless with their USB MIDI ports, on a fresh card copy; they end by '
                  'themselves. Start one before any target emulator call; one per unit.',
      S(action={'type': 'string', 'enum': ['start', 'stop', 'status'], 'req': True},
-       unit={'type': 'string', 'enum': ['rytm', 'a4']},
+       unit={'type': 'string', 'enum': ['rytm', 'a4', 'digitone']},
        build={'type': 'string', 'description': 'the OS .syx to boot (start); leave out with keep_flash'},
        minutes={'type': 'integer', 'description': 'how long it runs, 1-240 (default 60)'},
        card={'type': 'string', 'description': 'card image to copy (default: the configured one)'},
@@ -2317,7 +2629,7 @@ TOOLS = [
               'Hardware: claim, a passing emulator flash of the same file, and an approval token.',
      S(unit=UNIT(), image={'type': 'string', 'req': True}, target=TARGET(), approval={'type': 'string'},
        build=EMU_BUILD())),
-    ('batch', 'Emulator only (Rytm, A4): run a plan or a flash many times across variants, each run on a '
+    ('batch', 'Emulator only (Rytm, A4, Digitone at most 3 at a time): run a plan or a flash many times across variants, each run on a '
               'fresh emulator of its own, a few at a time, round by round in shuffled order; returns a '
               'run_id. status gives progress, then a line per variant (pass count, 95% range), Fisher p '
               'against the first variant and the first failures; per-run detail stays in results.jsonl. '
@@ -2330,7 +2642,7 @@ TOOLS = [
                      'plan': {'type': 'string', 'description': 'plan batches: the plan file'}}}},
        plan={'type': 'string', 'description': 'the plan every variant runs (unless it names its own)'},
        image={'type': 'string', 'description': 'the OS .syx every variant flashes (unless it names its own)'},
-       unit={'type': 'string', 'enum': ['rytm', 'a4'], 'description': 'flash batches: the unit'},
+       unit={'type': 'string', 'enum': ['rytm', 'a4', 'digitone'], 'description': 'flash batches: the unit'},
        build={'type': 'string', 'description': 'the OS .syx every variant boots (unless it names its own)'},
        runs={'type': 'integer', 'description': 'runs per variant, 1-200 (default 10)'},
        parallel={'type': 'integer', 'description': 'runs at once, 1-8 (default 4; all batches on the PC share a cap)'},
@@ -2351,7 +2663,7 @@ TOOLS = [
                       'retrying up to wait_s; record true saves it (emulator only).',
      S(unit=UNIT(), target=TARGET(), ref={'type': 'string', 'req': True}, wait_s={'type': 'number'},
        record={'type': 'boolean'})),
-    ('data', 'The data store (analogrun data): ls PATH (\'/\' gives the roots), get PATH (one object '
+    ('data', 'The data store (analogrun / digirun data): ls PATH (\'/\' gives the roots), get PATH (one object '
              'as Transfer stores it, into the evidence folder); put FILE into PATH, clear PATH, roundtrip PATH '
              '(read, write back or to `to`, read back, compare). Writes ask the local write policy first and '
              'keep a copy of what they replace; hardware needs the claim.',
@@ -2361,17 +2673,20 @@ TOOLS = [
        to={'type': 'string', 'description': 'roundtrip: write to this slot instead of path'},
        slot_name={'type': 'string', 'description': 'put/roundtrip: the name the slot gets (a policy may require one)'})),
     ('audio_record', 'Record every ASIO input of the unit (optionally with a 997 Hz tone into it) into the '
-                     'evidence folder; hardware needs the claim.',
-     S(unit=UNIT(), seconds={'type': 'number', 'req': True}, name={'type': 'string'}, tone={'type': 'boolean'})),
+                     'evidence folder; hardware needs the claim. target emulator (Digitone): the emulator\'s '
+                     'twelve Overbridge channels, no tone.',
+     S(unit=UNIT(), seconds={'type': 'number', 'req': True}, name={'type': 'string'}, tone={'type': 'boolean'},
+       target={'type': 'string', 'enum': ['hardware', 'emulator'],
+               'description': 'hardware (default) or emulator (this session\'s Digitone emulator)'})),
     ('audio_check', 'audiocheck.py dropouts or compare on recordings (offline, no claim): one verdict line.',
      S(op={'type': 'string', 'enum': ['dropouts', 'compare'], 'req': True}, wav={'type': 'string', 'req': True},
        ref={'type': 'string'}, channels={'type': 'string', 'description': 'e.g. 1,2'},
        folder={'type': 'string', 'description': 'where relative names are'})),
     ('recall_take', 'Overbridge Total Recall: take the unit\'s project image (obtr.py) into the evidence '
-                    'folder. Needs claims on every unit; never restarts Overbridge.',
+                    'folder. Needs claims on all three units; never restarts Overbridge.',
      S(unit=UNIT(), name={'type': 'string'})),
     ('recall_restore', 'Overbridge Total Recall restore of an image from recall_take (replaces the active '
-                       'project). Needs claims on every unit and an approval token.',
+                       'project). Needs all three claims and an approval token.',
      S(unit=UNIT(), image={'type': 'string', 'req': True}, approval={'type': 'string'})),
 ]
 
