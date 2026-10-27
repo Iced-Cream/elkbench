@@ -28,6 +28,13 @@ reaches the hardware only with something that has already worked in the emulator
   card, so its project slots say nothing about the unit's. A plan handles the slot it writes as
   it finds it on the unit at run time (empty, or a test item to clear first), and its emulator
   run fills that slot first so the clearing path is tested too.
+- **A reference screen compares only what the plan controls.** A screen recorded in the
+  emulator can show card content the plan doesn't own: other slots in a project list, other
+  kits, sounds or samples, settings. On the unit those differ, and a check that compares them
+  fails on a correct screen. Limit the check to the rows of the plan's own slot or item, or to
+  the prompt or field it tests. Before recording, check the compared rows against what would
+  differ on the unit: list the unit's projects read only (`data ls`) when checking the plan,
+  before the go is asked for, and it shows which rows of a list screen will.
 
 *elkbench enforces*: a hardware plan or flash needs a passing emulator run of the same steps,
 reference screens and OS file (sha256). A plan that flashes gets that emulator run named for
