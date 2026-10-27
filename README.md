@@ -161,6 +161,11 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   ran on it before (the go request lists it), and is not recorded after an ungated write (an
   emulator-only plan that writes, a `steps` or `data` write). See
   [docs/testing-practices.md](docs/testing-practices.md), "Messy starts and contrast runs".
+- **No sleep mid-run**: while a unit is claimed or queued for, or a run, an emulator, a go or its
+  dialog is going, the daemon keeps the PC from sleeping (Windows: SetThreadExecutionState;
+  Linux: systemd-inhibit, when installed) and lets it sleep again once all of that is over, so
+  a flash, a listening test or a remote client session isn't cut off. The display may still
+  turn off. `keep_awake = false` in config.toml turns this off; `calls.jsonl` logs each change.
 - **Plan format**: `format = 1` (missing counts as 1); other versions are refused.
 - **Log**: every call in `%LOCALAPPDATA%\elkbench\calls.jsonl` with the session id; run output
   in `jobs\<run id>.log`.
