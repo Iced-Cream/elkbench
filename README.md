@@ -118,7 +118,8 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   in its first section, before anything is written), a section that doesn't say what it proves
   (`say proves setup|set-and-kept|works|evidence: how`), a `set-and-kept` or `works` section
   with no machine assertion, a `listen` without `allowed:` and `needs:` or without a screen check
-  before it, key or read steps after a stock flash, and plans in one go that compare the same
+  before it, key or read steps after a stock flash, anything but NO after a `save-before-load`
+  check, and plans in one go that compare the same
   reference file. `check_plan` gives the same answer before any emulator time.
 - **Plan format**: `format = 1` (missing counts as 1); other versions are refused.
 - **Log**: every call in `%LOCALAPPDATA%\elkbench\calls.jsonl` with the session id; run output

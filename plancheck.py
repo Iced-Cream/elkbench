@@ -16,6 +16,8 @@ What a plan must carry (see docs/testing-practices.md, "Plan checker and templat
 - **A fixed listen format.** `listen WHAT TO HEAR allowed: WHAT THE PERSON MAY DO BY HAND
   needs: THE AUDIBLE PRECONDITION`, with an `expect-screen` earlier in the same section that
   proves the precondition on screen.
+- **NO to "save before loading".** An `expect-screen` whose reference name contains
+  `save-before-load` must be followed by a NO press.
 """
 import os
 import shlex
@@ -219,6 +221,22 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
                 if not seen_check:
                     errors.append('[%s] listen has no expect-screen before it in its section: prove its '
                                   'precondition (e.g. the play indicator) on screen first' % name)
+    # 8. "SAVE ... BEFORE LOADING?" is always answered NO: a plan names that check save-before-load*
+    for name, lines in steps:
+        pending = None
+        for l in lines:
+            w = words(l)
+            if not w:
+                continue
+            op = w[0].lower()
+            if op == 'expect-screen' and len(w) > 1 and 'save-before-load' in w[1].lower():
+                pending = w[1]
+            elif pending and op in ('tap', 'keys'):
+                first = (w[1].split(',')[0] if len(w) > 1 else '').upper()
+                if first != 'NO':
+                    errors.append('[%s] after expect-screen %s the plan presses %s: "SAVE ... BEFORE LOADING?" '
+                                  'is always answered NO' % (name, pending, first or '?'))
+                pending = None
     return dict(errors=errors, flags=flags, proves=proves)
 
 

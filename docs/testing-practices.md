@@ -316,11 +316,16 @@ the plan meant, and that each check would have failed if the result were wrong.
   by hand (or nothing), and `needs:` the audible precondition, which the plan proves on screen
   first (the play indicator, say). A different instruction is a different plan, with its own
   emulator pass.
+- **NO to "save before loading".** A load can stop on "SAVE 'X' BEFORE LOADING?" when the working
+  project is modified. YES there writes the working project over its own slot, which may hold
+  someone's work. A plan proves that prompt with an `expect-screen` named `save-before-load...`
+  and answers NO.
 
 *elkbench enforces*: `approve_plan` refuses a hardware plan that has no start check, a section
 that doesn't say what it proves (`say proves KIND: how`), a `set-and-kept` or `works` section
 without a machine assertion, a `listen` step without its three parts or a screen check before it,
-key or read steps after a stock flash, and plans that compare the same reference file. It shows
+key or read steps after a stock flash, anything but NO after a `save-before-load` check, and
+plans that compare the same reference file. It shows
 the rest in the go request: the sections judged by eye, checks right after the plan's own save,
 blank compared rows, Rytm notes outside 0-11. `check_plan` gives the same answer in seconds,
 before any emulator time. `templates/` holds plans that already follow these rules: a test
