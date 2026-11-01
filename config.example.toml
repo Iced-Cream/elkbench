@@ -22,6 +22,12 @@ person = "the person at this PC"
 # writepolicy.py: ANALOGHEALTH_POLICY, else policy.py in %LOCALAPPDATA%\analoghealth).
 # require_write_policy = false
 
+# Keep the PC from going to sleep while a unit is claimed or queued for, or a run, an emulator or
+# a go is going (Windows: SetThreadExecutionState; Linux: systemd-inhibit, if installed). The
+# display may still turn off. Sleep mid-run cuts a flash or a listening test short and drops a
+# remote client session.
+# keep_awake = true
+
 [tools]
 # elklock.py; default: elklock\elklock.py in this folder.
 # elklock = 'C:\tools\elklock\elklock.py'
