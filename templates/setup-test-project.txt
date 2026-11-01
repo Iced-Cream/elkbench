@@ -62,15 +62,14 @@ tap YES
 wait 1
 shot proceed.png
 # The working project is modified at this point, so LOAD asks SAVE '<name>' BEFORE LOADING? Y/N
-# first. Never YES: that saves the active project outside the plan's slots. The check compares only
-# the prompt's second line (rows 34-40), not the name; the checker refuses anything but NO after it.
-# On a unit whose working project is not modified this prompt does not come, and the check stops
-# the run instead of answering the wrong dialog.
-expect-screen save-before-loading 2 rows=34-40
+# first. Always NO: YES saves the active project outside the plan's slots. That dialog is as wide as
+# the project's name, so it is kept as a shot, not compared (screen checks limit rows only). If the
+# dialog does not come, this NO cancels the load and the PROCEED check below stops the run.
 tap NO
 wait 1
 shot proceed-2.png
-# Then ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N: YES loads 121.
+# Then ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N: the same box whatever the name (checked
+# on a unit, 2026-11-01); YES loads 121.
 expect-screen proceed-with-loading 2 rows=21-44
 tap YES
 wait 6
