@@ -7,5 +7,6 @@ flash = ../os/stock.syx
 note = stock OS restored
 
 [home screen]
+say proves evidence: the home screen after the restore
 wait 2
 shot home.png

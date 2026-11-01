@@ -58,6 +58,13 @@ emulator gives the unit back (section 4).
 - Record the unit's state at the start (OS version, a screenshot, the project list) and compare
   at the end.
 
+- **Ask with the exact text.** When the go is asked in a chat thread, post elkbench's own request
+  text (`approval_text`), so one typed yes answers both the thread and elkbench, and nothing is
+  found wrong with the go only after the yes.
+- **Plan from the latest state.** Take the unit's OS, active project and slots from the latest
+  handoff note and listing (`unit_state`, with their age), not from older notes, and check them
+  again on the unit after claiming.
+
 *elkbench enforces*: hardware plans, flashes and Total Recall restores need an approval token.
 A token is bound to the session, covers each item once, and expires after 2 h. `approve_plan`
 refuses while the session holds a unit it isn't using. Every hardware call needs the session's
@@ -225,3 +232,45 @@ refused on them, since their channel has no stats command.
   test project); the next session checks that on the unit before writing to the active project.
 - What a session learns about a unit or a tool (a stuck reboot, a timing, an odd behaviour)
   gets written down where the next session will find it.
+
+## 10. Plans: what a check must show
+
+A pass means "these steps passed from some state". These rules make sure that state is the one
+the plan meant, and that each check would have failed if the result were wrong.
+
+- **A start check.** A plan's first section proves the state it starts from on screen, before
+  anything is written: the right page, the cleared test slot, the value a power cycle had to keep.
+- **Prove content, not a name.** A precondition shows something only this run's setup produced
+  (on the Rytm, a new project's title row reads `K001:KIT 1` and `BPM:120.0`). A check of a name
+  the plan's own save step has just written passes on a copy of any project.
+- **Say what each section proves**: `setup` (state for later checks), `set-and-kept` (a setting is
+  made and read back), `works` (the feature's effect is measured) or `evidence` (shots for a person
+  to judge). A `set-and-kept` or `works` section needs a machine assertion (`expect-screen`,
+  `capture ... any|none`, `audio-compare`, `audio-dropouts`, `stats`, `ping`). A shot is judged by
+  eye, and the go request says so.
+- **Compare rows that can differ.** A reference compares the rows that show the value under test,
+  not the rows that show which page is open, and never rows that are blank in the reference.
+- **Known navigation.** Every page is entered from a known page, every menu from its top, and a
+  MIDI channel gets a readback before anything depends on it.
+- **One reference set per plan.** Plans in one run never compare the same reference file:
+  recording one plan's references would void the other's pass.
+- **Remote keys need a remote-key path in the OS.** A plan with key, turn or read (`dump`) steps
+  runs on a build with one, never on stock.
+- **Hits that sound.** On the Rytm, notes 0-11 on the auto channel start tracks; other notes play
+  nothing, and the emulator makes no voice sound either. A capture runs behind a level check that
+  fails on silence (`audio-dropouts` alone passes on silence). Reads of a voice's values go after
+  its first hit.
+- **A fixed listen format.** A `listen` step says what to hear, `allowed:` what the person may do
+  by hand (or nothing), and `needs:` the audible precondition, which the plan proves on screen
+  first (the play indicator, say). A different instruction is a different plan, with its own
+  emulator pass.
+
+*elkbench enforces*: `approve_plan` refuses a hardware plan that has no start check, a section
+that doesn't say what it proves (`say proves KIND: how`), a `set-and-kept` or `works` section
+without a machine assertion, a `listen` step without its three parts or a screen check before it,
+key or read steps after a stock flash, and plans that compare the same reference file. It shows
+the rest in the go request: the sections judged by eye, checks right after the plan's own save,
+blank compared rows, Rytm notes outside 0-11. `check_plan` gives the same answer in seconds,
+before any emulator time. `templates/` holds plans that already follow these rules: a test
+project setup, a flash gate, a power-cycle readback, a capture behind a level check, and a
+listening check.
