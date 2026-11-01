@@ -134,7 +134,7 @@ class OverMcp(unittest.TestCase):
             self.assertEqual(init['result']['serverInfo']['name'], 'elkbench')
             names = [t['name'] for t in L.rpc('tools/list')['result']['tools']]
             self.assertIn('approve_plan', names)
-            self.assertEqual(len(names), 22)
+            self.assertEqual(len(names), 23)
             text, err = L.call('status')
             self.assertTrue(text.startswith('ok: 0 claim'), text)
             text, err = L.call('run_plan', plan=os.path.join(PLANS, 'menus.txt'), target='hardware')
@@ -278,7 +278,12 @@ class ApprovalInClaude(unittest.TestCase):
         self.L.write({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {
             'name': 'approve_plan', 'arguments': {'plans': [os.path.join(PLANS, 'menus.txt')],
                                                   'purpose': 't', '_elicit': False}}})
-        self.assertEqual(self.L.read()['method'], 'elicitation/create')
+        req = self.L.read()
+        self.assertEqual(req['method'], 'elicitation/create')
+        # answer it (a No, not a fast one, which would open the popup): a request left waiting
+        # would refuse this session's next approve_plan in the other tests (one go at a time)
+        self.L.write({'jsonrpc': '2.0', 'id': req['id'], 'result': {'action': 'accept', 'content': {'approve': False}}})
+        self.assertTrue(self.L.read()['result']['content'][0]['text'].startswith('refused:'))
 
 
 class InProcess(unittest.TestCase):
