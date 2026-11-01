@@ -10,7 +10,7 @@ note = menus closed, pattern stopped
 
 [start]
 # The emulator boots with two prompts (missing calibration, run calibration?);
-# NO at the unit's home screen does nothing.
+# NO at the unit's home screen does nothing. The start check: GLOBAL opens the global menu.
 wait 1
 tap NO
 wait 0.5
@@ -18,12 +18,11 @@ tap NO
 wait 0.5
 tap NO
 wait 0.5
-
-[global menu]
 tap GLOBAL
 expect-screen global-menu 2
 
 [project menu]
+say proves works: YES on the global menu opens the project menu
 tap YES
 expect-screen project-menu 2
 tap NO
@@ -31,9 +30,11 @@ tap NO
 wait 0.5
 
 [analoghealth answers]
+say proves works: the analoghealth channel answers a stats request
 stats
 
 [pattern and tone (hardware)]
+say proves works: a steady tone through the unit has no dropouts while a pattern plays
 tap PLAY
 audio-tone 6 tone
 tap STOP

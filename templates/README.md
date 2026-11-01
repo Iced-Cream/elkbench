@@ -1,0 +1,26 @@
+# Plan templates
+
+Plans that start from these carry the recipes earlier runs found by trial, and pass the plan
+checker (`check_plan`) as they are. Copy one beside your plans, keep its structure, and change
+only what its comments name. Each template has its own `refs` folder: keep one per plan.
+
+| template | for |
+|---|---|
+| `setup-test-project.txt` | the run's own test project: INIT NEW into a cleared test slot, LOAD FROM it, and prove the load by content (a new project's title row), not by its name |
+| `flash-gate.txt` | one flash transition: one copy per flash, in the run's order, stock back over the last build included |
+| `power-cycle-readback.txt` | the plan after a power cycle by the person's hand: its start check is the readback of what had to be kept |
+| `capture-with-level-check.txt` | an audio take behind a level check, so a silent take stops the run |
+| `listen.txt` | a listening check in the fixed three-part format, its precondition proven on screen first |
+
+The key sequences are for the Analog Rytm MKII on OS 1.74 with a remote-key path in the OS
+(analoghealth, or a remote-only build); the Analog Four MKII's menus differ. No reference
+screens ship: record each plan's own in the emulator (`run_plan ... record_refs`), and check the
+compared rows against what will differ on the unit before asking for a go.
+
+Open, so far:
+- **Backup and clear of the test slot** happen outside the plan (`data get`, `data clear`), so
+  they are listed in the go request as hand steps.
+- **The level check's reference take** (`level-ref.wav`) is recorded once on the unit from the
+  same steps; the emulator makes no voice sound.
+- **A run nonce in names** (`~T {run}`) is not filled in by elkbench: a reference screen showing
+  the name would differ on every run, so the templates prove content instead.
