@@ -1005,6 +1005,26 @@ class InProcess(unittest.TestCase):
         finally:
             daemon.DIGIHEALTH = saved
 
+    def test_digirun_capture_and_ping_need_a_digirun_with_them(self):
+        old, new = os.path.join(TMP, 'dh-old'), os.path.join(TMP, 'dh-new')
+        for root, text in ((old, '    send FILE  ...\n'), (new, '    capture FILE S [any|none]  ...\n    ping   ...\n')):
+            os.makedirs(os.path.join(root, 'tools'), exist_ok=True)
+            with open(os.path.join(root, 'tools', 'digirun.py'), 'w') as fh:
+                fh.write('"""digirun\n%s"""\n' % text)
+        saved = daemon.DIGIHEALTH
+        try:
+            daemon.DIGIHEALTH = old
+            self.assertTrue({'capture', 'ping', 'save-kit'} <= daemon.no_steps('digitone'))
+            with self.assertRaisesRegex(daemon.Refused, "step 'ping' is not allowed"):
+                self.d.t_steps(self.s, {'unit': 'digitone', 'target': 'hardware', 'steps': 'ping'})
+            daemon.DIGIHEALTH = new
+            self.assertEqual(daemon.no_steps('digitone') & {'capture', 'ping'}, set())
+            self.assertIn('save-kit', daemon.no_steps('digitone'))
+            with self.assertRaisesRegex(daemon.Refused, 'claim digitone first'):
+                self.d.t_steps(self.s, {'unit': 'digitone', 'target': 'hardware', 'steps': 'ping; capture got.syx 1 none'})
+        finally:
+            daemon.DIGIHEALTH = saved
+
     def test_digiemu_paths_in_wsl(self):
         saved = daemon.DIGIEMU, daemon.DIGIEMU_PY
         daemon.DIGIEMU, daemon.DIGIEMU_PY = TMP, ['wsl', '~/py']

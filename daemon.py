@@ -93,8 +93,20 @@ UNIT_FACTS = {
 DATA_OPS = ('ls', 'get', 'put', 'clear', 'roundtrip')
 # Digitone (digirun) steps that do not exist: no key-driven kit save, as a test project there is
 # marked by its pattern A01, not a kit. send and save-project ask the write policy as analogrun does.
-# capture and ping are analogrun's alone so far.
-DIGI_NO_STEPS = {'save-kit', 'capture', 'ping'}
+# capture and ping need a digirun that has them (digihealth's runner-capture-ping); an older one
+# lacks them, and then they are refused here too.
+DIGI_NO_STEPS = {'save-kit'}
+DIGI_NEWER_STEPS = {'capture': '    capture FILE', 'ping': '    ping '}   # step -> its line in digirun's help
+
+
+def digirun_lacks():
+    """The DIGI_NEWER_STEPS this digihealth's digirun.py does not have (all, without one)."""
+    try:
+        with open(os.path.join(DIGIHEALTH or '', 'tools', 'digirun.py'), encoding='utf-8', errors='replace') as fh:
+            text = fh.read()
+    except OSError:
+        return set(DIGI_NEWER_STEPS)
+    return {k for k, line in DIGI_NEWER_STEPS.items() if line not in text}
 
 
 def emulated_units():
@@ -111,7 +123,7 @@ def chunk_args(unit):
 def no_steps(unit):
     """The steps `unit`'s runner lacks: digirun's gaps, and any the unit's facts add."""
     u = UNITS.get(unit) or {}
-    return (DIGI_NO_STEPS if u.get('runner') == 'digirun' else set()) | set(u.get('no_steps') or ())
+    return ((DIGI_NO_STEPS | digirun_lacks()) if u.get('runner') == 'digirun' else set()) | set(u.get('no_steps') or ())
 
 
 STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'wait', 'stats',
