@@ -126,6 +126,11 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   with no machine assertion, a `listen` without `allowed:` and `needs:` or without a screen check
   before it, key or read steps after a stock flash, and plans in one go that compare the same
   reference file. `check_plan` gives the same answer before any emulator time.
+- **No sleep mid-run**: while a unit is claimed or queued for, or a run, an emulator, a go or its
+  dialog is going, the daemon keeps the PC from sleeping (Windows: SetThreadExecutionState;
+  Linux: systemd-inhibit, when installed) and lets it sleep again once all of that is over, so
+  a flash, a listening test or a remote client session isn't cut off. The display may still
+  turn off. `keep_awake = false` in config.toml turns this off; `calls.jsonl` logs each change.
 - **Plan format**: `format = 1` (missing counts as 1); other versions are refused.
 - **Log**: every call in `%LOCALAPPDATA%\elkbench\calls.jsonl` with the session id; run output
   in `jobs\<run id>.log`.
