@@ -1,0 +1,94 @@
+# Template: build the run's own test project on a Rytm MKII (OS 1.74 + analoghealth), and prove it.
+# Copy it beside your plans and change only what the comments name. Rules behind it:
+# docs/testing-practices.md, "Plan checker and templates".
+#
+# Before this plan, the run backs up and clears the test slot (outside the plan for now):
+#   data get /projects/121      (the backup, into the run's evidence folder)
+#   data clear /projects/121
+# List both in the go request as writes: "slot 121 (holds X at listing time: backed up and erased)".
+format = 1
+name = setup test project in 121
+unit = rytm
+refs = refs/setup-test-project        # this plan's own references: never share them with another plan
+out = runs
+note = ~T SETUP (slot 121, INIT NEW) active, unsaved changes none
+
+[start]
+# Boot prompts away, then MANAGE PROJECTS from its top, cursor on 121. Known navigation: the menu is
+# entered from its top (UP presses first) so a remembered cursor does not matter.
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+shot start-manage-121.png
+# The start check: the cursor row at the list's top (rows 0-6) reads 121 and an empty slot, which only
+# the run's own clear produced. Record it in the emulator after an emulator-only step has filled and
+# cleared 121, so the clearing path is tested too.
+expect-screen manage-cursor-121-cleared 2 rows=0-6
+
+[setup: INIT NEW into 121]
+say proves setup: a new project in 121, named by the plan
+# the action panel's top entry is INIT NEW; the name is the plan's own, at most 15 characters
+save-project 121 "~T SETUP" RIGHT,UP,UP,UP,UP,UP,UP,YES
+wait 6
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.5
+shot init-new.png
+
+[setup: LOAD FROM 121, and prove the load by content]
+say proves setup: the new project is the active one (its title row, not its name)
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+tap RIGHT
+wait 0.6
+keys UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN
+wait 0.4
+tap YES
+wait 1
+shot proceed.png
+# The working project is modified at this point, so LOAD asks SAVE '<name>' BEFORE LOADING? Y/N
+# first. Always NO: YES saves the active project outside the plan's slots (the checker refuses
+# anything else after a save-before-load check). The box is as wide as the project's name, so the
+# check compares only the fixed second line (rows 34-40) inside the narrowest box (cols 22-106);
+# cols= needs an analoghealth with that option.
+expect-screen save-before-loading 2 rows=34-40 cols=22-106
+tap NO
+wait 1
+shot proceed-2.png
+# Then ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N: the same box whatever the name (checked
+# on a unit, 2026-11-01); YES loads 121.
+expect-screen proceed-with-loading 2 rows=21-44
+tap YES
+wait 6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 4.5
+shot loaded.png
+# The content proof: the home title row (rows 0-6) of a new project reads K001:KIT 1 and BPM:120.0.
+# The slot marker cannot tell old from new when both sit in the same slot, and a name check
+# passes on a copy of any project.
+expect-screen loaded-new-kit1 2 rows=0-6

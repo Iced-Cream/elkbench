@@ -134,7 +134,7 @@ class OverMcp(unittest.TestCase):
             self.assertEqual(init['result']['serverInfo']['name'], 'elkbench')
             names = [t['name'] for t in L.rpc('tools/list')['result']['tools']]
             self.assertIn('approve_plan', names)
-            self.assertEqual(len(names), 19)
+            self.assertEqual(len(names), 22)
             text, err = L.call('status')
             self.assertTrue(text.startswith('ok: 0 claim'), text)
             text, err = L.call('run_plan', plan=os.path.join(PLANS, 'menus.txt'), target='hardware')
@@ -174,7 +174,7 @@ class RestartForNewerCode(unittest.TestCase):
         self.code = os.path.join(TMP, 'code')
         shutil.rmtree(self.code, ignore_errors=True)
         os.makedirs(self.code)
-        for f in ('daemon.py', 'launcher.py', 'batch.py'):
+        for f in ('daemon.py', 'launcher.py', 'batch.py', 'plancheck.py'):
             shutil.copy(os.path.join(HERE, f), self.code)
         shutil.copytree(os.path.join(HERE, 'elklock'), os.path.join(self.code, 'elklock'),
                         ignore=shutil.ignore_patterns('__pycache__'))
@@ -561,6 +561,57 @@ class InProcess(unittest.TestCase):
         self.assertIn('include = %s' % info['path'], text)
         self.assertIn('emulator-run = %s' % self.d.find_pass(info['key'])['run_dir'], text)
         self.assertNotIn('emulator = yes', text)
+
+    @needs_runner
+    def test_check_plan_says_what_a_go_would_refuse(self):
+        weak = os.path.join(PLANS, 'weak.txt')
+        with open(weak, 'w', encoding='utf-8') as fh:
+            fh.write('format = 1\nname = weak\nunit = rytm\nrefs = refs/menus\n\n[start]\ntap NO\nshot a.png\n'
+                     '[still set]\nsay proves set-and-kept: by eye\nshot b.png\n')
+        out = self.d.t_check_plan(self.s, {'plans': [weak, os.path.join(PLANS, 'menus.txt')]})
+        self.assertTrue(out[0].startswith('refused: 2 plan(s) checked, 1 refused'), out)
+        text = '\n'.join(out)
+        self.assertIn('ERROR: [start] has no start check', text)
+        self.assertIn('[still set] says it proves set-and-kept but has no machine assertion', text)
+        self.assertIn('ok: menus', text)
+        self.assertIn('gate: no emulator pass', text)
+        self.fake_pass(self.d.plan_info(weak))
+        with self.assertRaisesRegex(daemon.Refused, 'weak is refused by the plan checker'):
+            self.d.t_approve_plan(self.s, {'plans': [weak], 'purpose': 't'})
+
+    @needs_runner
+    def test_approval_text_is_what_approve_plan_asks(self):
+        plan = os.path.join(PLANS, 'menus.txt')
+        with self.assertRaisesRegex(daemon.Refused, 'no passing emulator run'):
+            self.d.t_approval_text(self.s, {'plans': [plan], 'purpose': 't'})
+        self.fake_pass(self.d.plan_info(plan))
+        out = self.d.t_approval_text(self.s, {'plans': [plan], 'purpose': 't'})
+        tid = re.search(r'text_id (\w+)', out[0]).group(1)
+        body = '\n'.join(out[2:])
+        self.assertIn('proves: start: [start]; works: [project menu]', body)
+        self.assertFalse(any(j.kind == 'approval' for j in self.d.jobs.values() if j.sess is self.s
+                             and j.state == 'running'))
+        with self.assertRaisesRegex(daemon.Refused, 'changed since approval_text'):
+            self.d.t_approve_plan(self.s, {'plans': [plan], 'purpose': 'other', 'text_id': tid})
+        seen = []
+        daemon.ask_person = lambda title, text: (seen.append(text), True)[1]
+        self.d.t_approve_plan(self.s, {'plans': [plan], 'purpose': 't', 'text_id': tid})
+        for _ in range(50):
+            if seen:
+                break
+            time.sleep(0.05)
+        self.assertEqual(seen, [body])
+
+    def test_unit_state_reads_nothing_from_the_unit(self):
+        out = self.d.t_unit_state(self.s, {'unit': 'rytm'})
+        self.assertTrue(out[0].startswith('ok: rytm as known now'), out)
+        self.assertIn('projects: no hardware listing recorded yet', '\n'.join(out))
+        os.makedirs(os.path.join(daemon.STATE, 'unit-state'), exist_ok=True)
+        daemon.write_json(os.path.join(daemon.STATE, 'unit-state', 'rytm.json'),
+                          {'time': time.time() - 120, 'projects': ['121 ~T SETUP']})
+        out = '\n'.join(self.d.t_unit_state(self.s, {'unit': 'rytm'}))
+        self.assertIn('  121 ~T SETUP', out)
+        self.assertIn('2 min ago', out)
 
     @needs_runner
     def test_no_dialog_no_token(self):
