@@ -33,7 +33,7 @@ tap RECORD
 wait 0.6
 
 [L1 SD plays steadily]
-say proves evidence: the person's ear, with the pattern proven playing first
+say proves evidence: the ear of the person, with the pattern proven playing first
 tap PLAY
 wait 1
 expect-screen playing 2 rows=0-6

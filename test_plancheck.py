@@ -161,6 +161,20 @@ class Templates(unittest.TestCase):
                 self.assertNotIn(ref.group(1), refs, '%s shares its refs folder' % n)
                 refs.add(ref.group(1))
 
+    def test_every_template_step_parses(self):
+        # analogrun splits each step with shlex: a stray quote mark (an apostrophe in a say or
+        # listen line) stops the run at that step
+        import shlex
+        folder = os.path.join(HERE, 'templates')
+        for n in sorted(f for f in os.listdir(folder) if f.endswith('.txt')):
+            with open(os.path.join(folder, n), encoding='utf-8') as fh:
+                for name, lines in parse(fh.read()):
+                    for l in lines:
+                        try:
+                            shlex.split(l, comments=True)
+                        except ValueError as e:
+                            self.fail('%s [%s] %r: %s' % (n, name, l, e))
+
 
 if __name__ == '__main__':
     unittest.main()

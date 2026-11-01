@@ -43,6 +43,8 @@ wait 0.4
 tap NO
 wait 0.4
 tap NO
+wait 0.4
+tap NO
 wait 1.5
 shot init-new.png
 
@@ -64,6 +66,12 @@ shot proceed.png
 # "SAVE ... BEFORE LOADING?": this sequence does not reach it, and a plan that does must answer NO.
 tap YES
 wait 6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
 tap NO
 wait 0.6
 tap NO
