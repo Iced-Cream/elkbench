@@ -587,6 +587,12 @@ class Daemon:
             settings, steps = testplan.parse(path)
         except (ValueError, OSError) as e:
             raise Refused('plan does not parse: %s' % e)
+        for name, lines in steps:
+            for l in lines:
+                try:
+                    shlex.split(l, comments=True)
+                except ValueError as e:
+                    raise Refused('[%s] %r does not parse (%s): quote or drop the stray quote mark' % (name, l, e))
         fmt = settings.get('format', '1')
         if fmt not in PLAN_FORMATS:
             raise Refused('plan format %s; this server reads format %s' % (fmt, ', '.join(PLAN_FORMATS)))
