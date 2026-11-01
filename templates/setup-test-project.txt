@@ -62,9 +62,11 @@ tap YES
 wait 1
 shot proceed.png
 # The working project is modified at this point, so LOAD asks SAVE '<name>' BEFORE LOADING? Y/N
-# first. Always NO: YES saves the active project outside the plan's slots. That dialog is as wide as
-# the project's name, so it is kept as a shot, not compared (screen checks limit rows only). If the
-# dialog does not come, this NO cancels the load and the PROCEED check below stops the run.
+# first. Always NO: YES saves the active project outside the plan's slots (the checker refuses
+# anything else after a save-before-load check). The box is as wide as the project's name, so the
+# check compares only the fixed second line (rows 34-40) inside the narrowest box (cols 22-106);
+# cols= needs an analoghealth with that option.
+expect-screen save-before-loading 2 rows=34-40 cols=22-106
 tap NO
 wait 1
 shot proceed-2.png

@@ -73,8 +73,9 @@ def ref_path(refs, name):
     return name if os.path.isabs(name) else os.path.join(refs or '', name)
 
 
-def blank_rows(path, span):
-    """True when a 128x64 1-bit reference has no lit pixel in rows span (inclusive)."""
+def blank_rows(path, span, cols=None):
+    """True when a 128x64 1-bit reference has no lit pixel in rows span (inclusive), within
+    columns cols when given. The framebuffer is 128 columns of 8 bytes, bit y of column x."""
     try:
         with open(path, 'rb') as fh:
             px = fh.read()
@@ -82,19 +83,29 @@ def blank_rows(path, span):
         return False
     if len(px) != 1024:
         return False
-    a, b = span
-    return not any(px[a * 16:(b + 1) * 16])
+    a, b = span or (0, 63)
+    c0, c1 = cols or (0, 127)
+    for x in range(c0, c1 + 1):
+        col = int.from_bytes(px[x * 8:x * 8 + 8], 'big')
+        if any(col >> y & 1 for y in range(a, b + 1)):
+            return False
+    return True
 
 
-def rows_of(w):
+def span_of(w, key):
+    """The A-B of an expect-screen's rows= or cols= option, or None."""
     for x in w[2:]:
-        if x.startswith('rows='):
+        if x.startswith(key + '='):
             try:
-                a, b = (int(v) for v in x[5:].split('-'))
+                a, b = (int(v) for v in x[len(key) + 1:].split('-'))
                 return a, b
             except ValueError:
                 return None
     return None
+
+
+def rows_of(w):
+    return span_of(w, 'rows')
 
 
 def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False):
@@ -175,13 +186,14 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
             w = words(l)
             if len(w) > 1 and w[0].lower() == 'expect-screen':
                 p = ref_path(refs, w[1])
-                span = rows_of(w)
+                span, cols = rows_of(w), span_of(w, 'cols')
                 if not os.path.isfile(p):
                     flags.append('[%s] reference %s not recorded yet (record_refs in the emulator)'
                                  % (name, os.path.basename(p)))
-                elif span and blank_rows(p, span):
-                    flags.append('[%s] expect-screen %s rows=%d-%d compares blank rows: it passes on any '
-                                 'screen that is blank there' % ((name, w[1]) + span))
+                elif (span or cols) and blank_rows(p, span, cols):
+                    flags.append('[%s] expect-screen %s %s compares a blank area: it passes on any '
+                                 'screen that is blank there' % (name, w[1], ' '.join(
+                                     x for x in w[2:] if x.startswith(('rows=', 'cols=')))))
 
     # 5. the build: remote keys need a remote-key path; Rytm hits
     if flash and stock:

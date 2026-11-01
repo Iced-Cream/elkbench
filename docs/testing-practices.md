@@ -318,10 +318,9 @@ the plan meant, and that each check would have failed if the result were wrong.
   emulator pass.
 - **NO to "save before loading".** A load can stop on "SAVE 'X' BEFORE LOADING?" when the working
   project is modified. YES there writes the working project over its own slot, which may hold
-  someone's work. A plan answers NO. That box is as wide as the project's name, and screen
-  checks limit rows only, so the setup template answers it NO without comparing it and checks the
-  PROCEED WITH LOADING? box that follows (the same whatever the name). A plan that does compare it
-  names the check `save-before-load...`, and the checker refuses anything but NO after it.
+  someone's work. A plan proves that prompt with an `expect-screen` named `save-before-load...`
+  and answers NO; the checker refuses anything else after it. The box is as wide as the project's
+  name, so the check compares the prompt's fixed text only, with `rows=` and `cols=`.
 
 *elkbench enforces*: `approve_plan` refuses a hardware plan that has no start check, a section
 that doesn't say what it proves (`say proves KIND: how`), a `set-and-kept` or `works` section

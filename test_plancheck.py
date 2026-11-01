@@ -124,15 +124,19 @@ class References(unittest.TestCase):
         shutil.rmtree(self.dir, ignore_errors=True)
 
     def test_missing_and_blank_references_are_flagged(self):
-        screen = bytearray(1024)
-        screen[20 * 16] = 0xFF                        # one lit row: 20
+        # analogrun's framebuffer: 128 columns of 8 bytes, bit y of column x (big-endian)
+        screen = b''.join(((1 << 20) if x < 64 else 0).to_bytes(8, 'big') for x in range(128))
         with open(os.path.join(self.dir, 'value.bin'), 'wb') as fh:
-            fh.write(screen)
+            fh.write(screen)                          # row 20 lit in columns 0-63
         r = check(GOOD, refs=self.dir)
         self.assertTrue(any('home.bin not recorded yet' in f for f in r['flags']), r['flags'])
-        self.assertFalse(any('blank rows' in f for f in r['flags']))
+        self.assertFalse(any('blank area' in f for f in r['flags']))
         r = check(GOOD.replace('rows=8-31', 'rows=40-50'), refs=self.dir)
-        self.assertTrue(any('rows=40-50 compares blank rows' in f for f in r['flags']), r['flags'])
+        self.assertTrue(any('rows=40-50 compares a blank area' in f for f in r['flags']), r['flags'])
+        r = check(GOOD.replace('rows=8-31', 'rows=8-31 cols=64-127'), refs=self.dir)
+        self.assertTrue(any('cols=64-127 compares a blank area' in f for f in r['flags']), r['flags'])
+        r = check(GOOD.replace('rows=8-31', 'rows=8-31 cols=0-70'), refs=self.dir)
+        self.assertFalse(any('blank area' in f for f in r['flags']))
 
     def test_plans_sharing_a_reference_file_are_refused(self):
         a = dict(name='sweep', refs=self.dir, steps=parse(GOOD))
