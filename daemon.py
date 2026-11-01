@@ -729,6 +729,8 @@ class Daemon:
         for k in ('flash', 'audio-tools', 'elkflash'):
             if g(k):
                 lines.append('%s = %s' % (k, rel(g(k))))
+        if g('flash') and not g('elkflash') and ELKFLASH:       # the plan names none: config's checkout
+            lines.append('elkflash = %s' % ELKFLASH)
         if not emulator_run:                           # `wait N audio` is short in the emulator
             if sections is None and info.get('audio_waits'):
                 sections = info['steps']
@@ -2751,6 +2753,8 @@ class Daemon:
                  'include = %s' % info['path'], 'emulator = yes', 'din =', 'record-refs = no',
                  'refs = %s' % info['refs'], 'out = %s' % (out or work)]
         lines += ['%s = %s' % (k, info['rel'](g(k))) for k in ('flash', 'audio-tools', 'elkflash') if g(k)]
+        if g('flash') and not g('elkflash') and ELKFLASH:
+            lines.append('elkflash = %s' % ELKFLASH)
         if sections is None and info.get('audio_waits'):
             sections = info['steps']
         if sections is not None:

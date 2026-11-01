@@ -14,6 +14,7 @@ name = flash BUILD over PREVIOUS
 unit = rytm
 out = runs
 flash = ../os/BUILD.syx               # the file this transition puts on the unit
+# elkflash = PATH                     # optional: an elkflash checkout; without it elkbench uses tools.elkflash
 note = BUILD flashed over PREVIOUS
 
 [after the flash]
