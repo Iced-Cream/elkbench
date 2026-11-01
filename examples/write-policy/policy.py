@@ -13,7 +13,9 @@ reserved for tests; outside them only items already named `~T` may be touched. A
 dump sent to the unit lands in the active project, so the active project must be a test
 project first: by convention a test project names its kit 1 `~T ...`, and the active
 project's kit 1 is read back (a stored-kit dump request answers from the active project)
-before any kit write. There is deliberately no option to switch the rules off.
+before any kit write. On the Digitone and Digitakt (digirun) the marker is pattern A01's name
+instead, read back with a stored-pattern dump request. There is deliberately no option to
+switch the rules off.
 
 Names follow the unit's name editor: up to 16 characters (15 here, to leave a terminator),
 upper case, from A-Z 0-9 space and + - = & / # @ ? % $ ~.
@@ -77,12 +79,15 @@ def check_write(rpc, path, new_name=None):
 
 def marker(session):
     """What marks a test project on this unit: (label, dump request id, name reader, renamer).
-    The Rytm and A4 use kit 1."""
+    The Rytm and A4 use kit 1; the Digitone and Digitakt (digirun) pattern A01, as their
+    kits are not used as the project's marker there."""
+    if getattr(session, 'unit', None) in ('digitone', 'digitakt'):
+        return 'pattern A01', unitdata.PATTERN_REQUEST, unitdata.pattern_name, unitdata.renamed_pattern_dump
     return 'kit 1', KIT_REQUEST, unitdata.kit_name, unitdata.renamed_kit_dump
 
 
 def check_active_project(session):
-    """The active project must be a test project: its kit 1 is named ~T."""
+    """The active project must be a test project: its kit 1 (Digitone: pattern A01) is named ~T."""
     what, request, name_of, _ = marker(session)
     try:
         msgs = session.capture(request=session.dump_request(request, 0), wait=5.0, quiet=0.5)
@@ -116,7 +121,7 @@ def after_save_project(session, path, name):
     """Reports the active project's marker and writes nothing. SAVE PROJECT AS makes the saved
     copy active, but a project saved some other way (a new one saved into a slot) leaves the
     previous project active, and the unit can't say which one is: marking kit 1 here once
-    renamed a kit in the project that was active. A plan that sends kits to its test project
+    renamed a kit in the project that was active. (Digitone: its marker is pattern A01.) A plan that sends kits to its test project
     names that project's kit 1 itself (on the unit, after the save), and every dump still
     checks the marker first."""
     what = marker(session)[0]
