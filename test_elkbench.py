@@ -134,7 +134,7 @@ class OverMcp(unittest.TestCase):
             self.assertEqual(init['result']['serverInfo']['name'], 'elkbench')
             names = [t['name'] for t in L.rpc('tools/list')['result']['tools']]
             self.assertIn('approve_plan', names)
-            self.assertEqual(len(names), 22)
+            self.assertEqual(len(names), 23)
             text, err = L.call('status')
             self.assertTrue(text.startswith('ok: 0 claim'), text)
             text, err = L.call('run_plan', plan=os.path.join(PLANS, 'menus.txt'), target='hardware')
@@ -278,13 +278,20 @@ class ApprovalInClaude(unittest.TestCase):
         self.L.write({'jsonrpc': '2.0', 'id': 3, 'method': 'tools/call', 'params': {
             'name': 'approve_plan', 'arguments': {'plans': [os.path.join(PLANS, 'menus.txt')],
                                                   'purpose': 't', '_elicit': False}}})
-        self.assertEqual(self.L.read()['method'], 'elicitation/create')
+        req = self.L.read()
+        self.assertEqual(req['method'], 'elicitation/create')
+        # answer it (a No, not a fast one, which would open the popup): a request left waiting
+        # would refuse this session's next approve_plan in the other tests (one go at a time)
+        self.L.write({'jsonrpc': '2.0', 'id': req['id'], 'result': {'action': 'accept', 'content': {'approve': False}}})
+        self.assertTrue(self.L.read()['result']['content'][0]['text'].startswith('refused:'))
 
 
 class InProcess(unittest.TestCase):
     def setUp(self):
         forget_passes()
         self.d = daemon.Daemon()
+        self.d.approvals.clear()          # one go at a time: an earlier test's open go would refuse a new one
+        self.d.save_approvals()
         self.s = daemon.Session('test-session-c', os.getpid(), TMP)
         self.folder = os.path.join(TMP, 'ARMKII')
         self.saved = dict(daemon.UNITS['rytm'])
@@ -343,6 +350,9 @@ class InProcess(unittest.TestCase):
             self.assertNotIn('answer_in_thread', '\n'.join(self.d.answer(self.s, {'request': rid, 'fallback': True})))
             with self.assertRaisesRegex(daemon.Refused, 'waiting for an answer in the thread'):
                 self.d.t_answer_in_thread(self.s, {'request': rid, 'approve': True, 'message_id': 'cmsg_x'})
+            with self.assertRaisesRegex(daemon.Refused, 'still waiting'):
+                asked()                                       # one request at a time
+            self.d.t_end_go(self.s, {'request': rid})         # the popup is left unanswered
             daemon.FALLBACK = 'thread'                        # no popup at all
             n, rid = len(popups), asked()
             self.assertIn('answer_in_thread', '\n'.join(self.d.answer(self.s, {'request': rid, 'fallback': True})))
@@ -363,6 +373,9 @@ class InProcess(unittest.TestCase):
             popup.set()                                       # the popup's later No changes nothing
             time.sleep(0.2)
             self.assertEqual(self.d.jobs[rid].state, 'approved')
+            token = self.d.jobs[rid].lines[0].split()[1]
+            self.assertEqual(len([t for t, g in self.d.open_goes().items() if g['session'] == self.s.sid]), 1)
+            self.d.t_end_go(self.s, {'approval': token})
             # a session whose popup came first (no Claude prompt tried) has no thread route
             rid = self.d.t_approve_plan(self.s, {'plans': [plan], 'purpose': 't'})[0].split()[1].rstrip(',')
             with self.assertRaisesRegex(daemon.Refused, 'waiting for an answer in the thread'):
@@ -450,6 +463,50 @@ class InProcess(unittest.TestCase):
         self.fake_pass(self.d.plan_info(other_plan))
         with self.assertRaisesRegex(daemon.Refused, 'does not cover'):
             self.d.t_run_plan(self.s, {'plan': other_plan, 'target': 'hardware', 'approval': token2})
+
+    def test_end_go(self):
+        other = daemon.Session('test-session-o', os.getpid(), TMP)
+        item = ('flash', 'rytm', 'ef' * 32)
+        go = lambda sess: dict(session=sess.sid, created=time.time(), expires=time.time() + 60, text='t',
+                               items=[dict(item=item, used=False, label='flash z on rytm')])
+        with self.d.lock:
+            self.d.approvals['ap-mine'], self.d.approvals['ap-left'] = go(self.s), go(other)
+        self.assertIn('ap-left', self.d.restart_waits_for()[0])
+        listed = '\n'.join(self.d.t_end_go(self.s, {}))
+        self.assertIn('2 open go(s)', listed)
+        self.assertIn('ap-left', listed)
+        # one go at a time: a second while this session has one unused is refused
+        with self.assertRaisesRegex(daemon.Refused, 'open go \\(ap-mine\\)'):
+            self.d.one_go_at_a_time(self.s)
+        # a go whose session has a hardware run going stays
+        job = daemon.Job(other, 'plan', 'rytm', 'hardware', 'x.txt')
+        self.d.jobs[job.id] = job
+        with self.assertRaisesRegex(daemon.Refused, 'has a run going'):
+            self.d.t_end_go(self.s, {'approval': 'ap-left'})
+        job.state = 'pass'
+        # another session's unused go may be ended (it only takes a go away), and stays ended on disk
+        self.assertIn('of session', self.d.t_end_go(self.s, {'approval': 'ap-left', 'note': 'left over'})[0])
+        self.d.t_end_go(self.s, {'approval': 'ap-mine'})
+        self.assertEqual(self.d.restart_waits_for(), [])
+        self.assertEqual(daemon.Daemon().open_goes(), {})
+        with self.assertRaisesRegex(daemon.Refused, 'was ended at .*left over'):
+            daemon.Daemon().use_approval(other, 'ap-left', item, 'flash z')
+        with self.assertRaisesRegex(daemon.Refused, 'already ended'):
+            self.d.t_end_go(self.s, {'approval': 'ap-left'})
+        with self.assertRaisesRegex(daemon.Refused, 'no go ap-none'):
+            self.d.t_end_go(self.s, {'approval': 'ap-none'})
+        self.d.one_go_at_a_time(self.s)                   # nothing open: a new go may be asked
+        # a request still waiting is withdrawn by its own session only, and settles as a No
+        ask = daemon.Job(self.s, 'approval', 'rytm', 'hardware', 'approval request')
+        ask.settle = lambda ok, how: (setattr(ask, 'state', 'approved' if ok else 'refused'), ['refused: x'])[1]
+        self.d.jobs[ask.id] = ask
+        with self.assertRaisesRegex(daemon.Refused, 'still waiting'):
+            self.d.one_go_at_a_time(self.s)
+        with self.assertRaisesRegex(daemon.Refused, 'no go request'):
+            self.d.t_end_go(other, {'request': ask.id})
+        self.assertTrue(self.d.t_end_go(self.s, {'request': ask.id})[0].startswith('ok: request'))
+        self.assertEqual(ask.state, 'refused')
+        self.d.one_go_at_a_time(self.s)
 
     def test_a_go_may_list_an_item_twice(self):
         # The same build flashed twice in one run: each listing runs once.
