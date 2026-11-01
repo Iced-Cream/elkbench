@@ -30,8 +30,9 @@ STATE_NAMES = {0: 'unknown', 1: 'no session', 2: 'session running', 3: 'session 
                8: 'recall: unit asking', 9: 'recall: host state chosen',
                10: 'recall: device state chosen', 11: 'host to unit', 12: 'unit to host'}
 T_PROJECT, T_SESSION, T_STATE = 0x1B, 0x28, 0x27   # Analog Rytm / Four MKII
-# A product that numbers these three differently: product -> (project, session, state).
-PRODUCT_TYPES = {}
+# The Digitone (product 0x18) numbers the same three one higher: its state is type 0x28, the
+# session ID 0x29 and the project image 0x1C (seen in a capture of its plugin, 2026-10-25).
+PRODUCT_TYPES = {0x18: (0x1C, 0x29, 0x28)}
 FRAG = 995                                # payload per async packet (1023 - 28-byte header)
 
 
@@ -374,7 +375,8 @@ def cmd_restore(args):
         sid = meta['session']
         a.state(7, sid)
         wait_for(a, {8, 9, 10}, 15)
-        log('waiting up to %d s for the answer on the unit (USE PLUGIN STATE)' % wait_answer)
+        log('waiting up to %d s for the answer on the unit (USE PLUGIN STATE, or on the Digitone '
+            'ACCEPT RECALL)' % wait_answer)
         st = wait_for(a, {9, 10}, wait_answer)
         if st == 10:
             log('the unit chose its own state: nothing written')
