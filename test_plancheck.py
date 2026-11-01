@@ -143,6 +143,19 @@ class References(unittest.TestCase):
         b['refs'] = os.path.join(self.dir, 'own')
         self.assertEqual(plancheck.shared_refs([a, b]), [])
 
+    def test_save_before_load_is_answered_no(self):
+        bad = GOOD + '''
+[load]
+say proves setup: loads 121
+tap YES
+expect-screen save-before-load 2 rows=20-40
+tap YES
+'''
+        r = plancheck.check(parse(bad))
+        self.assertTrue(any('BEFORE LOADING' in e for e in r['errors']), r['errors'])
+        r = plancheck.check(parse(bad.replace('rows=20-40\ntap YES', 'rows=20-40\ntap NO')))
+        self.assertFalse(any('BEFORE LOADING' in e for e in r['errors']), r['errors'])
+
 
 class Templates(unittest.TestCase):
     def test_every_template_passes_the_checker(self):
