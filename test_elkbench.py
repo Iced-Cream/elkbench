@@ -941,12 +941,20 @@ class InProcess(unittest.TestCase):
         img = self.saved['stock'][0]
         with self.assertRaisesRegex(daemon.Refused, r'unknown unit .*digitakt'):
             self.d.unit('digitakt2')
-        with self.assertRaisesRegex(daemon.Refused, 'no digitakt emulator with USB MIDI yet'):
-            self.d.t_emulator(self.s, {'action': 'start', 'unit': 'digitakt'})
+        self.assertIn('digitakt', daemon.emulated_units())
+        self.assertEqual(daemon.chunk_args('digitakt'), ['--chunk-size', '4096'])
+        self.assertEqual(daemon.chunk_args('digitone'), [])
+        saved = daemon.DIGIEMU
+        daemon.DIGIEMU = TMP
+        try:
+            with self.assertRaisesRegex(daemon.Refused, 'build is the OS .syx to boot'):
+                self.d.t_emulator(self.s, {'action': 'start', 'unit': 'digitakt'})
+        finally:
+            daemon.DIGIEMU = saved
         saved = daemon.DIGIHEALTH
         daemon.DIGIHEALTH = TMP
         try:
-            with self.assertRaisesRegex(daemon.Refused, 'no digitakt emulator with USB MIDI'):
+            with self.assertRaisesRegex(daemon.Refused, 'no digitakt emulator'):
                 self.d.t_steps(self.s, {'unit': 'digitakt', 'target': 'emulator', 'steps': 'say hi'})
         finally:
             daemon.DIGIHEALTH = saved
@@ -954,18 +962,68 @@ class InProcess(unittest.TestCase):
             self.d.t_steps(self.s, {'unit': 'digitakt', 'target': 'hardware', 'steps': 'turn A 3'})
         with self.assertRaisesRegex(daemon.Refused, "step 'save-kit' is not allowed"):
             self.d.t_steps(self.s, {'unit': 'digitakt', 'target': 'hardware', 'steps': 'save-kit'})
-        # the flash gate without a build is digiemu's emu.fwcheck, as on the Digitone
+        # without a running emulator or a build the flash gate is digiemu's emu.fwcheck
         with self.assertRaisesRegex(daemon.Refused, 'emulator check \\(digiemu\\)'):
             self.d.t_flash(self.s, {'unit': 'digitakt', 'image': img, 'target': 'emulator'})
-        with self.assertRaisesRegex(daemon.Refused, 'no digitakt emulator with USB MIDI yet'):
-            self.d.t_flash(self.s, {'unit': 'digitakt', 'image': img, 'target': 'emulator', 'build': img})
-        with self.assertRaisesRegex(daemon.Refused, 'no emulator for digitakt'):
-            self.d.t_batch(self.s, {'image': img, 'unit': 'digitakt', 'build': img, 'variants': [{}]})
         with self.assertRaisesRegex(daemon.Refused, 'no ASIO driver known for digitakt'):
             self.d.t_audio_record(self.s, {'unit': 'digitakt', 'seconds': 1})
+        with self.assertRaisesRegex(daemon.Refused, 'no emulator audio for digitakt'):
+            self.d.t_audio_record(self.s, {'unit': 'digitakt', 'seconds': 1, 'target': 'emulator'})
         with self.assertRaisesRegex(daemon.Refused, 'no Total Recall for digitakt' if daemon.WINDOWS
                                     else 'Overbridge Engine'):
             self.d.t_recall_take(self.s, {'unit': 'digitakt'})
+
+    def test_digitakt_flashes_in_small_chunks(self):
+        img = self.saved['stock'][0]
+        ran = []
+        saved = daemon.DIGIEMU, daemon.ELKFLASH, self.d.emu_ready, self.d.start
+        daemon.DIGIEMU, daemon.ELKFLASH = TMP, TMP
+        self.d.emu_ready = lambda s, unit, build: ('tcp:127.0.0.1:7402', [])
+        self.d.start = lambda job, cmd, cwd, *a, **k: ran.append(cmd) or ['ok: started']
+        self.d.emulators[(self.s.sid, 'digitakt')] = dict(proc=None, session=self.s.sid, build='b',
+                                                           address='tcp:127.0.0.1:7402', firmware=None)
+        try:
+            self.d.t_flash(self.s, {'unit': 'digitakt', 'image': img, 'target': 'emulator', 'build': img})
+        finally:
+            daemon.DIGIEMU, daemon.ELKFLASH, self.d.emu_ready, self.d.start = saved
+            self.d.emulators.pop((self.s.sid, 'digitakt'), None)
+        flat = [x for c in ran for x in (c if isinstance(c, list) else [])]
+        self.assertIn('--chunk-size', flat)
+        self.assertEqual(flat[flat.index('--chunk-size') + 1], '4096')
+
+    @needs_runner
+    def test_digitakt_plans_do_not_flash(self):
+        img = self.saved['stock'][0]
+        plan = os.path.join(TMP, 'dt-flash-plan.txt')
+        with open(plan, 'w') as fh:
+            fh.write('unit = digitakt\nflash = %s\n\n[one]\nsay hi\n' % img)
+        saved = daemon.DIGIHEALTH
+        daemon.DIGIHEALTH = TMP
+        try:
+            with self.assertRaisesRegex(daemon.Refused, 'a digitakt plan cannot flash'):
+                self.d.plan_info(plan)
+        finally:
+            daemon.DIGIHEALTH = saved
+
+    def test_digirun_capture_and_ping_need_a_digirun_with_them(self):
+        old, new = os.path.join(TMP, 'dh-old'), os.path.join(TMP, 'dh-new')
+        for root, text in ((old, '    send FILE  ...\n'), (new, '    capture FILE S [any|none]  ...\n    ping   ...\n')):
+            os.makedirs(os.path.join(root, 'tools'), exist_ok=True)
+            with open(os.path.join(root, 'tools', 'digirun.py'), 'w') as fh:
+                fh.write('"""digirun\n%s"""\n' % text)
+        saved = daemon.DIGIHEALTH
+        try:
+            daemon.DIGIHEALTH = old
+            self.assertTrue({'capture', 'ping', 'save-kit'} <= daemon.no_steps('digitone'))
+            with self.assertRaisesRegex(daemon.Refused, "step 'ping' is not allowed"):
+                self.d.t_steps(self.s, {'unit': 'digitone', 'target': 'hardware', 'steps': 'ping'})
+            daemon.DIGIHEALTH = new
+            self.assertEqual(daemon.no_steps('digitone') & {'capture', 'ping'}, set())
+            self.assertIn('save-kit', daemon.no_steps('digitone'))
+            with self.assertRaisesRegex(daemon.Refused, 'claim digitone first'):
+                self.d.t_steps(self.s, {'unit': 'digitone', 'target': 'hardware', 'steps': 'ping; capture got.syx 1 none'})
+        finally:
+            daemon.DIGIHEALTH = saved
 
     def test_digiemu_paths_in_wsl(self):
         saved = daemon.DIGIEMU, daemon.DIGIEMU_PY
