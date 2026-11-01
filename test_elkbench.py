@@ -1333,6 +1333,154 @@ class InProcess(unittest.TestCase):
             with self.assertRaisesRegex(daemon.Refused, why):
                 self.d.t_batch(self.s, a)
 
+    def test_gate_batch_rules(self):
+        img = self.saved['stock'][0]
+        for a, why in (({'plans': ['p']}, 'plans .* is for a gate batch'),
+                       ({'gate': True, 'plans': ['p'], 'plan': 'q'}, 'not both'),
+                       ({'gate': True, 'plans': ['p'], 'runs': 3}, 'each plan once'),
+                       ({'gate': True, 'image': img, 'unit': 'rytm'}, 'a gate batch runs plans'),
+                       ({'gate': True, 'variants': [{}]}, 'a gate batch takes plans'),
+                       ({'gate': True, 'plans': ['p'] * 17}, 'a gate batch takes plans: a list of 1-16')):
+            with self.assertRaisesRegex(daemon.Refused, why):
+                self.d.t_batch(self.s, a)
+
+    def test_audio_waits(self):
+        steps = [('play', ['tap PLAY', 'wait 30 audio  # hear the pattern', 'wait 2', 'tap STOP']),
+                 ('quiet', ['wait 1'])]
+        self.assertTrue(daemon.is_audio_wait('wait 8 AUDIO'))
+        self.assertFalse(daemon.is_audio_wait('wait 8'))
+        self.assertFalse(daemon.is_audio_wait('# wait 8 audio'))
+        self.assertEqual(daemon.audio_waits(steps), ['[play] wait 30 audio'])
+        short = daemon.emulator_steps(steps)
+        self.assertEqual(short[0][1][1].split('#')[0].strip(), 'wait %g' % daemon.AUDIO_WAIT_EMULATOR)
+        self.assertEqual(short[0][1][2:], ['wait 2', 'tap STOP'])
+        self.assertEqual(short[1], steps[1])
+
+    @needs_runner
+    def test_audio_waits_short_in_emulator_twins_only(self):
+        plan = os.path.join(PLANS, 'audio-wait.txt')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(read(os.path.join(PLANS, 'menus.txt')).replace('[analoghealth answers]',
+                                                                    '[listen]\ntap PLAY\nwait 30 audio\ntap STOP\n\n'
+                                                                    '[analoghealth answers]'))
+        info = self.d.plan_info(plan)
+        self.assertEqual(info['audio_waits'], ['[listen] wait 30 audio'])
+        import testplan
+        waits = lambda p: [l.split('#')[0].strip() for n, ls in testplan.parse(p)[1] if n == 'listen'
+                           for l in ls if l.startswith('wait')]
+        self.assertEqual(waits(plan), ['wait 30 audio'])                       # the unit waits in full
+        self.assertEqual(waits(self.d.twin(info, False, self.s.sid)), ['wait 0.5'])
+        work = tempfile.mkdtemp(dir=TMP)
+        self.assertEqual(waits(self.d.batch_plan(info, work, 'batch run 1')), ['wait 0.5'])
+        self.assertEqual(self.d.plan_info(plan)['key'], info['key'])           # a pass vouches for the plan
+        self.assertEqual(testplan.parse(self.d.twin(info, False, self.s.sid))[0]['name'], info['name'])
+
+    @needs_runner
+    def test_gate_batch(self):
+        saved = daemon.ANALOG_EMU, daemon.ELKFLASH
+        daemon.ANALOG_EMU = daemon.ELKFLASH = TMP              # configured: the runs are stand-ins
+        self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        text = read(os.path.join(PLANS, 'menus.txt'))
+        plans = []
+        for name in ('gate-a', 'gate-b'):
+            plans.append(os.path.join(PLANS, name + '.txt'))
+            with open(plans[-1], 'w', encoding='utf-8') as fh:
+                fh.write(text.replace('name = menus', 'name = ' + name).replace('out = runs', 'out = runs-' + name)
+                         + '\n[%s]\nwait 0.1\n' % name)            # steps differ, so keys differ
+        self.d.emu_has_snapshots = lambda unit: False
+        self.d.batch_emulator = lambda unit, build, work, minutes, snapshot=None, din=False: (
+            None, 'tcp:127.0.0.1:7001', None, None)
+        projects = {'after': {121: ('~T A', 'a')}}
+        self.d.saved_projects = lambda addr, folder: projects['after'] if folder.endswith('after') else {121: ('~T A', 'a')}
+        ran = []
+
+        def run(cmd, **kw):                 # analogrun run PLAN: a passing run in the plan's out folder
+            twin = read(cmd[-1])
+            out = re.search(r'^out = (.+)$', twin, re.M).group(1)
+            d = os.path.join(out, 'run-%d' % len(ran))
+            os.makedirs(d)
+            with open(os.path.join(d, 'summary.json'), 'w') as fh:
+                json.dump({'emulator': True, 'pass': True}, fh)
+            ran.append(twin)
+            return subprocess.CompletedProcess(cmd, 0, 'x on the emulator: PASS (3 steps, 1 s) - %s\n' % d, '')
+        import types
+        daemon.subprocess = types.SimpleNamespace(**dict(vars(subprocess), run=run))
+        self.addCleanup(setattr, daemon, 'subprocess', subprocess)
+
+        def gate(**a):
+            out = self.d.t_batch(self.s, {'gate': True, 'plans': plans, 'build': build, **a})
+            if not out[0].startswith('running'):
+                return out
+            return self.d.t_status(self.s, {'run_id': out[0].split('run_id ')[1].split()[0], 'wait_s': 30})
+        res = gate()
+        self.assertTrue(res[0].startswith('done: '), res)
+        self.assertIn('2 of 2 plan(s) passed and recorded', res[1])
+        self.assertEqual(len(ran), 2)
+        for p in plans:
+            info = self.d.plan_info(p)
+            ep = self.d.find_pass(info['key'])
+            self.assertEqual((ep['os'], ep['start']), (daemon.sha256(build), 'a fresh emulator'))
+            self.assertIn(os.path.join(os.path.dirname(p), 'runs-' + info['name'], 'emu-'), ep['run_dir'])
+        # nothing changed: nothing runs again
+        out = gate()
+        self.assertTrue(out[0].startswith('ok: nothing to gate'), out)
+        self.assertEqual(len([l for l in out if l.startswith('kept: ')]), 2)
+        self.assertEqual(len(ran), 2)
+        # one plan changed: only that one runs
+        with open(plans[1], 'a', encoding='utf-8') as fh:
+            fh.write('\n[one more]\nwait 1\n')
+        res = gate()
+        self.assertIn('1 of 1 plan(s) passed', res[1])
+        self.assertTrue(any(l.startswith('kept: gate-a') for l in res), res)
+        self.assertEqual(len(ran), 3)
+        # another build: both run again
+        res = gate(build=os.path.join(TMP, 'os', 'stock.syx'))
+        self.assertIn('2 of 2', res[1])
+        # a write outside the plan's slots fails the run and records nothing
+        projects['after'] = {121: ('~T A', 'a'), 5: ('MINE', 'b')}
+        forget_passes()
+        res = gate()
+        self.assertTrue(res[0].startswith('fail: '), res)
+        self.assertIn("write outside the plan's slots: project 5 added", '\n'.join(res))
+        self.assertIsNone(self.d.find_pass(self.d.plan_info(plans[0])['key']))
+
+    @needs_runner
+    def test_gate_batch_shares_one_setup_snapshot(self):
+        saved = daemon.ANALOG_EMU, daemon.ELKFLASH
+        daemon.ANALOG_EMU = daemon.ELKFLASH = TMP
+        self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        text = read(os.path.join(PLANS, 'menus.txt'))
+        first = re.search(r'^\[(.+)\]$', text, re.M).group(1)
+        plans = []
+        for name in ('share-a', 'share-b', 'share-c'):
+            plans.append(os.path.join(PLANS, name + '.txt'))
+            with open(plans[-1], 'w', encoding='utf-8') as fh:
+                fh.write(text.replace('format = 1', 'format = 1\nsnapshot-after = %s' % first, 1)
+                         + '\n[%s]\nwait 0.1\n' % name)
+        self.d.emu_has_snapshots = lambda unit: True
+        taken, done = [], set()
+
+        def snap(s, unit, v, minutes, folder):
+            store = os.path.join(TMP, 'shared-%s.snap' % self.d.snapshot_key(v['info'], v['build'])[:8])
+            v['store'] = store
+            taken.append((v['name'], store in done))     # was the shared one there already?
+            done.add(store)
+        self.d.batch_snapshot = snap
+        got = []
+        self.d.batch_run = lambda s, unit, flash, minutes, folder, n, v: (
+            got.append((v['name'], v.get('store'))), dict(outcome='pass', line='ok', run_dir='d'))[1]
+        out = self.d.t_batch(self.s, {'gate': True, 'plans': plans, 'build': build})
+        self.assertIn('setups from snapshots', out[0])
+        res = self.d.t_status(self.s, {'run_id': out[0].split('run_id ')[1].split()[0], 'wait_s': 30})
+        self.assertIn('3 of 3 plan(s) passed', res[1])
+        self.assertIn('3 resumed a setup snapshot', res[1])
+        self.assertEqual(sum(not there for _, there in taken), 1)     # one setup run for all three
+        self.assertEqual(len({st for _, st in got}), 1)
+
     def test_batch_runs_interleaved_and_sums_up(self):
         saved = daemon.ANALOG_EMU, daemon.ELKFLASH
         daemon.ANALOG_EMU = daemon.ELKFLASH = TMP              # configured: batch_run is a stand-in

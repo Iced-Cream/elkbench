@@ -71,6 +71,29 @@ data store), and fails if one was added, removed, renamed or changed outside the
 saves into. Going back to the
 emulator gives the unit back (section 4).
 
+### Fast emulator gates
+
+- **Each plan's pass starts from a known state.** A plan that passed right after another plan
+  on the same emulator only shows that its steps pass from whatever that plan left. Gate the
+  plans of a run together in a gate batch (`batch` with `gate`): every plan runs once on a fresh
+  emulator of the build, side by side, so several plans take about as long as the slowest one.
+- **The setup goes inside each plan**, not in a separate setup plan run first. Mark where it
+  ends with `snapshot-after = SECTION`: the setup runs once per build, its end state is kept as a
+  snapshot, and each plan resumes it. Plans whose setup sections are the same share one
+  snapshot, so copy the setup from a template rather than rewording it per plan. A pass then
+  covers the plan's own setup, and the unit runs the same setup in full.
+- **Waits that only let the unit make sound are marked `wait N audio`.** The emulator makes no
+  voice sound, so it waits half a second there; the unit waits the full N seconds. Use it only
+  where nothing on the screen or in the data changes during the wait.
+- **Re-gate only what changed.** A gate batch leaves out a plan whose pass still stands: the same
+  steps, reference screens and OS files, on the same build, from a fresh emulator or a setup
+  snapshot. Changing a plan's setup changes the plan, so every plan with that setup runs again.
+
+*elkbench enforces*: a gate batch records a pass only for a hardware plan that passed on its own
+fresh emulator (or its setup snapshot), with the saved-project check above, and keeps its
+evidence with the plan's other runs. A pass records the build it booted and how it started,
+and the go request shows that start and lists every `wait N audio` that was shortened.
+
 ## 2. One go per run
 
 - **The owner approves the whole run once**: the unit, the builds with their sha256 and

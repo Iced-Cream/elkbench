@@ -67,6 +67,9 @@ SNAPSHOT_DAYS, SNAPSHOT_MAX = 7, 20             # setup snapshots: unused days, 
 OB_CHANNELS = ('Main L', 'Main R', 'Track 1 L', 'Track 1 R', 'Track 2 L', 'Track 2 R', 'Track 3 L',
                'Track 3 R', 'Track 4 L', 'Track 4 R', 'Input L', 'Input R')   # the Digitone's Overbridge order
 DIGI_PARALLEL_MAX = 3                          # digiemu runs one batch may have going at once
+AUDIO_WAIT_EMULATOR = 0.5                       # s an emulator twin waits for `wait N audio`
+GATE_PLANS_MAX = 16                             # plans one gate batch may take
+KNOWN_STARTS = ('a fresh emulator', 'a setup snapshot')    # pass starts a gate batch may keep
 STATUS_WAIT, STATUS_WAIT_MAX = 300, 600     # s that status run_id waits for a run to end
 IDLE_EXIT = 30 * 60
 # What the units are; config.toml can override any key, and adds where evidence goes.
@@ -155,6 +158,28 @@ def hand_steps(steps):
             if w and w[0].lower() == 'listen':
                 out.append('[%s] listen %s' % (name, ' '.join(w[1:])))
     return out
+
+
+def is_audio_wait(line):
+    """`wait N audio`: a wait that only lets the unit make sound (a recording, a tone, a
+    listening pause). The runner reads the first number and waits N s in full; an emulator
+    twin shortens it, since the emulator makes no voice sound to wait for."""
+    w = shlex.split(line, comments=True)
+    return len(w) == 3 and w[0].lower() == 'wait' and w[2].lower() == 'audio'
+
+
+def audio_waits(steps):
+    """-> lines naming every `wait N audio` of a plan, for run results and the go request."""
+    return ['[%s] %s' % (name, l.split('#')[0].strip()) for name, lines in steps for l in lines
+            if is_audio_wait(l)]
+
+
+def emulator_steps(steps):
+    """The steps an emulator twin runs: each `wait N audio` becomes a short wait. The pass key
+    is still made from the steps as written, so the hardware run waits in full."""
+    short = lambda l: 'wait %g  # elkbench: %s, short in the emulator' % (
+        AUDIO_WAIT_EMULATOR, l.split('#')[0].strip()) if is_audio_wait(l) else l
+    return [(name, [short(l) for l in lines]) for name, lines in steps]
 
 
 def saved_slots(steps):
@@ -659,6 +684,7 @@ class Daemon:
                                 emulator=settings.get('emulator', 'no').lower() == 'yes')
         return dict(path=path, here=here, settings=settings, steps=steps, unit=unit, key=key, check=check,
                     flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, setup=setup, din=bool(din),
+                    audio_waits=audio_waits(steps),
                     name=settings.get('name') or os.path.splitext(os.path.basename(path))[0],
                     emulator=settings.get('emulator', 'no').lower() == 'yes', rel=rel)
 
@@ -702,6 +728,11 @@ class Daemon:
                 lines.append('%s = %s' % (k, rel(g(k))))
         if g('flash') and not g('elkflash') and ELKFLASH:       # the plan names none: config's checkout
             lines.append('elkflash = %s' % ELKFLASH)
+        if not emulator_run:                           # `wait N audio` is short in the emulator
+            if sections is None and info.get('audio_waits'):
+                sections = info['steps']
+            if sections is not None:
+                sections = emulator_steps(sections)
         if sections is not None:                       # only these sections (setup / the rest)
             lines.append('name = %s%s' % (info['name'], tag))
             for name, body in sections:
@@ -1026,15 +1057,17 @@ class Daemon:
                               'run_plan target emulator first' % info['name'])
             items.append(dict(item=('plan', info['key']), label='plan ' + info['name'], used=False))
             hand = hand_steps(info['steps'])
-            text.append('PLAN %s on %s\n  %s\n  steps: %s%s%s\n  emulator pass: %s%s%s' % (
+            text.append('PLAN %s on %s\n  %s\n  steps: %s%s%s\n  emulator pass: %s%s%s%s' % (
                 info['name'], info['unit'], info['path'], ', '.join(n for n, _ in info['steps']),
                 '\n  FLASH %s\n    sha256 %s%s' % (os.path.basename(info['flash']), info['flash_sha'],
                                                    ' (stock)' if self.is_stock(info['unit'], info['flash_sha'])
                                                    else '') if info['flash'] else '',
                 '\n  writes: ' + '; '.join(info['writes']) if info['writes'] else '',
                 ep.get('run_dir') or stamp(ep['time']),
+                ' (from %s)' % ep['start'] if ep.get('start') else '',
                 ''.join('\n' + l for l in plancheck.go_lines(info['check'])),
-                ''.join('\n  NOT TESTED IN THE EMULATOR: ' + h for h in hand)))
+                ''.join('\n  NOT TESTED IN THE EMULATOR: ' + h for h in hand) +
+                ''.join('\n  SHORT IN THE EMULATOR, IN FULL ON THE UNIT: ' + w for w in info['audio_waits'])))
         shared = plancheck.shared_refs(infos)
         if shared:
             raise Refused('; '.join(shared))
@@ -1811,12 +1844,15 @@ class Daemon:
                 raise Refused(self.no_emu_din(unit))
             snap = self.setup_snapshot(s, info, a)
             addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'])
+            booted = (self.emulators.get((s.sid, unit)) or {}).get('sha')
             din = self.din_args(s, unit, tgt, [l for _, ls in info['steps'] for l in ls])
             port = self.busy_port('%s@%s' % (unit, addr), tgt)
             emu = self.emulators.get((s.sid, unit)) or {}
             if info['flash'] and emu.get('firmware'):  # digiemu reboots from the file the flash was written from
                 shutil.copyfile(info['flash'], os.path.join(emu['firmware'], os.path.basename(info['flash'])))
+            began = 'a fresh emulator' if a.get('build') else 'the session\'s running emulator, as earlier calls left it'
             if snap:
+                began = 'a setup snapshot' if snap['have'] else began
                 cmd = self.snapshot_stages(s, info, snap, addr, started, din)
             else:
                 plan = info['path'] if info['emulator'] else self.twin(info, bool(a.get('record_refs')), s.sid)
@@ -1857,6 +1893,8 @@ class Daemon:
                     job.lines.append('shots: ' + ', '.join(shots))
             if tgt == 'emulator':
                 job.lines += ['not tested here (skipped in the emulator): ' + h for h in hand_steps(info['steps'])]
+                job.lines += ['short here (%g s in the emulator, in full on the unit): %s' % (AUDIO_WAIT_EMULATOR, w)
+                              for w in info['audio_waits']]
             verdict = '%s %s (%s)' % (info['name'], 'PASS' if ok else 'FAIL', run_dir or job.log)
             if tgt == 'hardware':
                 s.done.setdefault(unit, []).append('plan ' + verdict)
@@ -1864,7 +1902,8 @@ class Daemon:
                     s.os_left[unit] = (os.path.basename(info['flash']),
                                        self.is_stock(unit, summ['flash_sha256']), summ['flash_sha256'])
             elif ok and record:
-                self.record_pass(info['key'], {'plan': info['path'], 'run_dir': run_dir, 'unit': unit})
+                self.record_pass(info['key'], {'plan': info['path'], 'run_dir': run_dir, 'unit': unit,
+                                               'start': began, 'os': booted})
                 if info['flash_sha']:
                     self.record_pass('flash:%s:%s' % (unit, info['flash_sha']),
                                      {'image': info['flash'], 'unit': unit, 'run_dir': run_dir})
@@ -2377,20 +2416,44 @@ class Daemon:
     def t_batch(self, s, a):
         """Each run boots a fresh headless emulator of its own (not the session's emulator, which
         stays as it is), runs the plan or flash, and ends it; batch.py orders, caps and sums them
-        up. A batch never records an emulator pass: the hardware gate stays with run_plan/flash."""
+        up. A counting batch never records an emulator pass. A gate batch (gate) does: it runs
+        each of several hardware plans once, side by side, each on a fresh emulator (resuming its
+        setup snapshot where it has snapshot-after), and a run that passes is recorded like
+        run_plan's. Plans whose pass still stands are left out (unless force)."""
         if a.get('stop'):
             j = self.jobs.get(a['stop'])
             if not j or not j.batch or j.sess is not s:
                 raise Refused('no batch %s of this session' % a['stop'])
             j.batch.stop()
             return ['ok: %s starts no more runs; the %s' % (j.id, j.batch.progress())]
-        if bool(a.get('plan')) == bool(a.get('image')):
-            raise Refused('give plan (a plan file) or image (an OS .syx to flash), and variants')
+        gate = bool(a.get('gate'))
         given = a.get('variants') or []
-        if not 1 <= len(given) <= 6 or not all(isinstance(v, dict) for v in given):
-            raise Refused('variants is a list of 1-6 objects {name, build, image or plan}: each boots '
-                          'build (else the batch\'s build), then flashes its image or runs its plan')
-        runs = int(a.get('runs') or 10)
+        if a.get('plans'):
+            if not gate:
+                raise Refused('plans (a list) is for a gate batch: add gate true, or give plan and variants')
+            if given or a.get('plan'):
+                raise Refused('give plans, or plan/variants, not both')
+            if not isinstance(a['plans'], list) or not all(isinstance(p, str) for p in a['plans']):
+                raise Refused('plans is a list of plan files')
+            given = [{'plan': p} for p in a['plans']]
+        if gate:
+            if a.get('image') or any(isinstance(v, dict) and v.get('image') for v in given):
+                raise Refused('a gate batch runs plans; a flash on its own is gated with flash target emulator')
+            if a.get('runs') not in (None, 1):
+                raise Refused('a gate batch runs each plan once: leave runs out')
+            given = given or ([{}] if a.get('plan') else [])
+            if not 1 <= len(given) <= GATE_PLANS_MAX or not all(isinstance(v, dict) for v in given):
+                raise Refused('a gate batch takes plans: a list of 1-%d plan files (or variants with a plan '
+                              'each), each run once' % GATE_PLANS_MAX)
+            if not all(v.get('plan') or a.get('plan') for v in given):
+                raise Refused('a gate batch takes plans: give plans, or a plan for every variant')
+        else:
+            if bool(a.get('plan')) == bool(a.get('image')):
+                raise Refused('give plan (a plan file) or image (an OS .syx to flash), and variants')
+            if not 1 <= len(given) <= 6 or not all(isinstance(v, dict) for v in given):
+                raise Refused('variants is a list of 1-6 objects {name, build, image or plan}: each boots '
+                              'build (else the batch\'s build), then flashes its image or runs its plan')
+        runs = 1 if gate else int(a.get('runs') or 10)
         parallel = int(a.get('parallel') or batch.PARALLEL_DEFAULT)
         if not 1 <= runs <= 200 or not 1 <= parallel <= 8:
             raise Refused('runs (per variant) is 1-200, parallel 1-8')
@@ -2401,7 +2464,7 @@ class Daemon:
         for i, v in enumerate(given):
             build = os.path.abspath(v.get('build') or a.get('build') or '')
             if not os.path.isfile(build) or not build.lower().endswith('.syx'):
-                raise Refused('variant %d: build is the OS .syx its emulator boots' % (i + 1))
+                raise Refused('%s %d: build is the OS .syx its emulator boots' % ('plan' if gate else 'variant', i + 1))
             x = dict(name=str(v.get('name') or chr(65 + i)), build=build)
             if flash:
                 x['image'] = os.path.abspath(v.get('image') or a['image'])
@@ -2411,9 +2474,22 @@ class Daemon:
             else:
                 x['info'] = self.plan_info(v.get('plan') or a['plan'])
                 units.add(x['info']['unit'])
+            if gate:
+                info = x['info']
+                if info['emulator']:
+                    raise Refused('%s is an emulator plan: a gate batch runs hardware plans (each run gets '
+                                  'its emulator twin)' % info['path'])
+                if not v.get('name'):
+                    x['name'] = info['name']
+                    while any(y['name'] == x['name'] for y in variants):
+                        x['name'] += '+'
+                x['gate'] = True
+                x['os'] = sha256(build)
             variants.append(x)
         if len({v['name'] for v in variants}) < len(variants):
             raise Refused('variant names must differ')
+        if gate and len({(v['info']['key'], v['os']) for v in variants}) < len(variants):
+            raise Refused('the same plan twice on the same build: a gate batch runs each plan once')
         if len(units) != 1:
             raise Refused('every variant runs on one unit' if flash or len(units) > 1 else 'give unit')
         unit = units.pop()
@@ -2435,10 +2511,33 @@ class Daemon:
         flash or runner()
         if not flash and any(v['info']['din'] for v in variants) and not self.emu_has_din(unit):
             raise Refused(self.no_emu_din(unit))
+        kept = []
+        if gate and not a.get('force'):
+            # Re-gate only what changed: a plan whose pass still stands (same steps, refs, OS file
+            # it flashes, the same build booted, from a known start: a fresh emulator or a setup
+            # snapshot) keeps it and is not run again.
+            for v in list(variants):
+                ep = self.find_pass(v['info']['key'], v['info']['flash_sha'])
+                if ep and ep.get('os') == v['os'] and ep.get('start') in KNOWN_STARTS:
+                    kept.append('kept: %s, unchanged since its pass (%s)' % (
+                        v['name'], ep.get('run_dir') or stamp(ep['time'])))
+                    variants.remove(v)
+            if not variants:
+                return ['ok: nothing to gate: every plan\'s pass still stands (force runs them again)'] + kept
         snapshot = bool(a.get('snapshot'))
-        if snapshot and digi:
+        if snapshot and digi and not gate:
             raise Refused('no setup snapshots on the %s emulator (digiemu resumes only its settled boot)' % unit)
-        if snapshot:
+        if gate:
+            # setup inside each plan (snapshot-after): its setup runs once per build and is
+            # resumed, as run_plan does; plans with the same setup share one snapshot
+            snap_ok = lambda i: i['setup'] and not i['flash']
+            snapshot = a.get('snapshot') is not False and any(snap_ok(v['info']) for v in variants) \
+                and not digi and self.emu_has_snapshots(unit)
+            for v in variants:
+                v['snapshot'] = bool(snapshot and snap_ok(v['info']))
+            if snapshot:
+                self.prune_snapshots()
+        elif snapshot:
             # Every resumed run starts at the same emulated moment: for steps whose timing does not
             # matter, never to measure something timing-dependent (that is why it is off by default)
             if flash:
@@ -2448,6 +2547,7 @@ class Daemon:
                 if not i['setup'] or i['emulator'] or i['flash']:
                     raise Refused('variant %s: snapshot needs a hardware plan with snapshot-after and no '
                                   'flash (%s)' % (v['name'], i['name']))
+                v['snapshot'] = True
             if not self.emu_has_snapshots(unit):
                 raise Refused('this analog-emu has no --stdin-commands, so no snapshots')
             self.prune_snapshots()
@@ -2457,35 +2557,70 @@ class Daemon:
         vary = {k for k, _ in parts(variants[0]) if len({dict(parts(v))[k] for v in variants}) > 1} or {'build'}
         for v in variants:
             v['label'] = ' + '.join(x for k, x in parts(v) if k in vary)
-        job = Job(s, 'batch', unit, 'emulator', 'batch %s x%d' % (
-            os.path.basename(a['image']) if flash else variants[0]['info']['name'], runs))
-        folder = os.path.join(s.folder(unit), 'batch-' + job.id)
+        if gate:
+            desc = 'gate %d plan(s)' % len(variants)
+        else:
+            desc = 'batch %s x%d' % (os.path.basename(a['image']) if flash else variants[0]['info']['name'], runs)
+        job = Job(s, 'batch', unit, 'emulator', desc)
+        folder = os.path.join(s.folder(unit), ('gate-' if gate else 'batch-') + job.id)
         os.makedirs(folder)
         write_json(os.path.join(folder, 'batch.json'), dict(
-            unit=unit, kind='flash' if flash else 'plan', runs=runs, parallel=parallel, seed=seed,
-            minutes=minutes, snapshot=snapshot, variants=[{k: (v[k] if k != 'info' else v[k]['path']) for k in v} for v in variants]))
-        job.batch = b = batch.Batch(variants, runs, parallel, seed, folder,
+            unit=unit, kind='gate' if gate else 'flash' if flash else 'plan', runs=runs, parallel=parallel,
+            seed=seed, minutes=minutes, snapshot=snapshot, kept=kept,
+            variants=[{k: (v[k] if k != 'info' else v[k]['path']) for k in v} for v in variants]))
+        locks, locks_guard = {}, threading.Lock()
+
+        def gate_one(n, v):
+            # A gate run takes (or waits for) its setup snapshot itself, so plans without one
+            # start at once instead of waiting for every setup; one setup run per snapshot key
+            if v.get('snapshot'):
+                with locks_guard:
+                    lock = locks.setdefault(self.snapshot_key(v['info'], v['build']), threading.Lock())
+                with lock:
+                    why = self.batch_snapshot(s, unit, v, minutes, folder)
+                if why:
+                    return dict(outcome='fail', line=why)
+            return self.batch_run(s, unit, flash, minutes, folder, n, v)
+        job.batch = b = batch.Batch(variants, runs, parallel, seed, folder, gate_one if gate else
                                     lambda n, v: self.batch_run(s, unit, flash, minutes, folder, n, v))
         with self.lock:
             self.jobs[job.id] = job
 
         def work():
             try:
-                if snapshot:                          # each variant's setup first, a few at a time
-                    with ThreadPoolExecutor(parallel) as ex:
-                        why = [w for w in ex.map(lambda v: self.batch_snapshot(s, unit, v, minutes, folder),
-                                                 variants) if w]
+                snaps = [v for v in variants if v.get('snapshot')]
+                if snaps and not gate:
+                    # each setup once, a few at a time: the first plan of each setup takes (or finds)
+                    # the snapshot, the others with the same setup then find it stored
+                    first, rest, seen = [], [], set()
+                    for v in snaps:
+                        k = self.snapshot_key(v['info'], v['build'])
+                        (rest if k in seen else first).append(v)
+                        seen.add(k)
+                    why = []
+                    for group in (first, rest):
+                        with ThreadPoolExecutor(parallel) as ex:
+                            why += [w for w in ex.map(lambda v: self.batch_snapshot(s, unit, v, minutes, folder),
+                                                      group) if w]
+                        if why:
+                            break
                     if why:
                         job.state, job.lines = 'fail', why[:3] + ['no runs made: results %s' % folder]
                         return
                 b.run()
                 job.state = 'stopped' if b.stopped.is_set() else 'done'
-                job.lines = ['%d runs, %d variant(s), %d at a time, seed %d%s%s' % (
-                    len(b.results), len(variants), parallel, seed,
-                    ', resumed from setup snapshots' if snapshot else '',
-                    ' (stopped early: no p-value means much)' if b.stopped.is_set() else '')]
-                job.lines += batch.summarize(variants, b.results) + [
-                    'results: %s (a run that did not pass keeps its rNN folder)' % folder]
+                if gate:
+                    job.lines = self.gate_lines(variants, b.results, parallel, len(snaps), b.stopped.is_set()) + kept
+                    if any(r['outcome'] != 'pass' for r in b.results) or b.stopped.is_set():
+                        job.state = 'fail' if not b.stopped.is_set() else 'stopped'
+                    job.lines.append('results: %s' % folder)
+                else:
+                    job.lines = ['%d runs, %d variant(s), %d at a time, seed %d%s%s' % (
+                        len(b.results), len(variants), parallel, seed,
+                        ', resumed from setup snapshots' if snapshot else '',
+                        ' (stopped early: no p-value means much)' if b.stopped.is_set() else '')]
+                    job.lines += batch.summarize(variants, b.results) + [
+                        'results: %s (a run that did not pass keeps its rNN folder)' % folder]
                 with open(os.path.join(folder, 'summary.txt'), 'w', encoding='utf-8') as fh:
                     fh.write('\n'.join(job.lines) + '\n')
             except Exception as e:                # noqa: BLE001 - becomes the batch's verdict
@@ -2496,9 +2631,37 @@ class Daemon:
                 self.log_line({'session': s.sid, 'job': job.id, 'end': job.state, 'lines': job.lines[:3]})
 
         threading.Thread(target=work, daemon=True).start()
+        if gate:
+            return ['running: %s, each once on a fresh emulator, %d at a time%s; status with run_id %s '
+                    'waits for its end' % (job.desc, parallel, ', setups from snapshots' if snapshot else '',
+                                           job.id)] + kept
         return ['running: %s, %d runs (%d variant(s) x %d), %d at a time, seed %d%s; status with run_id %s '
                 'waits for its end' % (job.desc, len(b.plan), len(variants), runs, parallel, seed,
                                        ', each variant\'s setup snapshot first' if snapshot else '', job.id)]
+
+    def gate_lines(self, variants, results, parallel, snaps, stopped):
+        """A gate batch's verdict: a line per plan (recorded, or why not), then what an emulator
+        run leaves untested or shortens, as run_plan says it."""
+        by = {r['variant']: r for r in results}
+        ok = sum(r['outcome'] == 'pass' for r in results)
+        lines = ['%d of %d plan(s) passed and recorded as their emulator pass, %d at a time%s%s' % (
+            ok, len(variants), parallel, ', %d resumed a setup snapshot' % snaps if snaps else '',
+            ' (stopped early)' if stopped else '')]
+        for v in variants:
+            r = by.get(v['name'])
+            if not r:
+                lines.append('%s: not run' % v['name'])
+            elif r['outcome'] == 'pass':
+                lines.append('%s: PASS, recorded (%s)' % (v['name'], r.get('run_dir')))
+            else:
+                lines.append('%s: %s: %s (%s)' % (v['name'], r['outcome'].upper(), r.get('line') or '',
+                                                   r.get('run_dir') or r.get('folder')))
+        for v in variants:
+            lines += ['%s: not tested here (skipped in the emulator): %s' % (v['name'], h)
+                      for h in hand_steps(v['info']['steps'])]
+            lines += ['%s: short here (%g s in the emulator, in full on the unit): %s' % (v['name'], AUDIO_WAIT_EMULATOR, w)
+                      for w in v['info']['audio_waits']]
+        return lines
 
     def batch_emulator(self, unit, build, work, minutes, snapshot=None, din=False):
         """A fresh headless emulator of `build` for one batch run, in `work`, on a port of its own;
@@ -2565,17 +2728,21 @@ class Daemon:
             except subprocess.TimeoutExpired:
                 proc.kill()
 
-    def batch_plan(self, info, work, title, sections=None):
+    def batch_plan(self, info, work, title, sections=None, out=None):
         """A twin of the plan for one batch run (all of it, or only `sections`), its run folder in
-        `work`: runs going at once must not share testplan's per-second run folder names."""
+        `work` (or `out`): runs going at once must not share testplan's per-second run folder
+        names. `wait N audio` is short here, as in every emulator twin."""
         g = info['settings'].get
         lines = ['# written by elkbench for %s of %s' % (title, info['path']),
                  'include = %s' % info['path'], 'emulator = yes', 'din =', 'record-refs = no',
-                 'refs = %s' % info['refs'], 'out = %s' % work]
+                 'refs = %s' % info['refs'], 'out = %s' % (out or work)]
         lines += ['%s = %s' % (k, info['rel'](g(k))) for k in ('flash', 'audio-tools', 'elkflash') if g(k)]
         if g('flash') and not g('elkflash') and ELKFLASH:
             lines.append('elkflash = %s' % ELKFLASH)
+        if sections is None and info.get('audio_waits'):
+            sections = info['steps']
         if sections is not None:
+            sections = emulator_steps(sections)
             lines.append('name = %s (%s)' % (info['name'], title))
             for name, body in sections:
                 lines += ['', '[%s]' % name] + body
@@ -2583,6 +2750,11 @@ class Daemon:
         with open(plan, 'w', encoding='utf-8') as fh:
             fh.write('\n'.join(lines) + '\n')
         return plan
+
+    def plan_run_dir(self, out):
+        """-> the run folder an analogrun run's verdict line names, or None."""
+        m = next((re.search(r' - (.+)$', l) for l in out.splitlines() if re.search(r': (PASS|FAIL) \(', l)), None)
+        return m.group(1).strip() if m else None
 
     def plan_outcome(self, rc, out):
         """-> (passed, line) of an analogrun run: its first failure, else its last line."""
@@ -2611,6 +2783,9 @@ class Daemon:
             if why:
                 return 'variant %s: %s (%s)' % (v['name'], why, work)
             plan = self.batch_plan(info, work, 'its setup', sections=info['steps'][:cut])
+            guard = v.get('gate') and UNITS[unit]['runner'] is True
+            if guard:                    # a gate's setup may write only the plan's slots too
+                before = self.saved_projects(addr, os.path.join(work, 'projects', 'before'))
             p = subprocess.run([sys.executable, RUNNER, '--port', addr] + (['--din', din] if din else []) +
                                ['--quiet', 'run', plan], cwd=ANALOGHEALTH,
                                env=s.env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
@@ -2618,6 +2793,12 @@ class Daemon:
             ok, line = self.plan_outcome(p.returncode, p.stdout)
             if not ok:
                 return 'variant %s: its setup did not pass: %s (%s)' % (v['name'], line, work)
+            if guard:
+                bad = project_changes(before, self.saved_projects(addr, os.path.join(work, 'projects', 'after')),
+                                      saved_slots(info['steps']))
+                if bad:
+                    return 'variant %s: its setup wrote outside the plan\'s slots: %s (%s)' % (
+                        v['name'], '; '.join(bad), work)
             proc.stdin.write(b'save\n')
             proc.stdin.flush()
             for _ in range(150):
@@ -2636,6 +2817,8 @@ class Daemon:
             return None
         except subprocess.TimeoutExpired:
             return 'variant %s: its setup had no end after %d min (%s)' % (v['name'], minutes, work)
+        except (RuntimeError, OSError) as e:
+            return 'variant %s: could not read its saved projects: %s (%s)' % (v['name'], e, work)
         finally:
             self.end_emulator(proc)
 
@@ -2651,12 +2834,26 @@ class Daemon:
             shutil.copyfile(v['store'], snap)
         proc, addr, why, din = self.batch_emulator(unit, v['build'], work, minutes, snapshot=snap,
                                                    din=not flash and v['info']['din'])
+        out, before = None, None
         try:
             if why:
                 return dict(outcome='error', line=why, folder=work)
             image = v['image'] if flash else v['info']['flash']
             if isinstance(proc, dict) and image:       # digiemu reboots from the file the flash was written from
                 shutil.copyfile(image, os.path.join(proc['firmware'], os.path.basename(image)))
+            if v.get('gate'):
+                # a gate run's evidence goes where run_plan's would (the plan's runs folder), not
+                # into the batch folder, which loses its passing runs; and, as run_plan, it fails
+                # on a write to a saved project outside the plan's slots
+                g = v['info']['settings'].get
+                out = os.path.join(v['info']['rel'](g('out', 'runs')), 'emu-%s' % s.sid[:8],
+                                   '%s-r%02d' % (os.path.basename(folder), n))
+                if UNITS[unit]['runner'] is True:
+                    try:
+                        before = self.saved_projects(addr, os.path.join(work, 'projects', 'before'))
+                    except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+                        return dict(outcome='fail', line='could not read the saved projects before the run: %s' % e,
+                                    folder=work)
             if flash:
                 cmd, cwd = [sys.executable, '-m', 'elkflash', 'upgrade', v['image'], *chunk_args(unit), '--port', addr, '--yes',
                             '--no-confirm', '--wait', '--quiet', '--log', os.path.join(work, 'elkflash.log'),
@@ -2665,8 +2862,8 @@ class Daemon:
                     cmd += ['--wait-timeout', '400']     # a reboot is a cold boot and a settle
             else:
                 info = v['info']
-                plan = self.batch_plan(info, work, 'batch run %d' % n,
-                                       sections=info['steps'][info['setup']:] if snap else None)
+                plan = self.batch_plan(info, work, '%s run %d' % ('gate' if v.get('gate') else 'batch', n),
+                                       sections=info['steps'][info['setup']:] if snap else None, out=out)
                 cmd, cwd = [sys.executable, RUNNER, '--port', addr] + (['--din', din] if din else []) + [
                     '--quiet', 'run', plan], ANALOGHEALTH
             env = dict(s.env(), **({'DIGIRUN_PATH': os.path.join(DIGIHEALTH, 'tools')} if DIGIHEALTH else {}))
@@ -2682,12 +2879,29 @@ class Daemon:
                 ok, line = p.returncode == 0, (out or ['exit %d' % p.returncode])[-1]
             else:
                 ok, line = self.plan_outcome(p.returncode, p.stdout)
+            if ok and before is not None:
+                try:
+                    now = self.saved_projects(addr, os.path.join(work, 'projects', 'after'))
+                    bad = project_changes(before, now, saved_slots(v['info']['steps']))
+                except (RuntimeError, OSError, subprocess.SubprocessError) as e:
+                    bad = ['could not read the saved projects after the run: %s' % e]
+                if bad:
+                    ok, line = False, 'write outside the plan\'s slots: %s' % '; '.join(bad)
         finally:
             self.end_emulator(proc)
+        run_dir = None if flash else self.plan_run_dir(p.stdout)
+        if ok and v.get('gate'):
+            info = v['info']
+            self.record_pass(info['key'], {'plan': info['path'], 'run_dir': run_dir, 'unit': unit, 'os': v['os'],
+                                           'start': 'a setup snapshot' if snap else 'a fresh emulator',
+                                           'via': 'gate batch %s' % os.path.basename(folder)})
+            if info['flash_sha']:
+                self.record_pass('flash:%s:%s' % (unit, info['flash_sha']),
+                                 {'image': info['flash'], 'unit': unit, 'run_dir': run_dir})
         if ok:
             shutil.rmtree(work, ignore_errors=True)
-            return dict(outcome='pass', line=line)
-        return dict(outcome='fail', line=line, folder=work)
+            return dict(outcome='pass', line=line, run_dir=run_dir)
+        return dict(outcome='fail', line=line, folder=work, run_dir=run_dir)
 
 # ---- the person's go ----------------------------------------------------------------------
 
@@ -2804,7 +3018,10 @@ TOOLS = [
               'fresh emulator of its own, a few at a time, round by round in shuffled order; returns a '
               'run_id. status gives progress, then a line per variant (pass count, 95% range), Fisher p '
               'against the first variant and the first failures; per-run detail stays in results.jsonl. '
-              'Never counts as the emulator pass a hardware run needs.',
+              'Such a batch never counts as the emulator pass a hardware run needs. With gate: the emulator '
+              'gate for several hardware plans at once: each plan once, side by side, each on a fresh emulator '
+              '(resuming its setup snapshot when it has snapshot-after); a pass is recorded as run_plan\'s is. '
+              'Plans whose pass still stands (same steps, refs, OS files, fresh start) are left out unless force.',
      S(variants={'type': 'array', 'description': '1-6 arms, the first is the one the others are compared with',
                  'items': {'type': 'object', 'properties': {
                      'name': {'type': 'string', 'description': 'short label (default A, B, ...)'},
@@ -2821,7 +3038,13 @@ TOOLS = [
        seed={'type': 'integer', 'description': 'the run order\'s shuffle (default random, reported)'},
        snapshot={'type': 'boolean', 'description': 'plan batches with snapshot-after: every run resumes the '
                                                    'variant\'s setup snapshot (faster; every run then starts at '
-                                                   'the same emulated moment, so not for timing questions)'},
+                                                   'the same emulated moment, so not for timing questions). '
+                                                   'Gate batches use snapshots unless this is false'},
+       gate={'type': 'boolean', 'description': 'run each plan once and record its passes as emulator passes '
+                                               '(the gate a hardware run needs); runs is then 1'},
+       plans={'type': 'array', 'items': {'type': 'string'},
+              'description': 'gate: the hardware plan files (up to %d), each run once' % GATE_PLANS_MAX},
+       force={'type': 'boolean', 'description': 'gate: run plans whose pass still stands too'},
        stop={'type': 'string', 'description': 'a batch run_id: start no more of its runs'})),
     ('steps', 'analogrun steps (tap, hold, keys, turn, cc, nrpn, note, wait, stats, shot NAME, send FILE [din], '
               'capture NAME S [any|none] [din], ping, save-project, save-kit...) on a unit or its emulator, any '
