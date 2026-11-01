@@ -939,6 +939,7 @@ class InProcess(unittest.TestCase):
         self.assertEqual(st.unpack('<HHI', head[20:28]), (3, 12, 48000))
         self.assertEqual(st.unpack('<I', head[40:44])[0], 24000 * 48)
 
+    @needs_runner
     def test_digitone_plans(self):
         plan = os.path.join(TMP, 'dn-plan.txt')
         with open(plan, 'w', encoding='utf-8') as fh:
