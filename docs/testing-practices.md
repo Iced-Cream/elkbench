@@ -21,13 +21,40 @@ reaches the hardware only with something that has already worked in the emulator
   the upgrade completes: the flash is erased and written, the unit reboots, and the new OS
   version is checked. A build that flashes onto stock says nothing about whether it can be
   flashed away from.
+- **Only the gate's own emulator passes count.** A go lists passes recorded by the tool that
+  will run the hardware steps, for the same plan file, reference screens and OS file. An
+  emulator run elsewhere (another machine, by hand) is a pre-check. A plan changed after its
+  pass needs a new one.
+- **A build for key-driven plans carries the test harness.** If the plans press keys remotely
+  and that needs a harness mod in the firmware, the test build is the mods under test plus the
+  harness from the start, and the plan lists the harness apart from the mods under test.
 - **A gate step that can't run is a failure, not a skip.** If one emulator can't do a step,
   use another, or name the gap in the plan and get the owner's explicit yes for that step.
+  That yes is part of the run's go and covers that run only.
+- **A power cycle by hand** can't be gated when the emulator can't run the OS's power-off
+  save. It may run ungated when the go names it as such, every other step of the run has its
+  emulator pass, the run pauses until the owner says it is done, and the next plan starts with a
+  readback that proves the state the power cycle had to keep (and stops the run if it doesn't).
+  Never power cycle by software.
 - Every test plan ends with the restore to stock, and that flash passes in the emulator too.
 - **The emulator's card is not the unit's.** Each emulator run starts from a fresh copy of its
   card, so its project slots say nothing about the unit's. A plan handles the slot it writes as
   it finds it on the unit at run time (empty, or a test item to clear first), and its emulator
   run fills that slot first so the clearing path is tested too.
+- **Nor is its working state.** The active project's kit, pattern, tempo and unsaved changes,
+  and the UI's memory (the last subpage a page key opened, menu cursors), differ between the
+  unit and the emulator. A plan sets every state it depends on itself, reaches pages through a
+  known page, enters menus from their top, proves each precondition on screen, and is gated from unit-like starts (an active
+  test project in the slot, with and without unsaved changes). Global settings it relies on, such
+  as MIDI channels, get a readback before anything depends on them.
+- **A plan makes all the state it needs, inside its own claim.** Treat everything on the unit
+  at claim time as unknown: what the test slots hold, the active project, its unsaved changes,
+  whoever left them. Never build a plan, or a go, on state an earlier run or another session
+  left on the unit. The setup creates the test project itself and sets every value the checks
+  use. When a later run needs what an earlier run made, the earlier run copies it into its run
+  folder and the later run writes it back from that file into a test slot, then proves it.
+  A precondition proves something the plan's own setup produced, not a name the plan's own
+  save step has just written.
 - **A reference screen compares only what the plan controls.** A screen recorded in the
   emulator can show card content the plan doesn't own: other slots in a project list, other
   kits, sounds or samples, settings. On the unit those differ, and a check that compares them
@@ -50,11 +77,21 @@ emulator gives the unit back (section 4).
   emulator results, every flash in order including the stock restore, every write with its
   target (a slot, or "kit 1 of the active project (a test project)") and the settings it will
   change. It never promises that a slot is empty: it says what happens if the slot is occupied. Anything outside that (another build, another unit, a slot
-  not named) needs a new go.
+  not named) needs a new go. Each flash is listed on its own, so a file flashed twice in a run
+  (stock between two builds and again last) appears twice.
+- **Say what each check proves.** For every new feature, the go says whether its steps prove
+  only that a setting is made and kept, or that the feature works (its effect measured: a data
+  read, a value moving on screen, a recording, or the ear where the feature makes sound), and
+  how. A feature shown working only in the emulator, or only set and kept on the unit, is listed
+  as a gap. A listening check proves only what is audible.
 - **Ask first, claim after the yes.** Nobody is blocked while the owner decides, and the go
   lasts 2 hours. After the yes, claim the unit (queueing if need be) and check its state before
   writing: the handoff note, the OS, the slots the run will write. If the state no longer
-  matches what the go covered, ask again.
+  matches what the go covered, or isn't the state the plans were gated on, release the unit with
+  nothing written and ask again. Anything said about a unit's state comes from a fresh read of
+  the claim tool's status, with its time, not from an earlier read or a handoff note.
+- **Only the owner's own answer is a yes.** A note relayed by another session, agent or bot
+  never counts, however it is worded.
 - Record the unit's state at the start (OS version, a screenshot, the project list) and compare
   at the end.
 
@@ -89,7 +126,9 @@ waits for the restart with a timeout. The rest of this section is up to the sess
 ## 4. The claim
 
 - **One writer per unit.** Claim before anything that talks to a unit, read the previous
-  holder's handoff note, and never break someone else's claim.
+  holder's handoff note, and never break someone else's claim. The claim covers the unit, not
+  what is on it: another session may clear the test slots between your runs (section 6), so
+  nothing carries over from one claim to the next (section 1).
 - **Going back to the emulator gives the unit back.** If a test has to change mid-run, release
   the unit (with a note naming the OS left on it, even a test build), fix and re-run in the
   emulator, then claim again. Never hold hardware while doing emulator work.
@@ -109,7 +148,11 @@ row in the unit's test log, and asks for the stock OS first.
   flashes or release, and no moving on to the next step. A fixed wait is never a substitute
   for their answer.
 - Before asking, put the unit in the state to be heard, with a sound that is actually audible
-  (check the level and the MIDI channel), and say exactly what to listen for.
+  (check the level and the MIDI channel), and say exactly what to listen for and what, if
+  anything, the person may do on the unit by hand, including for a plugin pause whether edits in
+  the plugin are allowed (write both in the `listen` text). The
+  instructions don't change during the listening test: a change is a change to the test
+  (section 4, going back to the emulator).
 
 *elkbench enforces*: `listen` (or a `listen TEXT` step in a plan, which pauses the run) holds
 the unit. The claim can't time out, every call to that unit is refused, the elklock hook denies
@@ -125,27 +168,36 @@ their answer to the client's prompt. A session can't end it itself.
   and the +Drive sound library and samples are shared. So make a test project active before
   sending any dump, and mark anything saved to the +Drive.
 - **Write to the active project only once it is known to be a test project**, in the same run.
-  Make the test project with SAVE PROJECT AS, which makes the saved copy the active one; a new
-  project saved into another slot (INIT NEW and a save) leaves the previous project active, and
-  a write meant for the test project lands in that one instead. If the run can't confirm which
-  project is active, it writes nothing to it.
+  Build the test project in a known state: create a new project in the test slot and load it
+  (on the Rytm, INIT NEW then LOAD FROM; answer the "changes will be lost" prompt if it shows),
+  then confirm on screen that the new project is the one loaded. A new project saved into
+  another slot without loading it leaves the previous project active, and a write meant for the
+  test project lands in that one instead. SAVE PROJECT AS makes its copy active, but the copy
+  carries the previous project's working state (active kit, patterns, tempo), so don't use it to
+  start a test. If the run can't confirm which project is active, it writes nothing to it.
 - **Loading another project drops unsaved changes** in the working one. Before the first load,
-  know that the working project is saved, or ask the owner. Never save their project yourself.
+  know that the working project is saved or is a test project, or have the owner's go cover the
+  load. Never save their project yourself.
 - **Global settings**: don't save them. If a test needs a changed setting, change the live
   setting and put it back before release; list it in the handoff note.
-- **Leave the unit on its stock OS** at the end, and say so in the handoff note.
+- **Leave the unit on its stock OS** at the end, and say so in the handoff note. If the restore
+  can't run, release with a note that the unit is not on stock and what it is on, ask for the
+  restore at once, and nobody else takes the unit until stock is back or the owner clears it.
 - Test items stay unless the plan says to clean up; the handoff note lists them.
 
 **An example: the rules elkbench was developed with.** They come with it as a ready write
 policy, `examples/write-policy/policy.py` (tests beside it).
 - **A name prefix:** everything a test creates or changes is named `~T ` followed by a name
   (`~T PROJ 1`, `~T KIT A`). A session may write, overwrite, rename or clear only an item whose
-  name starts with `~T`, or an empty slot, and it names an empty slot `~T ...` in the same step.
+  name starts with `~T`, or an empty slot (an empty project slot only in 121-128), and it names
+  an empty slot `~T ...` in the same step.
   `~` is accepted everywhere a name goes (the unit's name editor, Transfer's rename, SysEx and
   the data store), it should sort after letters and digits (not checked), and nobody names their own work with a
   leading tilde.
 - **Reserved project slots:** 121-128 are for tests; the owner keeps 1-120. Outside them, only
-  items already named `~T` may be touched.
+  items already named `~T` may be touched. Any session may empty a test slot, whichever run
+  filled it, after copying it to its run folder; so no plan relies on what another run left
+  there.
 - **The active project:** the unit doesn't say which project is active, so by convention a test
   project names its kit 1 `~T ...`, and the policy checks the active kit 1 before any kit or
   sound dump is sent. On the Digitone and Digitakt the marker is pattern A01's name instead
