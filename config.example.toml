@@ -31,7 +31,7 @@ person = "the person at this PC"
 # digihealth = 'C:\src\digihealth'
 # analog-emu's binaries (rytm.exe, a4.exe): the emulator tool starts them headless.
 # analog_emu = 'C:\src\analog-emu\target\release'
-# digiemu checkout with USB MIDI (tools/usbrun.py): the Digitone emulator. Builds are set up
+# digiemu checkout with USB MIDI (tools/usbrun.py): the Digitone and Digitakt emulators. Builds are set up
 # once in ~/.local/state/elkbench/digiemu (inside WSL when run there); without a build,
 # `flash target emulator` runs its emu.fwcheck.
 # digiemu = 'C:\src\digiemu'
