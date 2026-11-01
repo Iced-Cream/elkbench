@@ -230,6 +230,9 @@ def handle(msg):
                                       'approve_plan, then claim after the yes (approve_plan refuses '
                                       'while you hold a unit idle; an emulator call while holding one '
                                       'releases it), then check the unit\'s state before writing. '
+                                      'Before the emulator, check_plan finds what approve_plan would '
+                                      'refuse; plan from unit_state, and post approval_text word for '
+                                      'word as the go request, then approve_plan with its text_id. '
                                       'If you can start a cheaper test-runner subagent (for Claude Code, '
                                       'agents/elkbench-runner.md in the elkbench repo), hand it the plans, '
                                       'flashes and steps to run, and interpret its report yourself.'}
