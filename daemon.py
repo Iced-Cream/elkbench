@@ -2451,7 +2451,20 @@ class Daemon:
             unit=unit, kind='gate' if gate else 'flash' if flash else 'plan', runs=runs, parallel=parallel,
             seed=seed, minutes=minutes, snapshot=snapshot, kept=kept,
             variants=[{k: (v[k] if k != 'info' else v[k]['path']) for k in v} for v in variants]))
-        job.batch = b = batch.Batch(variants, runs, parallel, seed, folder,
+        locks, locks_guard = {}, threading.Lock()
+
+        def gate_one(n, v):
+            # A gate run takes (or waits for) its setup snapshot itself, so plans without one
+            # start at once instead of waiting for every setup; one setup run per snapshot key
+            if v.get('snapshot'):
+                with locks_guard:
+                    lock = locks.setdefault(self.snapshot_key(v['info'], v['build']), threading.Lock())
+                with lock:
+                    why = self.batch_snapshot(s, unit, v, minutes, folder)
+                if why:
+                    return dict(outcome='fail', line=why)
+            return self.batch_run(s, unit, flash, minutes, folder, n, v)
+        job.batch = b = batch.Batch(variants, runs, parallel, seed, folder, gate_one if gate else
                                     lambda n, v: self.batch_run(s, unit, flash, minutes, folder, n, v))
         with self.lock:
             self.jobs[job.id] = job
@@ -2459,7 +2472,7 @@ class Daemon:
         def work():
             try:
                 snaps = [v for v in variants if v.get('snapshot')]
-                if snaps:
+                if snaps and not gate:
                     # each setup once, a few at a time: the first plan of each setup takes (or finds)
                     # the snapshot, the others with the same setup then find it stored
                     first, rest, seen = [], [], set()
