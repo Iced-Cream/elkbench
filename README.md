@@ -17,7 +17,7 @@ the Overbridge Engine).
 - **One daemon per PC** (`daemon.py`): owns the units' MIDI ports, ASIO and the Overbridge
   Engine connection, one user per port at a time. It listens on 127.0.0.1 (port and secret in
   `%LOCALAPPDATA%\elkbench\daemon.json`), holds `daemon.lock` so a second copy exits, restarts
-  itself for newer code on disk (`daemon.py`, `batch.py`, `elklock.py`) only once elklock has
+  itself for newer code on disk (`daemon.py`, `batch.py`, `plancheck.py`, `elklock.py`) only once elklock has
   every unit free (no claim, queued claim or listening test), no go is open and nothing of its own
   is going (run, approval, emulator, another call), so sessions land elkbench code without
   checking claims; code that does not import stays unused (`status` says why), and it exits after
@@ -48,6 +48,9 @@ See `config.example.toml`.
 | status | this session's claims and runs, or one `run_id` | |
 | emulator | start / stop / status of the emulators: one per session, headless, USB MIDI over its own TCP port (analog-emu `--usb-midi-tcp`, digiemu's `tools/usbrun.py`; analogrun, digirun and elkflash take `--port tcp:HOST:PORT`), on a fresh card copy; an analog-emu with `--din-midi-tcp` also gets its DIN MIDI on a TCP port of its own | an analog-emu build with `--usb-midi-tcp`; for the Digitone a digiemu with USB MIDI |
 | approve_plan | one go for a whole hardware run: plans, flashes, recall restores | each item's emulator pass; the person's yes in the client, or on the popup fallback (No by default, 30 min timeout) |
+| approval_text | the go request approve_plan would make for the same arguments, word for word, and its `text_id`; asks nobody, and refuses now if approve_plan would. Post it in the thread, then pass the `text_id` to approve_plan, which refuses if the request has changed since | as approve_plan |
+| check_plan | the plan checker (`plancheck.py`) on one or more hardware plans, in seconds and with no emulator: the errors approve_plan refuses on, the flags the go request shows, and whether a go would be accepted now (an emulator pass of the current steps, plans sharing a reference file). Rules and templates: [docs/testing-practices.md](docs/testing-practices.md), "Plan checker and templates", and `templates/` | an analoghealth checkout (it parses the plans) |
+| unit_state | what is known about a unit without touching it, each with its age: the claim now, the last handoff note (OS, active project), the last project listing a hardware `data ls /projects` saw, and the last test-log row | nothing |
 | answer_in_thread | the person's reply in the session's chat (a thread or channel) to an approval whose client prompt could not be shown | `approval_fallback` thread or both, after a fast No; the reply's id or link |
 | listen / listen_done | a listening test: the person listens to the unit; until listen_done the claim cannot time out and nothing may drive the unit. A plan's `listen TEXT` step does the same mid-run (the run waits; `status` says so); an emulator run skips it and names it in its result, and the go request lists it as not tested in the emulator | claim; listen_done: the id of the person's "finished" reply in the thread, else Claude asks them |
 | run_plan | `analogrun --quiet run PLAN` in the background, returns a run id; its result names the run's log and screenshots. In the emulator (Rytm, A4) it reads every saved project before and after the plan and fails the run if one outside the slots the plan saves into changed | emulator: nothing (a twin with absolute paths is written for you); hardware: claim, emulator pass, approval token |
@@ -117,6 +120,12 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
 - **No `stats` on remote-only builds**: a plan or steps call with a `stats` step is refused when
   the OS (the plan's flash, the unit's last flash or the emulator's build) is one of the unit's
   `no_stats` files.
+- **Plan checker**: approve_plan refuses a hardware plan with no start check (an `expect-screen`
+  in its first section, before anything is written), a section that doesn't say what it proves
+  (`say proves setup|set-and-kept|works|evidence: how`), a `set-and-kept` or `works` section
+  with no machine assertion, a `listen` without `allowed:` and `needs:` or without a screen check
+  before it, key or read steps after a stock flash, and plans in one go that compare the same
+  reference file. `check_plan` gives the same answer before any emulator time.
 - **Plan format**: `format = 1` (missing counts as 1); other versions are refused.
 - **Log**: every call in `%LOCALAPPDATA%\elkbench\calls.jsonl` with the session id; run output
   in `jobs\<run id>.log`.
@@ -186,6 +195,8 @@ touched. The plan tests need an analoghealth checkout (`ELKBENCH_TEST_ANALOGHEAL
 two sessions and a busy claim, the token's one use and session binding, a dialog No, emulator
 twins sharing the key, release asking for stock and writing the handoff and log, steps rules,
 the emulator-flash gate and the Engine needing all three claims.
+`python test_plancheck.py`: the plan checker's rules and the templates in `templates/`, with no
+analoghealth checkout needed.
 `audio\`: `python -m unittest test_audiocheck` there.
 
 ## Licence

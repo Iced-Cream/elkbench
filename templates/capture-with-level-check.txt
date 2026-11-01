@@ -1,0 +1,57 @@
+# Template: an audio capture behind a level check, so a silent take stops the run instead of passing.
+# On the Rytm MKII, notes 0-11 on the auto channel start tracks; other notes (60 on a track channel,
+# say) play nothing, and the emulator makes no voice sound either, so its pass says nothing about
+# sound. Parameter reads (dump) of a voice go after the first hit: some values reach the voice only
+# at note-on.
+#
+# The level check compares a short take with this plan's own reference take (level-ref.wav in its
+# refs folder), recorded once on the unit from the same steps and kept. audio-compare fails on
+# silence; audio-dropouts alone does not (silence has no dropouts).
+format = 1
+name = capture with level check
+unit = rytm
+refs = refs/capture-with-level-check
+out = runs
+audio-tools = C:/path/to/elkbench/audio
+note = ~T SETUP active, unsaved: SD trig on step 1; stopped
+
+[start]
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+keys TRK(SD)
+wait 0.4
+tap TRIG
+wait 0.8
+# the start check: SD's TRIG page (rows 0-6, the title row naming the track): stop otherwise
+expect-screen sd-trig-page 2 rows=0-6
+
+[setup: one SD trig on step 1, the pattern playing]
+say proves setup: the sequencer starts SD (a pattern hit, not a MIDI note)
+tap RECORD
+wait 0.6
+tap 1
+wait 0.3
+tap RECORD
+wait 0.6
+tap PLAY
+wait 1
+# the play indicator on (its rows only): proves the precondition the take depends on
+expect-screen playing 2 rows=0-6
+
+[level check (hardware)]
+say proves works: SD sounds at its reference level on its own channel (4) before any take
+audio-record 3 level
+audio-compare level-ref level 4
+
+[take (hardware)]
+say proves works: the take, compared with its reference
+audio-record 10 take
+audio-dropouts take 1,2
+audio-compare take-ref take 1,2
+tap STOP
+wait 1
