@@ -305,6 +305,7 @@ def read_json(p, default):
 
 
 def write_json(p, data):
+    os.makedirs(os.path.dirname(p), exist_ok=True)
     tmp = p + '.tmp'
     with open(tmp, 'w', encoding='utf-8') as fh:
         json.dump(data, fh, indent=1)
@@ -733,6 +734,8 @@ class Daemon:
                 raise Refused('%s needs a go from %s: approve_plan, then pass its token' % (label, PERSON))
             if a['session'] != s.sid:
                 raise Refused('that approval belongs to another session')
+            if a.get('ended'):
+                raise Refused('that go was ended at %s (end_go): %s' % (stamp(a['ended']), a.get('ended_why', '')))
             if time.time() > a['expires']:
                 raise Refused('that approval expired at %s; ask again' % stamp(a['expires']))
             # A go may list the same item more than once (one build flashed again): each
@@ -748,6 +751,75 @@ class Daemon:
                               % (label, 'once' if len(same) == 1 else '%d times' % len(same)))
             raise Refused('the approval does not cover %s (it covers: %s)' % (
                 label, '; '.join(it['label'] for it in a['items'])))
+
+    def open_goes(self):
+        """-> {token: go} for the gos still usable: not ended, not expired, an item not yet run."""
+        with self.lock:
+            return {t: a for t, a in self.approvals.items() if not a.get('ended')
+                    and time.time() < a['expires'] and not all(it['used'] for it in a['items'])}
+
+    def asking(self, s):
+        """This session's go requests still waiting for an answer (client prompt, popup or thread)."""
+        return [j for j in self.jobs.values()
+                if j.kind == 'approval' and j.sess is s and j.state in ('asking', 'running')]
+
+    def one_go_at_a_time(self, s):
+        """A second go next to an unused one (a request asked twice, or answered both in the
+        thread and on the popup) only holds off a restart: refuse while one is open or asked."""
+        for j in self.asking(s):
+            raise Refused('your go request %s is still waiting for %s\'s answer: status with run_id %s '
+                          'gives it, or end_go with request %s withdraws it' % (j.id, PERSON, j.id, j.id))
+        mine = sorted(t for t, a in self.open_goes().items() if a['session'] == s.sid)
+        if mine:
+            raise Refused('you have an open go (%s): use it, or end_go it before asking for a new one'
+                          % ', '.join(mine))
+
+    def t_end_go(self, s, a):
+        """End a go nobody will use, so it no longer holds off a restart for newer code. Ending only
+        takes a go away, so any session may end any go, but never one whose session has a hardware
+        run going. With `request`, withdraw this session's own go request still waiting for an
+        answer. With neither, list the open gos and requests."""
+        why = (a.get('note') or '').strip() or 'no reason given'
+        rid, token = a.get('request'), a.get('approval')
+        if rid:
+            job = self.jobs.get(rid)
+            if not job or job not in self.asking(s):
+                raise Refused('no go request %s of this session is waiting for an answer' % rid)
+            out = job.settle(False, 'end_go (withdrawn by the session: %s)' % why)
+            note = ' (the popup on the PC stays up until it is answered or times out; its answer is ignored)' \
+                if self.dialog.locked() else ''
+            return ['ok: request %s withdrawn%s' % (rid, note)] + out[1:]
+        if not token:
+            with self.lock:
+                goes = self.open_goes()
+                asked = [j for j in self.jobs.values() if j.kind == 'approval' and j.state in ('asking', 'running')]
+                lines = ['%s: session %s, covers %s, %d of %d run, expires %s' % (
+                    t, g['session'][:8], '; '.join(it['label'] for it in g['items']),
+                    sum(it['used'] for it in g['items']), len(g['items']), stamp(g['expires']))
+                    for t, g in sorted(goes.items())]
+                lines += ['%s: go request of session %s still waiting for an answer' % (j.id, j.sess.sid[:8])
+                          for j in asked]
+            return ['ok: %d open go(s), %d request(s) waiting' % (len(goes), len(asked))] + lines
+        with self.lock:
+            g = self.approvals.get(token)
+            if not g:
+                raise Refused('no go %s (unknown, or a day past its expiry)' % token)
+            if g.get('ended'):
+                raise Refused('go %s was already ended at %s' % (token, stamp(g['ended'])))
+            if time.time() > g['expires']:
+                raise Refused('go %s already expired at %s' % (token, stamp(g['expires'])))
+            going = [j for j in self.running() if j.sess.sid == g['session'] and j.target == 'hardware'
+                     and j.kind not in ('approval', 'heard')]
+            if going:
+                raise Refused('go %s has a run going (%s): let it end first' % (
+                    token, ', '.join('%s %s' % (j.id, j.desc) for j in going)))
+            g['ended'], g['ended_why'] = time.time(), why
+            g['ended_by'] = s.sid
+            self.save_approvals()
+        self.log_line({'session': s.sid, 'end_go': token, 'of': g['session'], 'why': why,
+                       'unused': [it['label'] for it in g['items'] if not it['used']]})
+        return ['ok: go %s ended (%s); it no longer holds off a restart' % (
+            token, 'your own' if g['session'] == s.sid else 'of session %s' % g['session'][:8])]
 
     def give_back(self, token, item):
         """A run that never started (refused after the approval was checked) keeps its go."""
@@ -851,10 +923,10 @@ class Daemon:
                 why.append('a go is being asked')
             if any(e['proc'].poll() is None for e in self.emulators.values()):
                 why.append('an emulator runs')      # keep stop working
-            goes = [a for a in self.approvals.values()
-                    if time.time() < a['expires'] and not all(it['used'] for it in a['items'])]
+            goes = self.open_goes()
             if goes:
-                why.append('a go is open (until %s at the latest)' % stamp(max(a['expires'] for a in goes)))
+                why.append('a go is open (until %s at the latest; end_go ends an unused one: %s)' % (
+                    stamp(max(a['expires'] for a in goes.values())), ', '.join(sorted(goes))))
             if self.connections > 1:            # this call counts one
                 why.append('another call is in progress')
         if self.dialog.locked():
@@ -1081,6 +1153,10 @@ class Daemon:
         idle = self.idle_units(s)
         if idle:
             out.append('note: approve_plan refuses while you hold %s idle: release first' % ', '.join(idle))
+        try:
+            self.one_go_at_a_time(s)
+        except Refused as e:
+            out.append('note: approve_plan refuses now: %s' % e)
         return out + ['', body]
 
     def t_check_plan(self, s, a):
@@ -1152,6 +1228,7 @@ class Daemon:
 
     def t_approve_plan(self, s, a):
         items, body = self.go_request(s, a)
+        self.one_go_at_a_time(s)
         tid = a.get('text_id')
         if tid and hashlib.sha256(body.encode()).hexdigest()[:12] != tid:
             raise Refused('the go request changed since approval_text gave text_id %s (a plan, pass or file '
@@ -2773,6 +2850,13 @@ TOOLS = [
      S(request={'type': 'string', 'req': True, 'description': 'the run_id approve_plan gave'},
        approve={'type': 'boolean', 'req': True, 'description': 'true only if they said yes to this request'},
        message_id={'type': 'string', 'req': True, 'description': 'the id or link of their reply in the thread'})),
+    ('end_go', 'End a go nobody will use (yours, or one left by another session), so it stops holding off '
+               'a restart for newer elkbench code; refused while that go\'s session has a hardware run going. '
+               'request withdraws your own go request still waiting for an answer. With neither, lists the '
+               'open gos and waiting requests.',
+     S(approval={'type': 'string', 'description': 'the go\'s token (ap-...)'},
+       request={'type': 'string', 'description': 'the run_id of your go request still waiting'},
+       note={'type': 'string', 'description': 'why it is not needed, kept in the log'})),
     ('listen', 'Start a listening test: %s listens to the unit now. Until listen_done the claim cannot '
                'time out and nothing may drive the unit (no keys, MIDI, screenshots, flash, restore or '
                'release). Put the unit in the state to hear first; a plan uses its own listen step.' % PERSON,
@@ -2993,7 +3077,7 @@ def main():
                                                     'pid': os.getpid(), 'version': VERSION,
                                                     'started': STARTED})
     D.log_line({'session': 'daemon', 'daemon': 'started', 'pid': os.getpid(), 'version': VERSION,
-                'approvals_kept': sum(time.time() < a['expires'] for a in D.approvals.values())})
+                'approvals_kept': len(D.open_goes())})
     threading.Thread(target=idle_watch, daemon=True).start()
     try:
         SERVER.serve_forever(poll_interval=0.5)
