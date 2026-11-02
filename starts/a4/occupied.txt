@@ -1,0 +1,165 @@
+# elkbench built-in start for the Analog Four MKII (OS 1.56 with analoghealth), emulator only.
+# A gate batch runs it on a fresh emulator, keeps the end state as a snapshot, and runs hardware
+# plans from there (docs/testing-practices.md, "Messy starts and contrast runs"). Names and slots
+# follow the example write policy (examples/write-policy): `~T ` test names, test slots 121-128.
+format = 1
+unit = a4
+emulator = yes
+name = start occupied
+out = runs
+note = slots 121-128 hold ~T OCC1-~T OCC8 (copies saved with SAVE PROJECT AS), the card's own project active again
+
+[start]
+# Boot prompts away (the third NO lands on the home screen and does nothing)
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+shot start-home.png
+
+[setup: SAVE PROJECT AS 121]
+say proves setup: a project in 121, named ~T OCC1
+# SAVE PROJECT AS makes the saved copy the active project; the last section loads the card's own back
+save-project 121 "~T OCC1" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,YES,YES
+wait 2
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+
+[setup: SAVE PROJECT AS 122]
+say proves setup: a project in 122, named ~T OCC2
+# SAVE PROJECT AS makes the saved copy the active project; the last section loads the card's own back
+save-project 122 "~T OCC2" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+
+[setup: SAVE PROJECT AS 123]
+say proves setup: a project in 123, named ~T OCC3
+# SAVE PROJECT AS makes the saved copy the active project; the last section loads the card's own back
+save-project 123 "~T OCC3" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+
+[setup: SAVE PROJECT AS 124]
+say proves setup: a project in 124, named ~T OCC4
+# SAVE PROJECT AS makes the saved copy the active project; the last section loads the card's own back
+save-project 124 "~T OCC4" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+
+[setup: SAVE PROJECT AS 125]
+say proves setup: a project in 125, named ~T OCC5
+# SAVE PROJECT AS makes the saved copy the active project; the last section loads the card's own back
+save-project 125 "~T OCC5" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+
+[setup: SAVE PROJECT AS 126]
+say proves setup: a project in 126, named ~T OCC6
+# SAVE PROJECT AS makes the saved copy the active project; the last section loads the card's own back
+save-project 126 "~T OCC6" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+
+[setup: SAVE PROJECT AS 127]
+say proves setup: a project in 127, named ~T OCC7
+# SAVE PROJECT AS makes the saved copy the active project; the last section loads the card's own back
+save-project 127 "~T OCC7" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN,DOWN,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+
+[setup: SAVE PROJECT AS 128]
+say proves setup: a project in 128, named ~T OCC8
+# SAVE PROJECT AS makes the saved copy the active project; the last section loads the card's own back
+save-project 128 "~T OCC8" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN,DOWN,DOWN,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+
+[setup: the card's own project active again]
+say proves setup: the card's project loaded back (SAVE ... BEFORE LOADING? answered NO)
+# CARD_SLOT: the slot of the card's own project, from the dirty start's MANAGE shot
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys CARD_SLOT_PATH
+wait 0.6
+keys RIGHT,UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN
+wait 0.4
+shot load-card.png
+tap YES
+wait 0.8
+shot load-asks.png
+tap NO
+wait 0.8
+shot proceed.png
+tap YES
+wait 5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+shot loaded.png
+
+[the slots and the active project]
+say proves evidence: 121-128 hold ~T OCC1-8 and the card's project is the active one
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+shot manage-121-128.png
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+
+[end state]
+say proves evidence: the home title row (kit, BPM)
+shot end-home.png

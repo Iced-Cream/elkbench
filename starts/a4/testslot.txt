@@ -1,0 +1,103 @@
+# elkbench built-in start for the Analog Four MKII (OS 1.56 with analoghealth), emulator only.
+# A gate batch runs it on a fresh emulator, keeps the end state as a snapshot, and runs hardware
+# plans from there (docs/testing-practices.md, "Messy starts and contrast runs"). Names and slots
+# follow the example write policy (examples/write-policy): `~T ` test names, test slots 121-128.
+format = 1
+unit = a4
+emulator = yes
+name = start testslot
+out = runs
+note = ~T START (slot 121, CREATE NEW + SAVE PROJECT AS) active, T1 OSC1 LEVEL changed unsaved, LFO page open
+
+[start]
+# Boot prompts away (the third NO lands on the home screen and does nothing)
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+shot start-home.png
+
+[setup: CREATE NEW]
+say proves setup: a new project is the working project
+# The A4 route (templates/a4/setup-test-project.txt): CREATE NEW, the LOAD PROJECT list's last row.
+# SAVE ... BEFORE LOADING? is answered NO, PROCEED WITH LOADING? YES.
+tap GLOBAL
+wait 0.5
+keys UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP
+tap YES
+wait 0.5
+keys UP,UP,UP
+tap YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN)
+wait 0.4
+shot createnew.png
+tap YES
+wait 0.8
+shot load-asks.png
+tap NO
+wait 0.8
+shot proceed.png
+tap YES
+wait 4
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+shot new-home.png
+
+[setup: SAVE PROJECT AS 121]
+say proves setup: the new project saved into 121 as ~T START, the saved copy active
+save-project 121 "~T START" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,YES,YES
+wait 2
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+shot saved.png
+
+[121 active]
+say proves evidence: MANAGE PROJECTS shows ~T START in 121 with the active-project marker
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+shot manage-121-active.png
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+
+[an unsaved change: T1 OSC1 LEVEL]
+say proves setup: an unsaved change in the working kit (T1 OSC1 LEVEL moved, nothing saved)
+# OSC1 is entered from FLTR, so its first press opens P 1/2. Remote turns under about 3 ticks are dropped.
+tap T1
+wait 0.5
+tap FLTR
+wait 0.6
+tap OSC1
+wait 0.6
+shot change-osc1-before.png
+turn LEVEL 8 4
+wait 1.5
+shot change-osc1-after.png
+
+[end state]
+say proves evidence: the home title row (kit, BPM) and the LFO page left open
+tap NO
+wait 0.5
+shot end-home.png
+tap LFO
+wait 1
+shot end-lfo.png
