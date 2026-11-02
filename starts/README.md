@@ -34,7 +34,7 @@ test slots 121-128. A setup with other rules keeps its own copies.
 
 | start | leaves |
 |---|---|
-| `dirty` | the card's own project active, as booted, an unsaved change from knob A, track 1's TRIG page open |
+| `dirty` | the card's own project (slot 001) loaded as booted, an unsaved change from knob A, track 1's TRIG page open; no pattern change (see below) |
 | `testslot` | a new test project `~T START` (CREATE NEW, then SAVE PROJECT AS into 121), active, an unsaved change from knob A, track 1's TRIG page open |
 | `occupied` | slots 121-128 holding `~T OCC1`-`~T OCC8` (SAVE PROJECT AS copies of the card's project); the last copy, in 128, is the active project |
 | `testslot-cleared` | `testslot`, then slot 121 cleared through the data store, as every release with `clear_at_release` leaves a unit: `~T START` still the working project, 121 empty with the active-project marker on it |
@@ -82,6 +82,13 @@ What the emulator's card holds (analog-emu, seen 2026-11-02):
   002 active after boot, its pattern A01 on kit 1 (80 BPM; A02 brings kit 2 at 98 BPM), slots
   121-128 empty. It boots to the home screen with no prompt; the starts' NOs at boot do nothing
   there.
+
+- Digitone: one project in slot 001 (write-protected, a lock mark in its row), no slot holds the
+  active-project marker until a SAVE PROJECT AS, pattern A01 on its own sound (86.0 BPM; A02, picked
+  with PTN and a trig key, has another sound at 92.0 BPM), slots 002-128 empty. It boots to the
+  home screen with no prompt; the starts' NOs do nothing there. SAVE PROJECT AS makes the saved
+  copy active, and one to seven `DOWN` after the 15 `FUNC(DOWN)` in its slot list reach 122-128. CREATE NEW
+  keeps the selected pattern, so the Digitone `dirty` start leaves pattern A01.
 
 Known limits:
 - On the Rytm a freshly booted project already counts as modified (a LOAD asks to save it before

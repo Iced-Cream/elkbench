@@ -8,7 +8,7 @@ unit = digitone
 emulator = yes
 name = start dirty
 out = runs
-note = the card's own project active (as booted), an unsaved change from knob A, track 1 TRIG page open
+note = the card's own project (slot 001) loaded as booted, an unsaved change from knob A, track 1 TRIG page open
 
 [start]
 # A fresh digiemu card boots to the home screen with no prompt; the NOs do nothing there
@@ -23,8 +23,13 @@ tap NO
 wait 1.0
 shot start-home.png
 
-[active project still the card's own]
-say proves evidence: MANAGE PROJECTS from the top, the project of the card marked active, 121-128 empty
+[the card's own project]
+# No pattern change, unlike the Rytm and A4 dirty starts: PTN then a trig key (2) selects A02 here
+# too (its own sound and 92.0 BPM), but CREATE NEW keeps the selected pattern, so a new project's
+# title row would read A02 and every template's new-untitled check (rows 0-9, A01) would stop.
+# On a fresh card slot 001 (write-protected, with a lock mark) is the only project, and no slot
+# carries the active-project marker until a SAVE PROJECT AS: its list shows 001 and empty slots.
+say proves evidence: MANAGE PROJECTS from the top, the project of the card in 001, 121-128 empty
 keys SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
 wait 1.0
 keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP)
