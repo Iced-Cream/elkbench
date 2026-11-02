@@ -39,6 +39,9 @@ shot start-manage-121.png
 # The start check: the cursor row at the list's top (rows 0-6) reads 121 and an empty slot, which only
 # the run's own clear produced. Record it in the emulator after an emulator-only step has filled and
 # cleared 121, so the clearing path is tested too.
+# The contrast: from the built-in occupied and testslot starts, 121 holds a project, and the empty-slot
+# check has to stop the run there (a gate batch runs both). From the dirty start the plan has to pass.
+say contrast occupied, testslot: slot 121 holds a project, so the cleared-slot check stops the run
 # Three checks on the row, so a failure says which part differs. The active project's slot shows a
 # marker in cols 28-31, and it stays on a cleared slot when the active project was loaded from it.
 # Cols 0-27: the cursor row reads 121. Cols 32-127: the slot is empty.

@@ -122,6 +122,39 @@ class Rules(unittest.TestCase):
         self.assertEqual(check('[x]\nshot a.png\n', emulator=True)['errors'], [])
 
 
+class Contrasts(unittest.TestCase):
+    STARTS = ('fresh', 'dirty', 'occupied', 'testslot')
+
+    def test_a_start_check_needs_a_contrast_where_the_unit_has_starts(self):
+        r = check(GOOD, starts=self.STARTS)
+        self.assertTrue(any('[start] has no contrast' in e for e in r['errors']), r['errors'])
+        r = check(GOOD)                                     # only `fresh`: a flag, not an error
+        self.assertEqual(r['errors'], [])
+        self.assertTrue(any('start check never seen to fail' in f for f in r['flags']), r['flags'])
+
+    def test_contrasts_are_read_and_listed(self):
+        text = GOOD.replace('tap NO\n', 'tap NO\nsay contrast fresh, testslot: a default project shows no value\n', 1)
+        r = check(text, starts=self.STARTS)
+        self.assertEqual(r['errors'], [])
+        self.assertEqual(r['contrasts'], [('start', 'fresh', 'a default project shows no value'),
+                                          ('start', 'testslot', 'a default project shows no value')])
+        self.assertEqual(plancheck.expected_stops(parse(text)), {'fresh': 'start', 'testslot': 'start'})
+        self.assertTrue(any('[set the value] never seen to fail' in f for f in r['flags']), r['flags'])
+        self.assertIn('  contrast: from testslot it stops in [start] (a default project shows no value)',
+                      plancheck.go_lines(r))
+
+    def test_bad_contrasts_are_refused(self):
+        for line, why in (('say contrast nowhere: x', 'the rytm emulator starts are'),
+                          ('say contrast dirty', 'say why it stops there'),
+                          ('say contrast: x', '(none named)')):
+            r = check(GOOD.replace('tap NO\n', 'tap NO\n%s\n' % line, 1), starts=self.STARTS)
+            self.assertTrue(any(why in e for e in r['errors']), (line, r['errors']))
+        twice = GOOD.replace('tap NO\n', 'tap NO\nsay contrast dirty: a\n', 1).replace(
+            'cc 1 10 64', 'say contrast dirty: b\ncc 1 10 64')
+        r = check(twice, starts=self.STARTS)
+        self.assertTrue(any('both name contrast dirty' in e for e in r['errors']), r['errors'])
+
+
 class References(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix='plancheck-')
@@ -167,37 +200,74 @@ tap YES
         self.assertFalse(any('BEFORE LOADING' in e for e in r['errors']), r['errors'])
 
 
+def template_files():
+    """Every template under templates/, its subfolders (one per unit) included, as (label, path)."""
+    root = os.path.join(HERE, 'templates')
+    out = []
+    for d, subs, files in os.walk(root):
+        subs.sort()
+        for f in sorted(files):
+            if f.endswith('.txt'):
+                path = os.path.join(d, f)
+                out.append((os.path.relpath(path, root).replace(os.sep, '/'), path))
+    return out
+
+
+def unit_starts(unit):
+    """('fresh', and the unit's built-in starts in starts/UNIT/)."""
+    folder = os.path.join(HERE, 'starts', unit)
+    names = sorted(f[:-4] for f in os.listdir(folder) if f.endswith('.txt')) if os.path.isdir(folder) else []
+    return ('fresh',) + tuple(names)
+
+
 class Templates(unittest.TestCase):
     def test_every_template_passes_the_checker(self):
-        folder = os.path.join(HERE, 'templates')
-        names = sorted(f for f in os.listdir(folder) if f.endswith('.txt'))
-        self.assertGreaterEqual(len(names), 5)
-        refs = set()
-        for n in names:
-            with open(os.path.join(folder, n), encoding='utf-8') as fh:
+        found = template_files()
+        self.assertGreaterEqual(len(found), 5)
+        refs = {}
+        for n, path in found:
+            with open(path, encoding='utf-8') as fh:
                 text = fh.read()
             flash = re.search(r'^flash\s*=\s*(\S+)', text, re.M)
             over = re.search(r'^os\s*=\s*(\S+)', text, re.M)
-            r = plancheck.check(parse(text), flash=flash and flash.group(1), os_file=over and over.group(1))
+            unit = re.search(r'^unit\s*=\s*(\S+)', text, re.M)
+            unit = unit.group(1) if unit else 'rytm'
+            r = plancheck.check(parse(text), unit=unit, flash=flash and flash.group(1),
+                                starts=unit_starts(unit), os_file=over and over.group(1))
             self.assertEqual(r['errors'], [], n)
+            # one refs folder per template, across every unit's folder: a plan copied from one
+            # keeps its refs line, and two plans in a run must never compare the same file
             ref = re.search(r'^refs\s*=\s*(\S+)', text, re.M)
             if ref:
-                self.assertNotIn(ref.group(1), refs, '%s shares its refs folder' % n)
-                refs.add(ref.group(1))
+                self.assertNotIn(ref.group(1), refs, '%s shares its refs folder with %s'
+                                 % (n, refs.get(ref.group(1))))
+                refs[ref.group(1)] = n
 
     def test_every_template_step_parses(self):
         # analogrun splits each step with shlex: a stray quote mark (an apostrophe in a say or
         # listen line) stops the run at that step
         import shlex
-        folder = os.path.join(HERE, 'templates')
-        for n in sorted(f for f in os.listdir(folder) if f.endswith('.txt')):
-            with open(os.path.join(folder, n), encoding='utf-8') as fh:
+        for n, path in template_files():
+            with open(path, encoding='utf-8') as fh:
                 for name, lines in parse(fh.read()):
                     for l in lines:
                         try:
                             shlex.split(l, comments=True)
                         except ValueError as e:
                             self.fail('%s [%s] %r: %s' % (n, name, l, e))
+
+    def test_every_start_parses(self):
+        import shlex
+        folder = os.path.join(HERE, 'starts')
+        files = [os.path.join(r, f) for r, _, fs in os.walk(folder) for f in fs if f.endswith('.txt')]
+        self.assertGreaterEqual(len(files), 3)
+        for p in files:
+            with open(p, encoding='utf-8') as fh:
+                text = fh.read()
+            self.assertRegex(text, r'(?m)^emulator = yes$', p)
+            for name, lines in parse(text):
+                for l in lines:
+                    shlex.split(l, comments=True)
 
 
 if __name__ == '__main__':

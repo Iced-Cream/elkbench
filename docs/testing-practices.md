@@ -50,8 +50,9 @@ reaches the hardware only with something that has already worked in the emulator
 - **Nor is its working state.** The active project's kit, pattern, tempo and unsaved changes,
   and the UI's memory (the last subpage a page key opened, menu cursors), differ between the
   unit and the emulator. A plan sets every state it depends on itself, reaches pages through a
-  known page, enters menus from their top, proves each precondition on screen, and is gated from unit-like starts (an active
-  test project in the slot, with and without unsaved changes). Global settings it relies on, such
+  known page, enters menus from their top, proves each precondition on screen, and is gated
+  from unit-like starts (the built-in `dirty` and `occupied` starts, see "Messy starts and
+  contrast runs"). Global settings it relies on, such
   as MIDI channels, get a readback before anything depends on them.
 - **A plan makes all the state it needs, inside its own claim.** Treat everything on the unit
   at claim time as unknown: what the test slots hold, the active project, its unsaved changes,
@@ -102,6 +103,47 @@ and the go request shows that start and lists every `wait N audio` that was shor
 that names its OS (`os = FILE`) runs only on an emulator booted on that file, its pass is keyed
 with it, and a flash's pass is keyed with the OS it flashed over: stock back over build A does
 not vouch for stock back over build B.
+
+### Messy starts and contrast runs
+
+A pass from a fresh emulator says the plan works from the card as shipped. A unit is never in
+that state, and a check that passes from every state proves nothing. Two kinds of extra runs
+close those gaps.
+
+- **Built-in starts.** elkbench ships start plans per unit (`starts/<unit>/`, emulator only)
+  that leave a fresh emulator the way a unit is usually found. For the Rytm MKII:
+  - `dirty`: the card's own project active, another pattern and kit, an unsaved change, and
+    the LFO page left open;
+  - `testslot`: a test project in slot 121 active, with an unsaved change;
+  - `occupied`: every test slot 121-128 holding a throwaway test project.
+  `fresh` (the card as shipped) is a start on every unit. The names and slots follow the
+  example write policy (`examples/write-policy/`); a setup with other rules points `starts` in
+  config.toml at its own folder.
+- **Every plan runs from the messy starts.** A hardware plan's go needs a run from `dirty` and
+  from `occupied` (where the unit has them) besides its own pass. Each must pass, or stop
+  where the plan says it stops (next point). A plan that runs half way and then fails from a
+  messy start would do the same on a unit left that way. A plan that flashes is left out: it
+  starts on the OS before its flash (often stock, where no start can be built), and the flash is
+  gated as a transition.
+- **Contrast runs: a check must be seen to fail.** A section names the starts from which it
+  must stop the run, and why: `say contrast occupied, testslot: slot 121 holds a project, so
+  the cleared-slot check stops`. The run from that start has to stop in that section: not
+  earlier (the check was never reached), and not pass (the check cannot tell the two states
+  apart). The first section, the start check, names at least one where the unit has built-in
+  starts. A readback plan that only passes after another plan names `fresh` (a default project
+  has no kept value), and its own pass comes from `run_plan` after that plan.
+- **A pass shows what ran before it.** A pass on the session's emulator records the plans and
+  calls that ran on it since it booted, and the go request lists them. A pass that ran after an
+  ungated write (an emulator-only plan that saves or sends, or a `steps` or `data` write) is
+  not recorded: boot a fresh emulator or use a gate batch.
+
+*elkbench enforces*: a gate batch runs each plan from every start its go needs, side by side,
+each on a fresh emulator (a built-in start is built once per build and kept as a snapshot where
+the emulator has snapshots), and records each run that went as the plan says. `approve_plan`
+and `approval_text` refuse a plan with a start run missing, and the go request lists every
+start run with its outcome. The plan checker refuses a contrast that names no start the unit
+has, a start named in two sections, and, where the unit has built-in starts, a start check
+with no contrast; it flags `set-and-kept` and `works` sections that no contrast stops.
 
 ## 2. One go per run
 
@@ -324,6 +366,8 @@ the plan meant, and that each check would have failed if the result were wrong.
 
 - **A start check.** A plan's first section proves the state it starts from on screen, before
   anything is written: the right page, the cleared test slot, the value a power cycle had to keep.
+  It names a start from which it stops the run (`say contrast START: why`), so it has been seen
+  to fail.
 - **Prove content, not a name.** A precondition shows something only this run's setup produced
   (on the Rytm, a new project's title row reads `K001:KIT 1` and `BPM:120.0`). A check of a name
   the plan's own save step has just written passes on a copy of any project.
