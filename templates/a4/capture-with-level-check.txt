@@ -109,7 +109,10 @@ expect-screen playing 2 rows=2-6 cols=119-125
 
 [level check (hardware)]
 say proves works: T1 sounds at its reference level on its own channel (3) before any take
-audio-record 3 level
+# Every take is a whole number of bars (a new project: 120 BPM, one T1 note per 2 s bar), so each
+# holds the same notes wherever it starts. A 3 s take held one or two, and audio-compare's bands
+# below the note then differed by several dB from the reference while the level matched.
+audio-record 4 level
 audio-compare level-ref level 3
 
 [take (hardware)]
