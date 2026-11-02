@@ -3,14 +3,15 @@
 
 Runs under digiemu's own Python (in WSL on Windows), started by elkbench's emulator tool:
 
-    python digiemu_usb.py REPO SYX PORT MINUTES TAG [--firmware-dir DIR] [--home DIR]
+    python digiemu_usb.py REPO SYX PORT MINUTES TAG [--firmware-dir DIR] [--din-port PORT] [--home DIR]
                           [--setup-key KEY [--require-setup] [--keep N] [--days D]]
 
 The .syx is set up once in a digiemu home (digiemu's `--add`: extract, cold boot, settle;
 about half a minute), shared by every session. Each start copies that folder to a work
 folder of its own (TAG), so the session's card and any OS upgrade stay its own, then runs
 digiemu's tools/usbrun.py on the settled snapshot: the link listens on 127.0.0.1:PORT, an
-OS upgrade over it reboots into the new OS, and it stops after MINUTES.
+OS upgrade over it reboots into the new OS, and it stops after MINUTES. --din-port serves the
+DIN MIDI ports the same way, raw MIDI bytes both ways (a digiemu whose usbrun.py has it).
 
 Setup snapshots (--setup-key KEY, a digiemu whose usbrun.py has --stdin-commands):
 the home's setup-snapshots/KEY folder holds a machine saved after a plan's setup
@@ -41,6 +42,9 @@ def main(argv=None):
     ap.add_argument('--ob-audio-port', type=int, default=None,
                     help='also serve the twelve Overbridge audio channels on this TCP port '
                          '(a digiemu whose usbrun.py has --ob-audio-port)')
+    ap.add_argument('--din-port', type=int, default=None,
+                    help='also serve the DIN MIDI ports on this TCP port (a digiemu whose usbrun.py '
+                         'has --din-port)')
     ap.add_argument('--setup-key', default=None,
                     help='resume this setup snapshot if stored, and store it on `save`')
     ap.add_argument('--require-setup', action='store_true',
@@ -106,6 +110,7 @@ def run(usbrun, snap, paths, work, args, extra=()):
                         '--firmware', paths.syx, '--workdir', os.path.join(work, 'reboots'),
                         '--report', '60'] + (['--firmware', args.firmware_dir] if args.firmware_dir else [])
                        + (['--ob-audio-port', str(args.ob_audio_port)] if args.ob_audio_port else [])
+                       + (['--din-port', str(args.din_port)] if args.din_port else [])
                        + list(extra))
 
 

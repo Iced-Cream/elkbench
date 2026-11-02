@@ -1801,9 +1801,113 @@ class InProcess(unittest.TestCase):
         self.assertEqual(testplan.parse(self.d.batch_plan(info, work, 'batch run 1'))[0]['din'], '')
         self.assertEqual(testplan.parse(plan)[0]['din'], 'USB MIDI Interface')    # the plan itself keeps it
 
-    def test_din_not_on_the_digitone(self):
-        with self.assertRaisesRegex(daemon.Refused, 'Rytm and A4 only'):
-            self.d.device_do(self.s, 'digitone', 'emulator', 'send %s din' % self.kit_request())
+    def test_digitone_din(self):
+        old, new, emu = (os.path.join(TMP, n) for n in ('dn-din-old', 'dn-din-new', 'dn-din-emu'))
+        for root, text in ((old, "    send FILE\n'''\nap.add_argument('--port')\n"),
+                           (new, "    send FILE [din]\n'''\nap.add_argument('--din', default=None)\n")):
+            os.makedirs(os.path.join(root, 'tools'), exist_ok=True)
+            with open(os.path.join(root, 'tools', 'digirun.py'), 'w') as fh:
+                fh.write("'''digirun\n%s" % text)
+        os.makedirs(os.path.join(emu, 'tools'), exist_ok=True)
+        with open(os.path.join(emu, 'tools', 'usbrun.py'), 'w') as fh:
+            fh.write("ap.add_argument('--port')\n")
+        steps = 'send %s din; capture d.syx 2 any din' % self.kit_request()
+        proc = type('P', (), {'poll': lambda self: None, 'pid': 98})()
+        ran = []
+        saved = daemon.DIGIHEALTH, daemon.DIGIEMU, daemon.subprocess.run
+        daemon.subprocess.run = lambda cmd, **kw: (ran.append(cmd), subprocess.CompletedProcess(cmd, 0, '  ok\n', ''))[1]
+        try:
+            daemon.DIGIHEALTH, daemon.DIGIEMU = old, emu
+            self.d.emulators[(self.s.sid, 'digitone')] = dict(proc=proc, session=self.s.sid, build='b',
+                                                              address='tcp:127.0.0.1:7401')
+            self.assertIn('need a digirun.py with --din', daemon.din_refusal('digitone'))
+            self.assertIsNone(daemon.din_refusal('rytm'))
+            self.assertNotIn('din', daemon.no_steps('digitone'))             # an option, not a step
+            with self.assertRaisesRegex(daemon.Refused, 'need a digirun.py with --din'):
+                self.d.device_do(self.s, 'digitone', 'emulator', steps)
+            daemon.DIGIHEALTH = new
+            self.assertIsNone(daemon.din_refusal('digitone'))
+            self.assertIsNone(daemon.din_refusal('digitakt'))
+            self.assertFalse(self.d.emu_has_din('digitone'))
+            with self.assertRaisesRegex(daemon.Refused, "digiemu's tools/usbrun.py has no --din-port"):
+                self.d.device_do(self.s, 'digitone', 'emulator', steps)
+            with open(os.path.join(emu, 'tools', 'usbrun.py'), 'a') as fh:
+                fh.write("ap.add_argument('--din-port', type=int)\n")
+            self.assertTrue(self.d.emu_has_din('digitone'))
+            with self.assertRaisesRegex(daemon.Refused, 'started without its DIN MIDI port'):
+                self.d.device_do(self.s, 'digitone', 'emulator', steps)
+            self.d.emulators[(self.s.sid, 'digitone')]['din'] = 'tcp:127.0.0.1:7402'
+            ok, line, _ = self.d.device_do(self.s, 'digitone', 'emulator', steps)
+            self.assertTrue(ok, line)
+            self.assertEqual(ran[-1][2:7], ['--port', 'tcp:127.0.0.1:7401', '--din', 'tcp:127.0.0.1:7402', 'do'])
+            ok, _, _ = self.d.device_do(self.s, 'digitone', 'emulator', 'send %s' % self.kit_request())
+            self.assertNotIn('--din', ran[-1])                                # only when a step uses it
+            with self.assertRaisesRegex(daemon.Refused, 'no interface is set for the digitone'):
+                self.d.din_args(self.s, 'digitone', 'hardware', ['send x.syx din'])
+        finally:
+            daemon.DIGIHEALTH, daemon.DIGIEMU, daemon.subprocess.run = saved
+            self.d.emulators.pop((self.s.sid, 'digitone'), None)
+
+    @needs_runner
+    def test_digitone_din_plans_and_batches(self):
+        old, new = os.path.join(TMP, 'dn-din-old'), os.path.join(TMP, 'dn-din-new')
+        for root, text in ((old, "ap.add_argument('--port')\n"), (new, "ap.add_argument('--din', default=None)\n")):
+            os.makedirs(os.path.join(root, 'tools'), exist_ok=True)
+            with open(os.path.join(root, 'tools', 'digirun.py'), 'w') as fh:
+                fh.write("'''digirun\n    send FILE\n    capture FILE S\n'''\n" + text)
+        plan = os.path.join(TMP, 'dn-din-plan.txt')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write('format = 1\nunit = digitone\n[dumps over din]\nsend %s din\ncapture d.syx 2 any din\n'
+                     % self.kit_request())
+        saved, launch = daemon.DIGIHEALTH, self.d.digiemu_launch
+        try:
+            daemon.DIGIHEALTH = old
+            with self.assertRaisesRegex(daemon.Refused, 'need a digirun.py with --din'):
+                self.d.plan_info(plan)
+            daemon.DIGIHEALTH = new
+            self.assertTrue(self.d.plan_info(plan)['din'])
+            ended = []
+            self.d.end_emulator = ended.append
+            self.d.digiemu_launch = lambda *a, **k: (dict(address='tcp:127.0.0.1:7401'), '')
+            proc, addr, why, din = self.d.batch_emulator('digitone', 'b.syx', TMP, 1, din=True)
+            self.assertIsNone(proc)
+            self.assertIn('no --din-port', why)                              # this digiemu serves no DIN
+            self.assertEqual(len(ended), 1)
+            self.d.digiemu_launch = lambda *a, **k: (dict(address='tcp:127.0.0.1:7401', din='tcp:127.0.0.1:7402'), '')
+            self.assertEqual(self.d.batch_emulator('digitone', 'b.syx', TMP, 1, din=True)[1:],
+                             ('tcp:127.0.0.1:7401', None, 'tcp:127.0.0.1:7402'))
+            self.assertIsNone(self.d.batch_emulator('digitone', 'b.syx', TMP, 1)[3])
+        finally:
+            daemon.DIGIHEALTH = saved
+            self.d.digiemu_launch = launch
+            self.d.__dict__.pop('end_emulator', None)
+
+    def test_digiemu_din_port_on_a_resumed_setup(self):
+        emu = os.path.join(TMP, 'dn-din-emu-resume')
+        os.makedirs(os.path.join(emu, 'tools'), exist_ok=True)
+        with open(os.path.join(emu, 'tools', 'usbrun.py'), 'w') as fh:
+            fh.write("ap.add_argument('--din-port', type=int)\n")
+        build = os.path.join(TMP, 'dn-resume.syx')
+        with open(build, 'wb') as fh:
+            fh.write(b'\xf0\xf7')
+        work = tempfile.mkdtemp(dir=TMP)
+        cmds = []
+        proc = type('P', (), {'poll': lambda self: 1, 'pid': 98})()
+        saved = daemon.DIGIEMU, daemon.subprocess.Popen
+        daemon.DIGIEMU = emu
+        daemon.subprocess.Popen = lambda cmd, **kw: (cmds.append(cmd), proc)[1]
+        self.d.stop_emulator = lambda e: None
+        try:
+            with self.assertRaisesRegex(daemon.Refused, 'did not start'):    # the stub never comes up
+                self.d.digiemu_launch(build, 1, 'resume-test', work, os.path.join(work, 'firmware'),
+                                      started=lambda e: cmds.append(e), setup_key='k1')
+        finally:
+            daemon.DIGIEMU, daemon.subprocess.Popen = saved
+            self.d.__dict__.pop('stop_emulator', None)
+        cmd, e = [str(x) for x in cmds[0]], cmds[1]
+        self.assertIn('--din-port', cmd)
+        self.assertIn('--setup-key', cmd)                                   # resuming a setup snapshot
+        self.assertEqual(e['din'], 'tcp:127.0.0.1:%s' % cmd[cmd.index('--din-port') + 1])
 
     def test_no_stats_build(self):
         build = daemon.sha256(os.path.join(TMP, 'os', 'remote-only.syx'))
