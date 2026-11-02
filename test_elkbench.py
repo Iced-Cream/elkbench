@@ -1022,7 +1022,9 @@ class InProcess(unittest.TestCase):
                 (lambda t: t + 'power-cycle\n', 'power cycle 2 has no machine assertion'),
                 (lambda t: t.replace('power-cycle', 'power-cycle now'), 'takes nothing more'),
                 (lambda t: t.replace('[kept]', '[kept (hardware)]'), r'in a \(hardware\) section'),
-                (lambda t: t.replace('format = 1', 'format = 1\nsnapshot-after = kept'), 'in the setup'),
+                # a section after the setup, so the snapshot-after check itself passes
+                (lambda t: t.replace('format = 1', 'format = 1\nsnapshot-after = kept') + '\n[after]\nsay done\n',
+                 'in the setup'),
                 (lambda t: t.replace('unit = %s' % unit, 'unit = digitone'), '(?i)Rytm and A4 only|digi'),
                 (lambda t: t.replace('format = 1', 'format = 1\nflash = %s' % os.path.join(TMP, 'os', 'test-build.syx')),
                  'cannot flash')):
@@ -1761,7 +1763,7 @@ class InProcess(unittest.TestCase):
         with self.assertRaisesRegex(daemon.Refused, 'has no --din-midi-tcp'):
             self.d.t_batch(self.s, {'plan': plan, 'build': build, 'variants': [{}]})
         asked = []
-        self.d.batch_emulator = lambda unit, build, work, minutes, snapshot=None, din=False: (
+        self.d.batch_emulator = lambda unit, build, work, minutes, snapshot=None, din=False, **kw: (
             asked.append(din), (None, 'tcp:127.0.0.1:7001', None, 'tcp:127.0.0.1:7002' if din else None))[1]
         ran = self.capture_runs()
         folder = tempfile.mkdtemp(dir=TMP)
@@ -1985,7 +1987,7 @@ class InProcess(unittest.TestCase):
                 fh.write(text.replace('name = menus', 'name = ' + name).replace('out = runs', 'out = runs-' + name)
                          + '\n[%s]\nwait 0.1\n' % name)            # steps differ, so keys differ
         self.d.emu_has_snapshots = lambda unit: False
-        self.d.batch_emulator = lambda unit, build, work, minutes, snapshot=None, din=False: (
+        self.d.batch_emulator = lambda unit, build, work, minutes, snapshot=None, din=False, **kw: (
             None, 'tcp:127.0.0.1:7001', None, None)
         projects = {'after': {121: ('~T A', 'a')}}
         self.d.saved_projects = lambda addr, folder: projects['after'] if folder.endswith('after') else {121: ('~T A', 'a')}
@@ -2091,7 +2093,7 @@ class InProcess(unittest.TestCase):
         self.assertEqual(info['check']['errors'], [])
         self.assertEqual(daemon.starts_needed(info), {'dirty': None, 'occupied': 'start', 'testslot': 'start'})
         self.d.emu_has_snapshots = lambda unit: False          # each start is built in its run
-        self.d.batch_emulator = lambda unit, build, work, minutes, snapshot=None, din=False: (
+        self.d.batch_emulator = lambda unit, build, work, minutes, snapshot=None, din=False, **kw: (
             None, 'tcp:127.0.0.1:7001', None, None)
         self.d.saved_projects = lambda addr, folder: {121: ('~T A', 'a')}
         ran, behave = [], {}
@@ -2183,7 +2185,7 @@ class InProcess(unittest.TestCase):
         self.d.emu_has_snapshots = lambda unit: False
         booted = []
 
-        def emu(unit, build, work, minutes, snapshot=None, din=False):
+        def emu(unit, build, work, minutes, snapshot=None, din=False, **kw):
             booted.append(build)
             return None, 'tcp:127.0.0.1:7001', None, None
         self.d.batch_emulator = emu
@@ -2257,7 +2259,7 @@ class InProcess(unittest.TestCase):
             def flush(self):
                 pass
 
-        def emu(unit, build, work, minutes, snapshot=None, din=False):
+        def emu(unit, build, work, minutes, snapshot=None, din=False, **kw):
             booted.append(snapshot)
             log = os.path.join(work, 'emulator.log')
             open(log, 'w').close()
@@ -2420,7 +2422,7 @@ class InProcess(unittest.TestCase):
         os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
         build = os.path.join(TMP, 'os', 'test-build.syx')
         self.d.emu_has_snapshots = lambda unit: False
-        self.d.batch_emulator = lambda unit, build, work, minutes, snapshot=None, din=False: (
+        self.d.batch_emulator = lambda unit, build, work, minutes, snapshot=None, din=False, **kw: (
             None, 'tcp:127.0.0.1:7004', None, None)
         self.d.saved_projects = lambda addr, folder: {121: ('~T A', 'a')}
         ran = []
