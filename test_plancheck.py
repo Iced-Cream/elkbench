@@ -259,7 +259,9 @@ class Templates(unittest.TestCase):
     def test_every_start_parses(self):
         import shlex
         folder = os.path.join(HERE, 'starts')
-        files = [os.path.join(r, f) for r, _, fs in os.walk(folder) for f in fs if f.endswith('.txt')]
+        # the start files elkbench reads: <unit>/<start>.txt (a run of one leaves logs in <unit>/runs/)
+        files = [os.path.join(folder, u, f) for u in os.listdir(folder) if os.path.isdir(os.path.join(folder, u))
+                 for f in os.listdir(os.path.join(folder, u)) if f.endswith('.txt')]
         self.assertGreaterEqual(len(files), 3)
         for p in files:
             with open(p, encoding='utf-8') as fh:

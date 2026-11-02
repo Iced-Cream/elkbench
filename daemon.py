@@ -248,6 +248,56 @@ def unit_starts(unit):
     return out
 
 
+def start_data(text, here, start):
+    """`data = OP PATH [FILE]; ...` in a start file -> [(op, path, file or None)]: data store
+    steps run on the emulator before the start's own sections. `clear PATH` empties a slot,
+    `put PATH FILE` writes an object saved by `data get` (FILE relative to the start file)."""
+    out = []
+    for part in text.split(';'):
+        try:
+            w = shlex.split(part)
+        except ValueError as e:
+            raise Refused('start %s: data step %r does not parse (%s)' % (start, part.strip(), e))
+        if not w:
+            continue
+        op = w[0].lower()
+        if op == 'clear' and len(w) == 2 and w[1].startswith('/'):
+            out.append(('clear', w[1], None))
+        elif op == 'put' and len(w) == 3 and w[1].startswith('/'):
+            f = os.path.normpath(w[2] if os.path.isabs(w[2]) else os.path.join(here, w[2]))
+            if not os.path.isfile(f):
+                raise Refused('start %s: data put %s: no file %s' % (start, w[1], f))
+            out.append(('put', w[1], f))
+        else:
+            raise Refused('start %s: data step %r is `clear PATH` or `put PATH FILE` (PATH a data '
+                          'store path starting with \'/\')' % (start, part.strip()))
+    return out
+
+
+def start_chain(unit, start, seen=()):
+    """-> [(start, start file, data steps)] that build the built-in start `start`, its bases
+    first. A start file may build on another start of the same unit (`base = START`: that start
+    first, on the same emulator) and run data store steps (`data = ...`, see start_data) after
+    its base and before its own sections, so a start can reach states the front panel cannot
+    (a project loaded from a test slot that was then cleared, as a run's backup and clear leaves it)."""
+    have = unit_starts(unit)
+    if not have.get(start):
+        raise Refused('the %s has no built-in start %r (starts: %s)' % (unit, start, ', '.join(sorted(have))))
+    if start in seen:
+        raise Refused('built-in start %s builds on itself (base = ... %s)' % (start, ' -> '.join(seen + (start,))))
+    path = have[start]
+    runner()
+    try:
+        settings, _ = testplan.parse(path)
+    except (ValueError, OSError) as e:
+        raise Refused('built-in start %s does not parse: %s' % (start, e))
+    if settings.get('unit', 'rytm') != unit:
+        raise Refused('built-in start %s is for unit %s, not %s' % (start, settings.get('unit', 'rytm'), unit))
+    base = (settings.get('base') or '').strip().lower()
+    chain = start_chain(unit, base, seen + (start,)) if base and base != 'fresh' else []
+    return chain + [(start, path, start_data(settings.get('data') or '', os.path.dirname(path), start))]
+
+
 def starts_needed(info):
     """-> {start: the section a run from it must stop in, or None: it must pass} for a hardware
     plan: the required starts its unit has (not for a plan that flashes), and every start its
@@ -258,6 +308,8 @@ def starts_needed(info):
     # build a start with), and the flash itself is gated as a transition: only its own contrasts
     want = {} if info.get('flash') else {st: stops.get(st) for st in REQUIRED_STARTS if st in have}
     want.update(stops)
+    if info.get('home') and want.get(info['home'], 0) is None:
+        del want[info['home']]           # the plan's own run starts there: its pass covers it
     return want
 
 
@@ -932,9 +984,26 @@ class Daemon:
                                       'capture step saved' % w[1])
                     self.check_dumps(w[1], here)
                     send_sums.append((w[1], sha256(w[1])))
+        # start = START: the plan's own run starts from that built-in start, not a fresh emulator
+        # (a plan for a state only a start leaves, such as a project loaded from a cleared slot)
+        home = (settings.get('start') or '').strip().lower() or None
+        if home == 'fresh':
+            home = None
+        if home:
+            if settings.get('emulator', 'no').lower() == 'yes':
+                raise Refused('start = %s is for hardware plans (an emulator plan runs where it is run)' % home)
+            if flash:
+                raise Refused('start = %s: a plan that flashes starts on the OS before its flash, where no '
+                              'built-in start is built' % home)
+            start_chain(unit, home)
+            if home in plancheck.expected_stops(steps):
+                raise Refused('start = %s, and a contrast says the run from %s stops: the plan\'s own run '
+                              'must pass from its start' % (home, home))
         vouched = {'unit': unit, 'steps': steps, 'flash': flash_sha, 'refs': ref_sums}
         if send_sums:                 # left out otherwise, so earlier passes still count
             vouched['sends'] = send_sums
+        if home:
+            vouched['start'] = home
         old_key = hashlib.sha256(json.dumps(vouched, sort_keys=True).encode()).hexdigest()
         if os_sha:                    # left out otherwise, so earlier passes still count
             vouched['os'] = os_sha
@@ -962,7 +1031,7 @@ class Daemon:
                                 starts=tuple(unit_starts(unit)))
         return dict(path=path, here=here, settings=settings, steps=steps, unit=unit, key=key, check=check,
                     old_key=old_key, os_file=os_file, os_sha=os_sha, flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, setup=setup, din=bool(din),
-                    audio_waits=audio_waits(steps), power_cycles=cycles,
+                    audio_waits=audio_waits(steps), power_cycles=cycles, home=home,
                     name=settings.get('name') or os.path.splitext(os.path.basename(path))[0],
                     emulator=settings.get('emulator', 'no').lower() == 'yes', rel=rel)
 
@@ -2431,6 +2500,10 @@ class Daemon:
                               info['emulator'] and info['writes'])
             if tgt == 'hardware':
                 pass
+            elif ok and record and info.get('home'):
+                job.lines.append('not recorded as the emulator pass: the plan starts from built-in start %s '
+                                 '(start = %s), which a gate batch builds; run it with batch gate true'
+                                 % (info['home'], info['home']))
             elif ok and record and tainted:
                 # proposal B.3: a pass may not stand on state an ungated step wrote
                 job.lines.append('not recorded as the emulator pass: it ran after %s, which wrote state outside '
@@ -3053,12 +3126,17 @@ class Daemon:
             # there, so its own pass comes from run_plan after the plan that leaves its start
             runs_of = []
             for v in variants:
-                want, have = starts_needed(v['info']), unit_starts(v['info']['unit'])
-                if 'fresh' not in want:
+                u_, home = v['info']['unit'], v['info'].get('home')
+                want, have = starts_needed(v['info']), unit_starts(u_)
+                if home:                 # start = START: its own run (and pass) from that start
+                    runs_of.append(dict(v, name='%s (from %s)' % (v['name'], home), home=home,
+                                        start_plan=have[home], start_chain=start_chain(u_, home)))
+                elif 'fresh' not in want:
                     runs_of.append(v)
                 for st, expect in sorted(want.items()):
                     runs_of.append(dict(v, name='%s @%s' % (v['name'], st), start=st, expect=expect,
-                                        start_plan=have.get(st)))
+                                        start_plan=have.get(st),
+                                        start_chain=start_chain(u_, st) if have.get(st) else None))
             variants = runs_of
         if len(units) != 1:
             raise Refused('every variant runs on one unit' if flash or len(units) > 1 else 'give unit')
@@ -3095,7 +3173,8 @@ class Daemon:
                         variants.remove(v)
                     continue
                 ep = self.plan_pass(v['info'])
-                if ep and ep.get('os') == v['os'] and ep.get('start') in KNOWN_STARTS:
+                known = ('built-in start ' + v['home'],) if v.get('home') else KNOWN_STARTS
+                if ep and ep.get('os') == v['os'] and ep.get('start') in known:
                     kept.append('kept: %s, unchanged since its pass (%s)' % (
                         v['name'], ep.get('run_dir') or stamp(ep['time'])))
                     variants.remove(v)
@@ -3107,7 +3186,7 @@ class Daemon:
         if gate:
             # setup inside each plan (snapshot-after): its setup runs once per build and is
             # resumed, as run_plan does; plans with the same setup share one snapshot
-            snap_ok = lambda v: v['info']['setup'] and not v['info']['flash'] and not v.get('start')
+            snap_ok = lambda v: v['info']['setup'] and not v['info']['flash'] and not v.get('start_plan')
             can_snap = not digi and self.emu_has_snapshots(unit)
             snapshot = a.get('snapshot') is not False and any(snap_ok(v) for v in variants) and can_snap
             for v in variants:
@@ -3155,7 +3234,7 @@ class Daemon:
             # start at once instead of waiting for every setup; one setup run per snapshot key
             if v.get('start_snap'):
                 with locks_guard:
-                    lock = locks.setdefault('start:' + self.start_key(unit, v['build'], v['start_plan']),
+                    lock = locks.setdefault('start:' + self.start_key(unit, v['build'], v['start_chain']),
                                             threading.Lock())
                 with lock:
                     why = self.batch_start(s, unit, v, minutes, folder)
@@ -3418,48 +3497,84 @@ class Daemon:
         finally:
             self.end_emulator(proc)
 
-    def start_key(self, unit, build, start_plan):
+    def start_key(self, unit, build, chain):
         """What a built-in start's snapshot vouches for: the unit, the emulator binary, the build
-        and card it booted, and the start plan's text."""
+        and card it booted, and the text of the start file and of each base it builds on, with
+        the files its data steps put."""
         u = UNITS[unit]
         exe = os.path.join(ANALOG_EMU or '', u.get('emu_exe') or '')
         card = u.get('emu_card')
-        with open(start_plan, 'rb') as fh:
-            text = fh.read()
+        parts = []
+        for name, path, data in chain:
+            with open(path, 'rb') as fh:
+                text = fh.read()
+            parts.append([name, hashlib.sha256(text).hexdigest(),
+                          [[op, where, sha256(f) if f else None] for op, where, f in data]])
+        start = parts[0][1] if len(parts) == 1 and not parts[0][2] else parts   # one plain start: as before
         return hashlib.sha256(json.dumps({
             'unit': unit, 'emulator': sha256(exe) if os.path.isfile(exe) else None, 'build': sha256(build),
             'card': sha256(card) if card and os.path.isfile(card) else None,
-            'start': hashlib.sha256(text).hexdigest()}, sort_keys=True).encode()).hexdigest()
+            'start': start}, sort_keys=True).encode()).hexdigest()
+
+    def start_data_step(self, s, addr, op, path, src, work):
+        """One data store step of a start on the emulator at addr, through analogrun's `data`
+        (the local write policy is asked, as for the data tool). -> (ok, output)."""
+        script = runner()
+        slug = re.sub(r'[^\w-]+', '_', path.strip('/'))[:40] or 'root'
+        args = [op, path, src if op == 'put' else os.path.join(work, 'data-clear-%s-before.bin' % slug), '--yes']
+        r = subprocess.run([sys.executable, script, '--port', addr, 'data'] + args,
+                           cwd=os.path.dirname(os.path.dirname(script)), env=s.env(), capture_output=True,
+                           text=True, encoding='utf-8', errors='replace', timeout=300, **NOWIN)
+        return r.returncode == 0, '$ data %s\n%s%s' % (' '.join(args), r.stdout, r.stderr)
 
     def start_steps(self, s, unit, v, addr, work, minutes):
-        """Run v's start plan on the emulator at addr. -> None, or why the start was not built."""
-        sinfo = self.plan_info(v['start_plan'])
+        """Build v's built-in start on the emulator at addr: for each start of its chain, base
+        first, its data steps, then its own sections. -> None, or why the start was not built."""
+        chain = v.get('start_chain') or start_chain(unit, v.get('start') or v['home'])
         os.makedirs(work, exist_ok=True)
-        plan = self.batch_plan(sinfo, work, 'start %s' % v['start'], out=work)
-        p = subprocess.run([sys.executable, RUNNER, '--port', addr, '--quiet', 'run', plan], cwd=ANALOGHEALTH,
-                           env=s.env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
-                           encoding='utf-8', errors='replace', timeout=minutes * 60, **NOWIN)
-        ok, line = self.plan_outcome(p.returncode, p.stdout)
-        with open(os.path.join(work, 'start.log'), 'w', encoding='utf-8') as fh:
-            fh.write(p.stdout)
-        return None if ok else 'start %s was not built: %s (%s)' % (v['start'], line, work)
+        log = []
+        try:
+            for name, path, data in chain:
+                sub = work if len(chain) == 1 else os.path.join(work, name)
+                os.makedirs(sub, exist_ok=True)
+                for op, where, src in data:
+                    ok, text = self.start_data_step(s, addr, op, where, src, sub)
+                    log.append(text)
+                    if not ok:
+                        last = [l for l in text.splitlines() if l.strip()][-1:] or ['failed']
+                        return 'start %s was not built: data %s %s: %s (%s)' % (name, op, where, last[0].strip(), sub)
+                sinfo = self.plan_info(path)
+                plan = self.batch_plan(sinfo, sub, 'start %s' % name, out=sub)
+                p = subprocess.run([sys.executable, RUNNER, '--port', addr, '--quiet', 'run', plan], cwd=ANALOGHEALTH,
+                                   env=s.env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                   encoding='utf-8', errors='replace', timeout=minutes * 60, **NOWIN)
+                log.append(p.stdout)
+                ok, line = self.plan_outcome(p.returncode, p.stdout)
+                if not ok:
+                    return 'start %s was not built: %s (%s)' % (name, line, sub)
+            return None
+        finally:
+            with open(os.path.join(work, 'start.log'), 'w', encoding='utf-8') as fh:
+                fh.write('\n'.join(log))
 
     def batch_start(self, s, unit, v, minutes, folder):
         """Before a run from a built-in start: its snapshot, from the store when one of the same
         key is there, else built now by its start plan on a fresh emulator and saved.
         -> None, or why the run cannot go on."""
-        key = self.start_key(unit, v['build'], v['start_plan'])
-        v['start_store'] = store = os.path.join(STATE, 'snapshots', 'start-%s-%s.snap' % (v['start'], key[:32]))
+        st = v.get('start') or v['home']
+        v['start_chain'] = v.get('start_chain') or start_chain(unit, st)
+        key = self.start_key(unit, v['build'], v['start_chain'])
+        v['start_store'] = store = os.path.join(STATE, 'snapshots', 'start-%s-%s.snap' % (st, key[:32]))
         if os.path.isfile(store) and os.path.isfile(store + '.json'):
             os.utime(store + '.json')
             return None
-        work = os.path.join(folder, 'start-%s-%s' % (v['start'], key[:8]))
+        work = os.path.join(folder, 'start-%s-%s' % (st, key[:8]))
         os.makedirs(work, exist_ok=True)
         live = os.path.join(work, 'start.snap')
         proc, addr, why, _ = self.batch_emulator(unit, v['build'], work, minutes, snapshot=live)
         try:
             if why:
-                return 'start %s: %s (%s)' % (v['start'], why, work)
+                return 'start %s: %s (%s)' % (st, why, work)
             why = self.start_steps(s, unit, v, addr, work, minutes)
             if why:
                 return why
@@ -3471,15 +3586,15 @@ class Daemon:
                     if 'saved ' + live in fh.read():
                         break
             else:
-                return 'start %s: the emulator did not save its snapshot (%s)' % (v['start'], work)
+                return 'start %s: the emulator did not save its snapshot (%s)' % (st, work)
             os.makedirs(os.path.dirname(store), exist_ok=True)
             shutil.copyfile(live, store + '.tmp')
             os.replace(store + '.tmp', store)
-            write_json(store + '.json', {'start': v['start'], 'plan': v['start_plan'], 'run_dir': work,
+            write_json(store + '.json', {'start': st, 'plan': v['start_plan'], 'run_dir': work,
                                          'time': time.time()})
             return None
         except subprocess.TimeoutExpired:
-            return 'start %s had no end after %d min (%s)' % (v['start'], minutes, work)
+            return 'start %s had no end after %d min (%s)' % (st, minutes, work)
         finally:
             self.end_emulator(proc)
 
@@ -3516,7 +3631,7 @@ class Daemon:
                 g = v['info']['settings'].get
                 out = os.path.join(v['info']['rel'](g('out', 'runs')), 'emu-%s' % s.sid[:8],
                                    '%s-r%02d%s' % (os.path.basename(folder), n,
-                                                   '-' + v['start'] if v.get('start') else ''))
+                                                   '-' + (v.get('start') or v['home']) if v.get('start_plan') else ''))
                 if UNITS[unit]['runner'] is True:
                     try:
                         before = self.saved_projects(addr, os.path.join(work, 'projects', 'before'))
@@ -3570,7 +3685,8 @@ class Daemon:
         elif ok and v.get('gate'):
             info = v['info']
             self.record_pass(info['key'], {'plan': info['path'], 'run_dir': run_dir, 'unit': unit, 'os': v['os'],
-                                           'start': 'a setup snapshot' if snap else 'a fresh emulator',
+                                           'start': 'built-in start ' + v['home'] if v.get('home') else
+                                                    'a setup snapshot' if snap else 'a fresh emulator',
                                            'via': 'gate batch %s' % os.path.basename(folder)})
             if info['flash_sha']:
                 self.record_pass(flash_key(unit, info['flash_sha'], v['os']),
