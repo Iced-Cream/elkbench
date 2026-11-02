@@ -19,8 +19,8 @@ note = ~T SETUP (slot 121, INIT NEW) active, T1 trig on step 1; stopped at the e
 # The test project setup runs inside the plan (the same sections as setup-test-project.txt). With
 # a digiemu that has setup snapshots, the emulator runs it once per build and resumes it after
 # that (snapshot-after); the T1 sections stay after it, so every resumed run still checks keys
-# and screens. Before the plan, the run backs up and clears slot 121 (data get, data clear), as
-# for setup-test-project.
+# and screens. Slot 121 is empty before the plan, as for setup-test-project (the last release's
+# clear, or hand steps).
 snapshot-after = setup: LOAD FROM 121, and prove the load by content
 
 [start]
@@ -42,7 +42,7 @@ keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUN
 wait 0.6
 shot start-manage-121.png
 # The start check: 121's row in the list's bottom row (rows 56-63, cols 0-80: its number and name) shows the dashed line of
-# an empty slot, which only the run's own clear produced. Record it in the emulator after an
+# an empty slot, which only a clear produced (the last release's, or the run's own). Record it in the emulator after an
 # emulator-only step has filled and cleared 121, so the clearing path is tested too.
 expect-screen manage-121-cleared 2 rows=56-63 cols=0-80
 

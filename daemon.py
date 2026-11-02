@@ -243,6 +243,13 @@ def saved_slots(steps):
     return out
 
 
+def guards_projects(unit):
+    """Whether an emulator run of a plan on `unit` reads its saved projects before and after:
+    every unit with a runner. The data store RPC is the same on the Rytm, A4, Digitone and
+    Digitakt, so analogrun's `data ls` and `data get` read them all."""
+    return bool(UNITS.get(unit, {}).get('runner'))
+
+
 def slot_numbers(spec):
     """A unit's `clear_at_release` setting -> sorted project slot numbers: a list of numbers, or
     text such as '121-128' or '121-124, 127'."""
@@ -260,8 +267,17 @@ def slot_numbers(spec):
     return sorted(out)
 
 
+def clears_at_release(unit):
+    """Release empties `unit`'s test slots: it sets clear_at_release and has a data store runner
+    (analogrun on the Rytm and A4; digirun lists and analogrun's `data` erases on the Digitone and
+    Digitakt, as the data tool does)."""
+    u = UNITS.get(unit) or {}
+    return bool(u.get('clear_at_release')) and u.get('runner') in (True, 'digirun')
+
+
 def occupied_slots(ls_text):
-    """`analogrun data ls /projects` output -> the slot numbers that hold a project."""
+    """`analogrun data ls /projects` (or digirun's, the same rows) output -> the slot numbers
+    that hold a project."""
     return {int(m.group(2)) for m in re.finditer(r'^(.*?)\s+id\s+(\d+)\s+\d+ B(.*)$', ls_text, re.M)
             if 'no valid data' not in m.group(3)}
 
@@ -1589,7 +1605,7 @@ class Daemon:
         # checks): what they hold is backed up into the session's evidence folder, then erased.
         cleared = {}
         for u in mine:
-            if not (UNITS[u].get('clear_at_release') and UNITS[u]['runner'] is True):
+            if not clears_at_release(u):
                 continue
             ok, lines = self.empty_test_slots(s, u)
             if not ok and not a.get('accept_slots_left'):
@@ -1637,16 +1653,21 @@ class Daemon:
     def empty_test_slots(self, s, u):
         """At release: back up and erase every project in the unit's `clear_at_release` slots
         (analogrun `data clear`, which asks the local write policy and keeps the copy), then list
-        the projects to show them empty. -> (ok, lines)."""
+        the projects to show them empty. -> (ok, lines). On a digirun unit (Digitone, Digitakt)
+        digirun lists and analogrun erases, as the data tool does there."""
         slots = UNITS[u]['clear_at_release']
         try:
             self.check_connected(u, 'hardware')
+            writer = runner()
+            lister = os.path.join(need(DIGIHEALTH, 'digihealth', 'the Digitone/Digitakt runner (digihealth)'),
+                                  'tools', 'digirun.py') if UNITS[u]['runner'] == 'digirun' else writer
         except Refused as e:
             return False, ['not emptied: %s' % e]
-        script, folder = runner(), os.path.join(s.folder(u), 'release-clear-%s' % time.strftime('%H%M%S'))
+        folder = os.path.join(s.folder(u), 'release-clear-%s' % time.strftime('%H%M%S'))
         port = self.busy_port(u, 'hardware', 'release: empty the test slots')
         try:
             def run(*args):
+                script = lister if args[0] == 'ls' else writer
                 return subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, script, '--port',
                                        UNITS[u]['port'], 'data'] + list(args),
                                       cwd=os.path.dirname(os.path.dirname(script)), env=s.env(),
@@ -1800,7 +1821,7 @@ class Daemon:
             raise Refused('nothing to approve: give plans, flashes or recall_restores')
         for u in sorted({i['unit'] for i in infos} | {f.get('unit') for f in a.get('flashes') or []}
                         | {f.get('unit') for f in a.get('recall_restores') or []}):
-            if UNITS.get(u, {}).get('clear_at_release') and UNITS[u]['runner'] is True:
+            if clears_at_release(u):
                 text.append('AT RELEASE on %s, however the run ends: project slots %s, whatever they hold, '
                             'backed up to the run folder and erased (data clear), then listed to show them empty'
                             % (u, slot_text(UNITS[u]['clear_at_release'])))
@@ -2493,7 +2514,7 @@ class Daemon:
 
     def saved_projects(self, addr, folder):
         """{slot: (name, sha256)} of every saved project on the emulator at `addr`, read with
-        analogrun data ls / get (read only)."""
+        analogrun data ls / get (read only; on the Digitone and Digitakt too, as data writes)."""
         run = lambda *a: subprocess.run([sys.executable, RUNNER, '--port', addr, 'data'] + list(a),
                                         cwd=ANALOGHEALTH, capture_output=True, text=True, encoding='utf-8',
                                         errors='replace', timeout=120, **NOWIN)
@@ -2706,7 +2727,7 @@ class Daemon:
             else:
                 plan = info['path'] if info['emulator'] else self.twin(info, bool(a.get('record_refs')), s.sid)
                 cmd = [sys.executable, RUNNER, '--port', addr] + din + ['--quiet', 'run', plan]
-            if UNITS[unit]['runner'] is True:          # analogrun's data store: Rytm and A4
+            if guards_projects(unit):
                 cmd = self.guard_projects(info, (lambda: self.emu_port(s, unit)) if cycles else addr, cmd, os.path.join(
                     s.folder(unit), 'projects-%s' % time.strftime('%H%M%S')))
         record = not info['emulator'] or info['settings'].get('record-refs', 'no') != 'yes'
@@ -3782,7 +3803,7 @@ class Daemon:
                                              'run_dir': None, 'time': time.time()})
                 return None
             plan = self.batch_plan(info, work, 'its setup', sections=info['steps'][:cut])
-            guard = v.get('gate') and UNITS[unit]['runner'] is True
+            guard = v.get('gate') and guards_projects(unit)
             if guard:                    # a gate's setup may write only the plan's slots too
                 before = self.saved_projects(addr, os.path.join(work, 'projects', 'before'))
             env = dict(s.env(), **({'DIGIRUN_PATH': os.path.join(DIGIHEALTH, 'tools')} if DIGIHEALTH else {}))
@@ -3959,7 +3980,7 @@ class Daemon:
                 out = os.path.join(v['info']['rel'](g('out', 'runs')), 'emu-%s' % s.sid[:8],
                                    '%s-r%02d%s' % (os.path.basename(folder), n,
                                                    '-' + (v.get('start') or v['home']) if v.get('start_plan') else ''))
-                if UNITS[unit]['runner'] is True:
+                if guards_projects(unit):
                     try:
                         before = self.saved_projects(addr, os.path.join(work, 'projects', 'before'))
                     except (RuntimeError, OSError, subprocess.SubprocessError) as e:
