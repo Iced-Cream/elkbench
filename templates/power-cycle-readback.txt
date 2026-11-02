@@ -33,6 +33,10 @@ shot before.png
 # the value the earlier plan set, e.g. a knob's dial (rows 8-23): stop otherwise. Leave out the
 # label rows below: just after a turn, the value pop-up covers them, and would differ for a
 # reason that has nothing to do with what was kept
+# The contrast: on a fresh card, or from the built-in dirty and occupied starts, the earlier plan
+# set no value, so this check has to stop the run. This plan's own pass comes from run_plan after
+# that plan (the gate batch runs only its starts).
+say contrast fresh, dirty, occupied: a default project has no such value, so the readback stops the run
 expect-screen kept-value 1 rows=8-23
 
 [kept after the power cycle]
