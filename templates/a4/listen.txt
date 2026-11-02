@@ -30,28 +30,25 @@ say proves setup: 121 is the active project and loads as a new one, so the patte
 # trig: a second RECORD, 1, RECORD takes it away again). So the plan reloads 121 first. A LEVEL
 # turn makes the working copy unsaved, so the load always asks, and it asks only PROCEED WITH
 # LOADING? because 121 is the active project (any other project asks SAVE ... BEFORE LOADING?
-# first, and the check stops the run). 121 is the LOAD list's last project, one up from CREATE NEW:
-# the setup's start check proved 122-128 empty.
+# first, and the check stops the run). 121 is reached in MANAGE PROJECTS (every slot, in order),
+# not by its place in the LOAD PROJECT list, which follows what 122-128 hold.
 tap T1
 wait 0.5
 tap OSC1
 wait 0.6
 turn LEVEL 8 4
 wait 0.5
-tap GLOBAL
-wait 0.5
-keys UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP
-tap YES
-wait 0.5
-keys UP,UP,UP
-tap YES
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
 wait 0.8
-keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+# 121's panel (RIGHT), LOAD FROM (fourth row from the top)
+keys RIGHT,UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN
 wait 0.4
 shot reload-121.png
 tap YES
 wait 0.8
-expect-screen proceed-with-loading 2 rows=21-43 cols=8-120
+expect-screen manage-proceed-with-loading 2 rows=21-43 cols=8-120
 tap YES
 wait 5
 tap NO

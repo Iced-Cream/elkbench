@@ -264,7 +264,9 @@ their answer to the client's prompt. A session can't end it itself.
   test project comes from CREATE NEW (the LOAD PROJECT list's last row), which starts from
   nothing, saved into the test slot with SAVE PROJECT AS. A copy of a project made that way
   carries no old state. Loading the test slot then proves it is active (with unsaved changes the
-  OS asks only "proceed" for the active project) and its home screen proves it is new.
+  OS asks only "proceed" for the active project) and its home screen proves it is new. The test
+  slot is loaded from MANAGE PROJECTS (its panel's LOAD FROM), which lists every slot: the LOAD
+  PROJECT list shows only full slots, so a slot's place in it follows what the other slots hold.
 - **Loading another project drops unsaved changes** in the working one. Before the first load,
   know that the working project is saved or is a test project, or have the owner's go cover the
   load. Never save their project yourself.

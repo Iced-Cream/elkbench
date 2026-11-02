@@ -12,9 +12,10 @@
 # plan for now), e.g. for 121:
 #   data get /projects/121      (the backup, into the run's evidence folder)
 #   data clear /projects/121
-# List each in the go request as a write: "slot 121 (holds X at listing time: backed up and erased)".
-# The start check sees 121-128, so all eight must be empty: the last section finds 121 as the
-# LOAD list's last project. The LEVEL turn in the second section makes the active project unsaved,
+# List each in the go request as a write: "slot 121 (backed up and erased)". The start check sees
+# only 121's row. 121 is always reached in MANAGE PROJECTS, which lists every slot, never by its
+# place in the LOAD PROJECT list (that list shows only full slots, so 121's place in it follows
+# what 122-128 hold). The LEVEL turn in the second section makes the active project unsaved,
 # and CREATE NEW then discards it (answered NO to the save): list that in the go request too.
 format = 1
 name = setup test project in 121
@@ -26,7 +27,7 @@ note = ~T SETUP (slot 121, CREATE NEW) active, unsaved changes none
 [start]
 # Boot prompts away, then GLOBAL > PROJECT > MANAGE PROJECTS (third row). The list holds every
 # slot, 001-128, eight rows on screen; it is entered from its end (page downs first) so a
-# remembered cursor does not matter, and UP x7 puts 121 on the top row with 122-128 below it.
+# remembered cursor does not matter, and UP x7 puts 121 on the top row (rows 0-7), the cursor on it.
 wait 3
 tap NO
 wait 0.5
@@ -39,13 +40,13 @@ wait 0.8
 keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
 wait 0.6
 shot start-manage-121.png
-# The start check: 121-128 all empty, which only the run's own clears produced. Record it in the
-# emulator after emulator-only steps have filled 121 and cleared it. The active project's row
-# carries a small marker at the left of its name field, even when its slot has been cleared, and
-# which row has it depends on the unit: so the check is in two parts that leave that column out,
-# the slot numbers and the name fields. The scrollbar (cols 122-127) is left out too.
-expect-screen manage-121-128-empty 2 rows=0-63 cols=0-28
-expect-screen manage-121-128-empty 2 rows=0-63 cols=31-121
+# The start check: 121 empty, which only the run's own clear produced. Record it in the emulator
+# after emulator-only steps have filled 121 and cleared it. The active project's row carries a
+# small marker at the left of its name field, even when its slot has been cleared, so the check is
+# in two parts that leave that column out: the slot number and the name field. The scrollbar
+# (cols 122-127) is left out too.
+expect-screen manage-121-empty 2 rows=0-7 cols=0-28
+expect-screen manage-121-empty 2 rows=0-7 cols=31-121
 # back home: the list, PROJECT, GLOBAL (a spare NO on the home screen does nothing)
 tap NO
 wait 0.5
@@ -124,31 +125,30 @@ shot saved.png
 say proves setup: loading 121 asks only PROCEED, which the OS does only when 121 is the active project
 # The proof is the OS's own answer, not a name. With unsaved changes, LOAD asks SAVE ... BEFORE
 # LOADING? first when the chosen project is not the active one, and only PROCEED WITH LOADING?
-# when it is. So: a LEVEL turn, LOAD PROJECT, 121 (the list's last project, one up from CREATE
-# NEW), YES, and the PROCEED box must be the first thing on screen. YES then reloads 121 itself.
+# when it is. So: a LEVEL turn, MANAGE PROJECTS, 121's LOAD FROM, YES, and the PROCEED box must
+# be the first thing on screen. YES then reloads 121 itself.
 tap T1
 wait 0.5
 tap OSC1
 wait 0.6
 turn LEVEL 8 4
 wait 0.5
-tap GLOBAL
-wait 0.5
-keys UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP
-tap YES
-wait 0.5
-keys UP,UP,UP
-tap YES
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
 wait 0.8
-keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+# 121's panel (RIGHT), LOAD FROM (fourth row from the top)
+keys RIGHT,UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN
 wait 0.4
 shot load-121.png
 tap YES
 wait 0.8
 shot load-121-asks.png
-expect-screen proceed-with-loading 2 rows=21-43 cols=8-120
+# its own reference: the list behind the box is MANAGE PROJECTS here, not LOAD PROJECT
+expect-screen manage-proceed-with-loading 2 rows=21-43 cols=8-120
 tap YES
-# a saved project loads for longer than CREATE NEW; a NO during the load is lost
+# a saved project loads for longer than CREATE NEW; a NO during the load is lost. Four NOs reach
+# home from MANAGE PROJECTS (the panel, the list, PROJECT, GLOBAL); a fifth does nothing there.
 wait 5
 tap NO
 wait 0.5
@@ -156,5 +156,9 @@ tap NO
 wait 0.5
 tap NO
 wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
 shot loaded.png
 expect-screen new-home 3
