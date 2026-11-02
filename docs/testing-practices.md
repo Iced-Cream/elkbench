@@ -293,6 +293,12 @@ policy, `examples/write-policy/policy.py` (tests beside it).
   items already named `~T` may be touched. Any session may empty a test slot, whichever run
   filled it, after copying it to its run folder; so no plan relies on what another run left
   there.
+- **Test slots empty at every release:** every run ends with 121-128 empty, whatever it put
+  there and however it ended: `clear_at_release = '121-128'` in each unit's section of
+  config.toml makes `release` back each project there up into the run folder, erase it and list
+  the slots empty, and keeps the claim if it can't. So a run finds them empty, and its setup's
+  start check (121 empty) only stops it when a session ended without releasing. Nobody saves
+  their own work there by hand, so the cleanup touches only test projects.
 - **The active project:** the unit doesn't say which project is active, so by convention a test
   project names its kit 1 `~T ...`, and the policy checks the active kit 1 before any kit or
   sound dump is sent. On the Digitone and Digitakt the marker is pattern A01's name instead

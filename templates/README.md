@@ -23,8 +23,9 @@ starts (`starts/`) from which it must stop the run. A gate batch runs it from th
 their own pass comes from `run_plan` after the setup plan (or the plan that set the kept value).
 
 Open, so far:
-- **Backup and clear of the test slot** happen outside the plan (`data get`, `data clear`), so
-  they are listed in the go request as hand steps.
+- **Backup and clear of the test slot** happen outside the plan: at the previous release where
+  the unit sets `clear_at_release` (config.toml), else as hand steps (`data get`, `data clear`)
+  listed in the go request.
 - **The level check's reference take** (`level-ref.wav`) is recorded once on the unit from the
   same steps; the emulator makes no voice sound.
 - **A run nonce in names** (`~T {run}`) is not filled in by elkbench: a reference screen showing
