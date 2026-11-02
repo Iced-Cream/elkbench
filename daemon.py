@@ -69,6 +69,8 @@ SNAPSHOT_DAYS, SNAPSHOT_MAX = 7, 20             # setup snapshots: unused days, 
 OB_CHANNELS = ('Main L', 'Main R', 'Track 1 L', 'Track 1 R', 'Track 2 L', 'Track 2 R', 'Track 3 L',
                'Track 3 R', 'Track 4 L', 'Track 4 R', 'Input L', 'Input R')   # the Digitone's Overbridge order
 DIGI_PARALLEL_MAX = 3                          # digiemu runs one batch may have going at once
+DIGI_SNAPSHOT_MAX = 10                          # digiemu setup snapshots kept (a machine and its +Drive)
+DIGI_SAVE_WAIT = 180                            # s digiemu has to save and store a setup snapshot
 AUDIO_WAIT_EMULATOR = 0.5                       # s an emulator twin waits for `wait N audio`
 POWER_OFF_WAIT = 60                             # s analog-emu has to save and exit at a power-cycle
 POWER_OFF_MARK = 'power off: working state saved'    # its log line after a power-off save
@@ -514,6 +516,62 @@ def sha256(path):
         for block in iter(lambda: fh.read(1 << 20), b''):
             h.update(block)
     return h.hexdigest()
+
+
+def git_head(repo):
+    """The commit a git checkout (or worktree) is on, read from its files: None if unknown."""
+    try:
+        git = os.path.join(repo, '.git')
+        if os.path.isfile(git):                       # a worktree: .git names its git dir
+            with open(git, encoding='utf-8') as fh:
+                git = os.path.join(repo, fh.read().split('gitdir:', 1)[1].strip())
+        common = git
+        if os.path.isfile(os.path.join(git, 'commondir')):
+            with open(os.path.join(git, 'commondir'), encoding='utf-8') as fh:
+                common = os.path.join(git, fh.read().strip())
+        with open(os.path.join(git, 'HEAD'), encoding='utf-8') as fh:
+            head = fh.read().strip()
+        if not head.startswith('ref:'):
+            return head
+        ref = head[4:].strip()
+        for d in (git, common):
+            if os.path.isfile(os.path.join(d, ref)):
+                with open(os.path.join(d, ref), encoding='utf-8') as fh:
+                    return fh.read().strip()
+        with open(os.path.join(common, 'packed-refs'), encoding='utf-8') as fh:
+            for line in fh:
+                if line.rstrip().endswith(' ' + ref):
+                    return line.split()[0]
+    except (OSError, IndexError, TypeError):
+        pass
+    return None
+
+
+def save_snapshot_now(e, snap):
+    """`save` on the stdin of emulator `e` (from emulators or batch_emulator), then wait for its
+    log to say the setup snapshot is saved: analog-emu writes snap['live']; digiemu stores the
+    pair under snap['key'] in its home. -> whether it did."""
+    if snap.get('digi'):
+        done, failed, wait = 'setup snapshot %s stored' % snap['key'], ('NOT stored', 'save failed'), DIGI_SAVE_WAIT
+    else:
+        done, failed, wait = 'saved ' + snap['live'], (), 30
+    proc = e['proc'] if isinstance(e, dict) else e
+    try:
+        proc.stdin.write(b'save\n')
+        proc.stdin.flush()
+    except (OSError, AttributeError):
+        return False
+    log = e['log'] if isinstance(e, dict) else snap['log']
+    end = time.time() + wait
+    while time.time() < end:
+        time.sleep(0.2)
+        with open(log, encoding='utf-8', errors='replace') as fh:
+            text = fh.read()
+        if done in text:
+            return True
+        if any(f in text for f in failed) or proc.poll() is not None:
+            return False
+    return False
 
 
 def fwd(p):
@@ -1153,6 +1211,9 @@ class Daemon:
         card it booted, and the setup steps with the reference screens they check."""
         u = UNITS[info['unit']]
         exe = os.path.join(ANALOG_EMU or '', u.get('emu_exe') or '')
+        emulator = sha256(exe) if os.path.isfile(exe) else None
+        if u.get('emulator') == 'digiemu':
+            emulator = 'digiemu ' + (git_head(DIGIEMU) or 'unknown')
         setup = info['steps'][:info['setup']]
         refs = sorted({shlex.split(l)[1] for _, ls in setup for l in ls
                        if l.split()[0].lower() == 'expect-screen'})
@@ -1160,7 +1221,7 @@ class Daemon:
                     for r in refs if os.path.isfile(os.path.join(info['refs'], r if r.endswith('.bin') else r + '.bin'))]
         card = u.get('emu_card')
         return hashlib.sha256(json.dumps({
-            'unit': info['unit'], 'emulator': sha256(exe) if os.path.isfile(exe) else None,
+            'unit': info['unit'], 'emulator': emulator,
             'build': sha256(build), 'card': sha256(card) if card and os.path.isfile(card) else None,
             'setup': setup, 'refs': ref_sums}, sort_keys=True).encode()).hexdigest()
 
@@ -2089,8 +2150,8 @@ class Daemon:
         power_off = power_off or bool(a.get('power_off'))
         if power_off and u.get('emulator') == 'digiemu':
             raise Refused('power_off is for the Rytm and A4 emulators (analog-emu --power-off)')
-        if u.get('emulator') == 'digiemu':
-            return self.digiemu_start(s, a['unit'], a.get('build'), minutes)
+        if u.get('emulator') == 'digiemu':           # snapshot: a setup snapshot's key
+            return self.digiemu_start(s, a['unit'], a.get('build'), minutes, snapshot)
         exe =os.path.join(need(ANALOG_EMU, 'analog_emu', 'the analog-emu emulators'), u['emu_exe'])
         work =os.path.join(STATE, 'emulators', '%s-%s' % (a['unit'], s.sid[:8]))
         os.makedirs(work, exist_ok=True)
@@ -2196,9 +2257,10 @@ class Daemon:
                 shlex.quote(conv(repo)), ' '.join(DIGIEMU_PY[1:]), ' '.join(shlex.quote(x) for x in args))]
         return DIGIEMU_PY + args
 
-    def digiemu_start(self, s, unit, build, minutes):
+    def digiemu_start(self, s, unit, build, minutes, setup_key=None):
         """The Digitone or Digitakt emulator: digiemu boots `build` headless (digiemu_usb.py: set
-        up once, then a work folder per session), its USB MIDI link on a TCP port of its own."""
+        up once, then a work folder per session), its USB MIDI link on a TCP port of its own.
+        setup_key: resume that setup snapshot if digiemu has it stored; `save` stores one."""
         need(DIGIEMU, 'digiemu', 'the Digitone/Digitakt emulator (digiemu)')
         build = os.path.abspath(build or '')
         if not os.path.isfile(build) or not build.lower().endswith('.syx'):
@@ -2210,11 +2272,14 @@ class Daemon:
         # the Claude app's LocalAppData is virtualized, so WSL would not see them there
         firmware = os.path.join(s.folder(unit), 'firmware')
         e, text = self.digiemu_launch(build, minutes, tag, work, firmware,
-                                      lambda e: self.emulators.__setitem__((s.sid, unit), dict(e, session=s.sid)))
+                                      lambda e: self.emulators.__setitem__((s.sid, unit), dict(e, session=s.sid)),
+                                      setup_key=setup_key)
         e = self.emulators[(s.sid, unit)]
+        e['resumed'] = 'resuming setup snapshot' in text
         fresh = 'already set up' not in text
         return ['ok: %s emulator running headless on %s, USB MIDI at %s (%s), ends by '
                 'itself after %d min' % (unit, os.path.basename(build), e['address'],
+                                         'a setup snapshot' if e['resumed'] else
                                          'first boot of this build' if fresh else 'its settled boot', minutes)]
 
     def digiemu_has_ob_audio(self):
@@ -2225,11 +2290,13 @@ class Daemon:
         except OSError:
             return False
 
-    def digiemu_launch(self, build, minutes, tag, work, firmware, started=None):
+    def digiemu_launch(self, build, minutes, tag, work, firmware, started=None, setup_key=None, require=False):
         """digiemu_usb.py booting `build` (work folder `tag` in WSL), its link on a free port,
         until its OS answers -> (emulator dict, its log text). `firmware` (WSL must see it) gets
         the OS files flashed into it; started(e) runs as soon as the process is up. Refused, with
-        the emulator stopped, when it does not come up."""
+        the emulator stopped, when it does not come up. setup_key: resume that setup snapshot
+        where digiemu has it stored (require: refused when it has not), and take `save` on stdin
+        to store it."""
         with socket.socket() as probe:               # a free local port for its USB MIDI link
             probe.bind(('127.0.0.1', 0))
             tcp = probe.getsockname()[1]
@@ -2242,12 +2309,16 @@ class Daemon:
         os.makedirs(firmware)
         cmd = self.digiemu_cmd([Path(os.path.join(HERE, 'digiemu_usb.py')), Path(DIGIEMU), Path(build),
                                 str(tcp), str(minutes), tag, '--firmware-dir', Path(firmware)]
-                               + (['--ob-audio-port', str(ob)] if ob else []))
+                               + (['--ob-audio-port', str(ob)] if ob else [])
+                               + (['--setup-key', setup_key, '--keep', str(DIGI_SNAPSHOT_MAX),
+                                   '--days', str(SNAPSHOT_DAYS)] + (['--require-setup'] if require else [])
+                                  if setup_key else []))
         log_path = os.path.join(work, 'emulator.log')
         log = open(log_path, 'w', encoding='utf-8')
-        proc = subprocess.Popen(cmd, cwd=work, stdout=log, stderr=subprocess.STDOUT, **NOWIN)
+        proc = subprocess.Popen(cmd, cwd=work, stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.PIPE if setup_key else None, **NOWIN)
         e = dict(proc=proc, build=os.path.basename(build), sha=sha256(build),
-                 address='tcp:127.0.0.1:%d' % tcp,
+                 address='tcp:127.0.0.1:%d' % tcp, log=log_path, setup_key=setup_key,
                  wsl_tag=tag if cmd[0] == 'wsl' else None, firmware=firmware, ob_audio=ob)
         if started:
             started(e)
@@ -2288,13 +2359,19 @@ class Daemon:
         hardware plan with snapshot-after, booted from `build`, no flash in the plan, not
         recording references. `live` is the emulator's own copy (a stored one copied in to
         resume, or where `save` writes a new one)."""
+        digi = UNITS[info['unit']].get('emulator') == 'digiemu'
         if not (info['setup'] and a.get('build') and not info['emulator'] and not info['flash']
-                and not a.get('record_refs') and UNITS[info['unit']].get('emu_exe')
-                and UNITS[info['unit']].get('emulator') != 'digiemu'):
+                and not a.get('record_refs') and (UNITS[info['unit']].get('emu_exe') or digi)):
             return None
         if not self.emu_has_snapshots(info['unit']):
             return None
         key = self.snapshot_key(info, os.path.abspath(a['build']))
+        if digi:
+            # digiemu keeps the pair (machine, +Drive) in its own home, where WSL sees it: `live`
+            # is the key it is stored by, `have` is known once it has started (resumed or not),
+            # and `store` here holds only what the snapshot's .json says
+            return dict(key=key, store=os.path.join(STATE, 'snapshots', key + '.digi'), live=key,
+                        have=False, digi=True)
         store = os.path.join(STATE, 'snapshots', key + '.snap')
         work = os.path.join(STATE, 'emulators', '%s-%s' % (info['unit'], s.sid[:8]))
         os.makedirs(work, exist_ok=True)
@@ -2317,7 +2394,7 @@ class Daemon:
         snaps = []
         for f in os.listdir(folder):
             p = os.path.join(folder, f)
-            if f.endswith('.snap') and p != keep:
+            if f.endswith(('.snap', '.digi.json')) and p != keep:
                 meta = p + '.json'
                 snaps.append((os.path.getmtime(meta if os.path.exists(meta) else p), p))
         snaps.sort(reverse=True)                       # most recently used first
@@ -2325,7 +2402,7 @@ class Daemon:
         room = SNAPSHOT_MAX - (1 if keep else 0)
         for n, (used, p) in enumerate(snaps):
             if used < cutoff or n >= room:
-                for q in (p, p + '.json'):
+                for q in ((p,) if p.endswith('.json') else (p, p + '.json')):
                     try:
                         os.remove(q)
                     except OSError:
@@ -2346,7 +2423,15 @@ class Daemon:
         return self.emu_help_text[stamp]
 
     def emu_has_snapshots(self, unit):
-        """Whether this analog-emu build takes --stdin-commands (headless snapshot saves)."""
+        """Whether this analog-emu build takes --stdin-commands (headless snapshot saves), or for
+        the Digitone and Digitakt, whether digiemu's usbrun.py does (its `save`)."""
+        if UNITS[unit].get('emulator') == 'digiemu':
+            try:
+                with open(os.path.join(DIGIEMU or '', 'tools', 'usbrun.py'), encoding='utf-8',
+                          errors='replace') as fh:
+                    return '--stdin-commands' in fh.read()
+            except OSError:
+                return False
         return '--stdin-commands' in self.emu_help(unit)
 
     def emu_has_power_off(self, unit):
@@ -2474,23 +2559,18 @@ class Daemon:
         e = self.emulators[(s.sid, info['unit'])]
 
         def setup_then_save(rc, out):
-            p = subprocess.run(setup, cwd=ANALOGHEALTH, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            env = dict(s.env(), **({'DIGIRUN_PATH': os.path.join(DIGIHEALTH, 'tools')} if DIGIHEALTH else {}))
+            p = subprocess.run(setup, cwd=ANALOGHEALTH, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                text=True, encoding='utf-8', errors='replace', **NOWIN)
             if p.returncode:
                 return p.returncode, p.stdout
             m = re.search(r': PASS \(.* - (.+)$', p.stdout, re.M)
-            e['proc'].stdin.write(b'save\n')
-            e['proc'].stdin.flush()
-            for _ in range(150):
-                time.sleep(0.2)
-                with open(e['log'], encoding='utf-8', errors='replace') as fh:
-                    if 'saved ' + snap['live'] in fh.read():
-                        break
-            else:
+            if not save_snapshot_now(e, snap):
                 return 1, p.stdout + 'fail: the emulator did not save the setup snapshot (%s)\n' % e['log']
             os.makedirs(os.path.dirname(snap['store']), exist_ok=True)
-            shutil.copyfile(snap['live'], snap['store'] + '.tmp')
-            os.replace(snap['store'] + '.tmp', snap['store'])
+            if not snap.get('digi'):
+                shutil.copyfile(snap['live'], snap['store'] + '.tmp')
+                os.replace(snap['store'] + '.tmp', snap['store'])
             write_json(snap['store'] + '.json', {'plan': info['path'], 'setup_until': info['steps'][cut - 1][0],
                                                  'run_dir': m.group(1).strip() if m else None,
                                                  'time': time.time()})
@@ -2598,6 +2678,8 @@ class Daemon:
                 raise Refused(self.no_emu_din(unit))
             snap = self.setup_snapshot(s, info, a)
             addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'], bool(cycles))
+            if snap and snap.get('digi'):           # digiemu says at its start whether it had it stored
+                snap['have'] = bool((self.emulators.get((s.sid, unit)) or {}).get('resumed'))
             booted = (self.emulators.get((s.sid, unit)) or {}).get('sha')
             if info['os_sha'] and booted != info['os_sha']:
                 raise Refused('this plan runs on %s (os =), and the emulator runs %s: start it on that file '
@@ -3403,18 +3485,17 @@ class Daemon:
             if not variants:
                 return ['ok: nothing to gate: every plan\'s pass still stands (force runs them again)'] + kept + notes
         snapshot = bool(a.get('snapshot'))
-        if snapshot and digi and not gate:
-            raise Refused('no setup snapshots on the %s emulator (digiemu resumes only its settled boot)' % unit)
         if gate:
             # setup inside each plan (snapshot-after): its setup runs once per build and is
             # resumed, as run_plan does; plans with the same setup share one snapshot
             snap_ok = lambda v: v['info']['setup'] and not v['info']['flash'] and not v.get('start_plan')
-            can_snap = not digi and self.emu_has_snapshots(unit)
+            can_snap = self.emu_has_snapshots(unit)
             snapshot = a.get('snapshot') is not False and any(snap_ok(v) for v in variants) and can_snap
             for v in variants:
                 v['snapshot'] = bool(snapshot and snap_ok(v))
                 # a built-in start is built once per build and kept as a snapshot where it can be
-                v['start_snap'] = bool(v.get('start_plan') and can_snap)
+                # (not yet on digiemu: its starts are built in each run)
+                v['start_snap'] = bool(v.get('start_plan') and can_snap and not digi)
             if snapshot:
                 self.prune_snapshots()
         elif snapshot:
@@ -3429,7 +3510,8 @@ class Daemon:
                                   'flash (%s)' % (v['name'], i['name']))
                 v['snapshot'] = True
             if not self.emu_has_snapshots(unit):
-                raise Refused('this analog-emu has no --stdin-commands, so no snapshots')
+                raise Refused('this %s has no --stdin-commands, so no snapshots'
+                              % ('digiemu\'s usbrun.py' if digi else 'analog-emu'))
             self.prune_snapshots()
         # each variant's label names only what differs between them
         parts = lambda v: [('build', os.path.basename(v['build'])),
@@ -3561,16 +3643,20 @@ class Daemon:
                       for w in v['info']['audio_waits']]
         return lines
 
-    def batch_emulator(self, unit, build, work, minutes, snapshot=None, din=False):
+    def batch_emulator(self, unit, build, work, minutes, snapshot=None, din=False, setup_key=None,
+                       require=False):
         """A fresh headless emulator of `build` for one batch run, in `work`, on a port of its own;
         with `snapshot`, resuming that file (or, if it does not exist, saving to it on `save`);
         with `din`, its DIN MIDI on a port of its own too. -> (proc, address, None, DIN address or
         None), or (proc or None, None, why, None) when it did not come up. For the Digitone, proc
-        is digiemu's emulator dict (end_emulator stops either)."""
+        is digiemu's emulator dict (end_emulator stops either), and setup_key (require) its setup
+        snapshot, as for digiemu_launch."""
         if UNITS[unit].get('emulator') == 'digiemu':
             try:
-                e, _ = self.digiemu_launch(build, minutes, 'b-%s' % hashlib.sha256(work.encode()).hexdigest()[:12],
-                                           work, os.path.join(work, 'firmware'))
+                e, text = self.digiemu_launch(build, minutes, 'b-%s' % hashlib.sha256(work.encode()).hexdigest()[:12],
+                                              work, os.path.join(work, 'firmware'), setup_key=setup_key,
+                                              require=require)
+                e['resumed'] = 'resuming setup snapshot' in text
             except Refused as why:
                 return None, None, str(why), None
             return e, e['address'], None, None
@@ -3668,25 +3754,35 @@ class Daemon:
         same key is there, else taken now by a setup run that has to pass (kept like run_plan's,
         so later runs and batches reuse it). -> None, or why the batch cannot go on."""
         info, cut = v['info'], v['info']['setup']
-        v['store'] = store = os.path.join(STATE, 'snapshots', self.snapshot_key(info, v['build']) + '.snap')
-        if os.path.isfile(store) and os.path.isfile(store + '.json'):
+        key = self.snapshot_key(info, v['build'])
+        digi = UNITS[unit].get('emulator') == 'digiemu'
+        # digiemu stores the pair (machine, +Drive) in its own home by key: here only its .json
+        v['store'] = store = os.path.join(STATE, 'snapshots', key + ('.digi' if digi else '.snap'))
+        if digi:
+            v['digi_key'] = key
+        if (digi or os.path.isfile(store)) and os.path.isfile(store + '.json'):
             os.utime(store + '.json')                  # last use, for prune_snapshots
             return None
         work = os.path.join(folder, 'setup-%s' % re.sub(r'\W+', '-', v['name']))
         os.makedirs(work)
         live = os.path.join(work, 'setup.snap')
-        proc, addr, why, din = self.batch_emulator(unit, v['build'], work, minutes, snapshot=live,
-                                                   din=info['din'])
+        proc, addr, why, din = self.batch_emulator(unit, v['build'], work, minutes, snapshot=None if digi else live,
+                                                   din=info['din'], setup_key=key if digi else None)
         try:
             if why:
                 return 'variant %s: %s (%s)' % (v['name'], why, work)
+            if digi and proc.get('resumed'):           # digiemu had it, this daemon had lost its .json
+                write_json(store + '.json', {'plan': info['path'], 'setup_until': info['steps'][cut - 1][0],
+                                             'run_dir': None, 'time': time.time()})
+                return None
             plan = self.batch_plan(info, work, 'its setup', sections=info['steps'][:cut])
             guard = v.get('gate') and UNITS[unit]['runner'] is True
             if guard:                    # a gate's setup may write only the plan's slots too
                 before = self.saved_projects(addr, os.path.join(work, 'projects', 'before'))
+            env = dict(s.env(), **({'DIGIRUN_PATH': os.path.join(DIGIHEALTH, 'tools')} if DIGIHEALTH else {}))
             p = subprocess.run([sys.executable, RUNNER, '--port', addr] + (['--din', din] if din else []) +
                                ['--quiet', 'run', plan], cwd=ANALOGHEALTH,
-                               env=s.env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                               env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                encoding='utf-8', errors='replace', timeout=minutes * 60, **NOWIN)
             ok, line = self.plan_outcome(p.returncode, p.stdout)
             if not ok:
@@ -3697,19 +3793,14 @@ class Daemon:
                 if bad:
                     return 'variant %s: its setup wrote outside the plan\'s slots: %s (%s)' % (
                         v['name'], '; '.join(bad), work)
-            proc.stdin.write(b'save\n')
-            proc.stdin.flush()
-            for _ in range(150):
-                time.sleep(0.2)
-                with open(os.path.join(work, 'emulator.log'), encoding='utf-8', errors='replace') as fh:
-                    if 'saved ' + live in fh.read():
-                        break
-            else:
+            if not save_snapshot_now(proc, dict(digi=digi, key=key, live=live,
+                                                log=os.path.join(work, 'emulator.log'))):
                 return 'variant %s: the emulator did not save its setup snapshot (%s)' % (v['name'], work)
             m = re.search(r': PASS \(.* - (.+)$', p.stdout, re.M)
             os.makedirs(os.path.dirname(store), exist_ok=True)
-            shutil.copyfile(live, store + '.tmp')
-            os.replace(store + '.tmp', store)
+            if not digi:
+                shutil.copyfile(live, store + '.tmp')
+                os.replace(store + '.tmp', store)
             write_json(store + '.json', {'plan': info['path'], 'setup_until': info['steps'][cut - 1][0],
                                          'run_dir': m.group(1).strip() if m else None, 'time': time.time()})
             return None
@@ -3831,14 +3922,21 @@ class Daemon:
         if v.get('start_store'):                       # a built-in start, resumed
             snap = os.path.join(work, 'start.snap')
             shutil.copyfile(v['start_store'], snap)
-        elif v.get('store'):
+        elif v.get('store') and not v.get('digi_key'):
             snap = os.path.join(work, 'setup.snap')
             shutil.copyfile(v['store'], snap)
         proc, addr, why, din = self.batch_emulator(unit, v['build'], work, minutes, snapshot=snap,
-                                                   din=not flash and v['info']['din'])
+                                                   din=not flash and v['info']['din'],
+                                                   setup_key=v.get('digi_key'), require=bool(v.get('digi_key')))
+        resumed = bool(snap or v.get('digi_key'))
         out, before = None, None
         try:
             if why:
+                if v.get('digi_key') and 'no setup snapshot' in why:
+                    try:                               # digiemu pruned it: the next gate takes it again
+                        os.remove(v['store'] + '.json')
+                    except OSError:
+                        pass
                 return dict(outcome='error', line=why, folder=work)
             image = v['image'] if flash else v['info']['flash']
             if isinstance(proc, dict) and image:       # digiemu reboots from the file the flash was written from
@@ -3872,7 +3970,7 @@ class Daemon:
                 secs = None
                 if v.get('power_cut'):             # a start run of a power-cycle plan: up to its first power cycle
                     secs = power_cycle_parts(info['steps'])[0]
-                if v.get('store') and snap:        # resumed after its setup
+                if v.get('store') and resumed:     # resumed after its setup
                     secs = (secs or info['steps'])[info['setup']:]
                 plan = self.batch_plan(info, work, '%s run %d' % ('gate' if v.get('gate') else 'batch', n),
                                        sections=secs, out=out)

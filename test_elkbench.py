@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import types
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -1373,6 +1374,125 @@ class InProcess(unittest.TestCase):
                 self.d.t_steps(self.s, {'unit': 'digitone', 'target': 'hardware', 'steps': 'ping; capture got.syx 1 none'})
         finally:
             daemon.DIGIHEALTH = saved
+
+    def test_digiemu_setup_snapshots_follow_its_usbrun(self):
+        root = os.path.join(TMP, 'digiemu-snaps')
+        os.makedirs(os.path.join(root, 'tools'), exist_ok=True)
+        saved = daemon.DIGIEMU
+        daemon.DIGIEMU = root
+        try:
+            with open(os.path.join(root, 'tools', 'usbrun.py'), 'w') as fh:
+                fh.write("ap.add_argument('--save-on-exit')\n")
+            self.assertFalse(self.d.emu_has_snapshots('digitone'))
+            with open(os.path.join(root, 'tools', 'usbrun.py'), 'w') as fh:
+                fh.write("ap.add_argument('--stdin-commands', action='store_true')\n")
+            self.assertTrue(self.d.emu_has_snapshots('digitakt'))
+            info = dict(unit='digitone', setup=1, emulator=False, flash=None, refs=TMP,
+                        steps=[('setup', ['say set up']), ('check', ['say check'])])
+            snap = self.d.setup_snapshot(self.s, info, {'build': self.saved['stock'][0]})
+            self.assertTrue(snap['digi'])
+            self.assertFalse(snap['have'])               # known once digiemu has started
+            self.assertEqual(snap['live'], snap['key'])  # digiemu stores it by key, in its own home
+            self.assertTrue(snap['store'].endswith(snap['key'] + '.digi'))
+            # the key changes with the setup steps and with digiemu's checkout
+            other = dict(info, steps=[('setup', ['say other']), ('check', ['say check'])])
+            self.assertNotEqual(snap['key'], self.d.snapshot_key(other, self.saved['stock'][0]))
+            with open(os.path.join(root, '.git'), 'w') as fh:
+                fh.write('gitdir: .gitdir\n')
+            os.makedirs(os.path.join(root, '.gitdir'), exist_ok=True)
+            with open(os.path.join(root, '.gitdir', 'HEAD'), 'w') as fh:
+                fh.write('a' * 40 + '\n')
+            self.assertNotEqual(snap['key'], self.d.snapshot_key(info, self.saved['stock'][0]))
+            # a plan that flashes, or records references, runs from the settled boot
+            self.assertIsNone(self.d.setup_snapshot(self.s, dict(info, flash='x.syx'),
+                                                    {'build': self.saved['stock'][0]}))
+            self.assertIsNone(self.d.setup_snapshot(self.s, info, {'build': self.saved['stock'][0],
+                                                                   'record_refs': True}))
+        finally:
+            daemon.DIGIEMU = saved
+
+    def test_git_head_of_a_checkout_and_a_worktree(self):
+        repo = os.path.join(TMP, 'gh-repo')
+        os.makedirs(os.path.join(repo, '.git', 'refs', 'heads'), exist_ok=True)
+        with open(os.path.join(repo, '.git', 'HEAD'), 'w') as fh:
+            fh.write('ref: refs/heads/main\n')
+        with open(os.path.join(repo, '.git', 'refs', 'heads', 'main'), 'w') as fh:
+            fh.write('1' * 40 + '\n')
+        self.assertEqual(daemon.git_head(repo), '1' * 40)
+        wt = os.path.join(TMP, 'gh-wt')
+        os.makedirs(os.path.join(repo, '.git', 'worktrees', 'wt'), exist_ok=True)
+        os.makedirs(wt, exist_ok=True)
+        with open(os.path.join(wt, '.git'), 'w') as fh:
+            fh.write('gitdir: %s\n' % os.path.join(repo, '.git', 'worktrees', 'wt'))
+        with open(os.path.join(repo, '.git', 'worktrees', 'wt', 'HEAD'), 'w') as fh:
+            fh.write('ref: refs/heads/side\n')
+        with open(os.path.join(repo, '.git', 'worktrees', 'wt', 'commondir'), 'w') as fh:
+            fh.write('../..\n')
+        with open(os.path.join(repo, '.git', 'packed-refs'), 'w') as fh:
+            fh.write('# pack-refs\n%s refs/heads/side\n' % ('2' * 40))
+        self.assertEqual(daemon.git_head(wt), '2' * 40)
+        self.assertIsNone(daemon.git_head(os.path.join(TMP, 'no-such-repo')))
+
+    def test_save_snapshot_now_waits_for_the_emulator_log(self):
+        log = os.path.join(TMP, 'save-now.log')
+
+        class Proc:
+            def __init__(self, line):
+                self.line, self.stdin = line, self
+
+            def write(self, data):
+                assert data == b'save\n'
+                with open(log, 'a') as fh:
+                    fh.write(self.line + '\n')
+
+            def flush(self):
+                pass
+
+            def poll(self):
+                return None
+        open(log, 'w').close()
+        e = dict(proc=Proc('[elkbench] setup snapshot K1 stored'), log=log)
+        self.assertTrue(daemon.save_snapshot_now(e, dict(digi=True, key='K1', live='K1')))
+        open(log, 'w').close()
+        e = dict(proc=Proc('[usbrun] save failed: disk full'), log=log)
+        self.assertFalse(daemon.save_snapshot_now(e, dict(digi=True, key='K1', live='K1')))
+        open(log, 'w').close()
+        self.assertTrue(daemon.save_snapshot_now(Proc('saved /w/setup.snap'),
+                                                 dict(live='/w/setup.snap', log=log)))
+
+    def test_digiemu_usb_stores_and_prunes_setup_snapshots(self):
+        import digiemu_usb
+        store = os.path.join(TMP, 'dusb-store')
+        work = os.path.join(TMP, 'dusb-work')
+        os.makedirs(work, exist_ok=True)
+        saved = os.path.join(work, 'setup.snap')
+        for data in (b'machine', b'card'):
+            with open(saved + ('' if data == b'machine' else '.card'), 'wb') as fh:
+                fh.write(data)
+        seen = []
+        out = digiemu_usb.Watch(types.SimpleNamespace(write=lambda t: len(t), flush=lambda: None),
+                                '[usbrun] saved %s' % saved, lambda: seen.append(1))
+        out.write('[usbrun] 1.0 s emulated\n[usbrun] sav')
+        self.assertEqual(seen, [])
+        out.write('ed %s\n' % saved)
+        self.assertEqual(seen, [1])
+        digiemu_usb.publish(saved, store, 'K1', 't1')
+        with open(os.path.join(store, 'K1', 'setup.snap.card'), 'rb') as fh:
+            self.assertEqual(fh.read(), b'card')
+        # a second session saving the same setup keeps the one stored first
+        for name, data in (('setup.snap', b'other'), ('setup.snap.card', b'other card')):
+            with open(os.path.join(work, name), 'wb') as fh:
+                fh.write(data)
+        digiemu_usb.publish(saved, store, 'K1', 't2')
+        with open(os.path.join(store, 'K1', 'setup.snap'), 'rb') as fh:
+            self.assertEqual(fh.read(), b'machine')
+        self.assertEqual(sorted(os.listdir(store)), ['K1'])
+        for n, key in enumerate(('K2', 'K3', 'K4')):
+            os.makedirs(os.path.join(store, key))
+            os.utime(os.path.join(store, key), (time.time() - 100 + n, time.time() - 100 + n))
+        os.utime(os.path.join(store, 'K1'), (time.time() - 9 * 86400,) * 2)
+        digiemu_usb.prune(store, 'K4', keep=2, days=7)   # K4 in use; K1 too old; K3 the newest other
+        self.assertEqual(sorted(os.listdir(store)), ['K3', 'K4'])
 
     def test_digiemu_paths_in_wsl(self):
         saved = daemon.DIGIEMU, daemon.DIGIEMU_PY
