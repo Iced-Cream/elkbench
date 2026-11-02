@@ -1,0 +1,68 @@
+# elkbench built-in start for the Analog Rytm MKII (OS 1.74 with a remote-key path), emulator only.
+# A gate batch runs it on a fresh emulator, keeps the end state as a snapshot, and runs hardware
+# plans from there (docs/testing-practices.md, "Messy starts and contrast runs"). Names and slots
+# follow the example write policy (examples/write-policy): `~T ` test names, test slots 121-128.
+format = 1
+unit = rytm
+emulator = yes
+name = start dirty
+out = runs
+note = the card's own project (slot 002) active, pattern A02 with kit 2, BD SRC changed unsaved, LFO page open
+
+[start]
+# Boot prompts away (a fresh emulator card shows two: MISSING CAL: SYNTH / NO FACTORY SAMPLES;
+# the third NO lands on the home screen and does nothing)
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.5
+shot start-home.png
+
+[pattern A02, which brings kit 2]
+say proves setup: pattern A02 is active; on the project of the card it links kit 2 (the title row changes kit and BPM)
+# BANK_A shows BANK A : CHOOSE PTN, and a trig key picks the pattern
+tap BANK_A
+wait 0.3
+shot bank-a.png
+tap 2
+wait 1.5
+shot a02-home.png
+
+[active project still the card's own]
+say proves evidence: MANAGE PROJECTS marks the project of the card (002) as the active one, 121-128 untouched
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP)
+wait 0.6
+shot manage-top.png
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+
+[an unsaved change: BD SRC knob A]
+say proves setup: an unsaved change in the working kit (BD SRC TUN moved, nothing saved)
+# A freshly booted project already counts as modified (LOAD asks SAVE ... BEFORE LOADING? before any
+# change), so that prompt cannot prove the change: shots of the SRC page before and after the turn do.
+keys TRK(BD)
+wait 0.4
+tap SRC
+wait 0.8
+shot change-src-before.png
+turn A 12 4
+wait 2
+shot change-src-after.png
+
+[end state]
+say proves evidence: the home title row (kit, BPM) and the LFO page left open
+shot end-home.png
+tap LFO
+wait 1
+shot end-lfo.png
