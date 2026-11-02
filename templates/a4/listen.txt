@@ -28,6 +28,9 @@ wait 0.6
 # the start check: T1's OSC1 page 1/2, by its knob labels and dials (rows 8-63). The title
 # bar names the page only for a moment before it goes back to the kit's name.
 expect-screen t1-osc1-page 2 rows=8-63
+# and the sequencer stopped (the stop square where the play indicator goes): PLAY on a playing
+# pattern pauses it on the A4, and the setup's grid recording would run on a moving pattern
+expect-screen stopped 2 rows=2-6 cols=119-125
 
 [setup: T1 on step 1]
 say proves setup: one T1 trig on step 1 (grid recording: a key on the live screen adds no trig)
