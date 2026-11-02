@@ -6,6 +6,14 @@
 #   data get /projects/121      (the backup, into the run's evidence folder)
 #   data clear /projects/121
 # List both in the go request as writes: "slot 121 (holds X at listing time: backed up and erased)".
+#
+# Which project is active decides the LOAD below: LOAD asks SAVE '<name>' BEFORE LOADING? only when
+# the active project came from another slot. Loading the slot the active project came from goes
+# straight to ANY CHANGES WILL BE LOST. PROCEED WITH LOADING?, and a NO meant for the save prompt
+# cancels the load. The start check proves which case this is (the active-project marker), so the
+# plan stops at its start, not in the middle. As written, this plan is for an active project from
+# another slot; for one from 121 (a previous run's ~T project, say) use the two changes marked
+# "ACTIVE FROM 121", or another test slot.
 format = 1
 name = setup test project in 121
 unit = rytm
@@ -31,10 +39,18 @@ shot start-manage-121.png
 # The start check: the cursor row at the list's top (rows 0-6) reads 121 and an empty slot, which only
 # the run's own clear produced. Record it in the emulator after an emulator-only step has filled and
 # cleared 121, so the clearing path is tested too.
-# The contrast: from the built-in occupied and testslot starts, 121 holds a project, and this check
-# has to stop the run there (a gate batch runs both). From the dirty start the plan has to pass.
+# The contrast: from the built-in occupied and testslot starts, 121 holds a project, and the empty-slot
+# check has to stop the run there (a gate batch runs both). From the dirty start the plan has to pass.
 say contrast occupied, testslot: slot 121 holds a project, so the cleared-slot check stops the run
-expect-screen manage-cursor-121-cleared 2 rows=0-6
+# Three checks on the row, so a failure says which part differs. The active project's slot shows a
+# marker in cols 28-31, and it stays on a cleared slot when the active project was loaded from it.
+# Cols 0-27: the cursor row reads 121. Cols 32-127: the slot is empty.
+expect-screen manage-cursor-121 2 rows=0-6 cols=0-27
+expect-screen manage-121-empty 2 rows=0-6 cols=32-127
+# Cols 28-31: no marker, the active project came from another slot, so LOAD asks to save first.
+# The checker flags a blank compared area; here the blank is what the check proves.
+# ACTIVE FROM 121: record this one with the marker instead, under its own name (manage-121-active).
+expect-screen manage-121-not-active 2 rows=0-6 cols=28-31
 
 [setup: INIT NEW into 121]
 say proves setup: a new project in 121, named by the plan
@@ -64,8 +80,8 @@ wait 0.4
 tap YES
 wait 1
 shot proceed.png
-# The working project is modified at this point, so LOAD asks SAVE '<name>' BEFORE LOADING? Y/N
-# first. Always NO: YES saves the active project outside the plan's slots (the checker refuses
+# The working project is modified at this point, and the start check proved it came from another
+# slot, so LOAD asks SAVE '<name>' BEFORE LOADING? Y/N first. Always NO: YES saves the active project outside the plan's slots (the checker refuses
 # anything else after a save-before-load check). The box is as wide as the project's name, so the
 # check compares only the fixed second line (rows 34-40) inside the narrowest box (cols 22-106);
 # cols= needs an analoghealth with that option.
@@ -73,6 +89,8 @@ expect-screen save-before-loading 2 rows=34-40 cols=22-106
 tap NO
 wait 1
 shot proceed-2.png
+# ACTIVE FROM 121: LOAD shows no save prompt, so leave out the four steps above (the save-before-
+# loading check, its NO, the wait and the shot) and go on with the PROCEED check below.
 # Then ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N: the same box whatever the name (checked
 # on a unit, 2026-11-01); YES loads 121.
 expect-screen proceed-with-loading 2 rows=21-44

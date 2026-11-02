@@ -28,6 +28,20 @@ def drums(seconds=4.0):
     return x
 
 
+def notes(seconds=10.0, first=0.856, floor=1e-6):
+    """A decaying note every 2 s, starting 56 ms into a 100 ms block, over a near-silent floor
+    (as a synth track's own output records): no faults."""
+    x = floor * rng.standard_normal(int(seconds * RATE))
+    for on in np.arange(first, seconds, 2.0):
+        s = int(on * RATE)
+        m = min(int(1.5 * RATE), len(x) - s)
+        k = np.arange(m) / RATE
+        env = np.exp(-k * 3)
+        x[s:s + m] += 0.07 * env * (np.sin(2 * np.pi * 220 * k) + 0.3 * np.sin(2 * np.pi * 660 * k + 1)) \
+            + 1e-4 * env * rng.standard_normal(m)
+    return x
+
+
 class Dropouts(unittest.TestCase):
     def test_clean_tone_and_drums(self):
         self.assertEqual(ac.dropouts(tone(), RATE), [])
@@ -45,6 +59,17 @@ class Dropouts(unittest.TestCase):
         x[50000:] = np.roll(x[50000:], 7)          # a repeated / skipped few samples
         found = ac.find_clicks(x, RATE)
         self.assertTrue(any(abs(f["t"] - 50000 / RATE) < 0.001 for f in found), found)
+
+    def test_note_onset_mid_block_is_not_a_click(self):
+        # the block before the onset is mostly silence: its median residual must not come from it
+        self.assertEqual(ac.find_clicks(notes(), RATE), [])
+
+    def test_click_in_a_note_near_a_block_end(self):
+        x = notes()
+        k = int(2.998 * RATE)                     # 142 ms into the second note, 2 ms before a block edge
+        x[k:] = np.roll(x[k:], 5)
+        found = ac.find_clicks(x, RATE)
+        self.assertTrue(any(abs(f["t"] - k / RATE) < 0.001 for f in found), found)
 
     def test_dip(self):
         x = tone()
