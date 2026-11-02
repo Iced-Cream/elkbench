@@ -1096,6 +1096,71 @@ class InProcess(unittest.TestCase):
         self.assertEqual(self.d.emu_ready(self.s, unit, None, power_off=True)[1], [])
         self.d.stop_emulator(self.d.emulators[(self.s.sid, unit)])
 
+    def test_digiemu_power_cycle(self):
+        """digiemu's power cycle: `power-off` on its stdin, its save line, its boot on that card
+        on the same link, then the OS's answer; a save that did not finish fails it."""
+        tools = os.path.join(TMP, 'digiemu-po', 'tools')
+        os.makedirs(tools, exist_ok=True)
+        saved = daemon.DIGIEMU, daemon.DIGIHEALTH
+        self.addCleanup(lambda: setattr(daemon, 'DIGIEMU', saved[0]) or setattr(daemon, 'DIGIHEALTH', saved[1]))
+        daemon.DIGIEMU, daemon.DIGIHEALTH = os.path.dirname(tools), None
+        with open(os.path.join(tools, 'usbrun.py'), 'w', encoding='utf-8') as fh:
+            fh.write("ap.add_argument('--ob-audio-port')\n")
+        self.assertFalse(self.d.digiemu_has_power_off())
+        with open(os.path.join(tools, 'usbrun.py'), 'w', encoding='utf-8') as fh:
+            fh.write("ap.add_argument('--power-off', action='store_true')\n")
+        self.assertTrue(self.d.digiemu_has_power_off())
+        daemon.DIGIEMU_UP_WAIT = 20
+        script = os.path.join(TMP, 'fake-usbrun.py')
+        with open(script, 'w', encoding='utf-8') as fh:
+            fh.write('import os, sys, time\n'
+                     'print("[usbrun] USB MIDI link on 127.0.0.1:7999", flush=True)\n'
+                     'for line in sys.stdin:\n'
+                     '    if line.strip() == "power-off":\n'
+                     '        print("[usbrun] power off: supply cut", flush=True)\n'
+                     '        if os.environ.get("FAKE_DIGIEMU_NO_SAVE"):\n'
+                     '            print("[usbrun] power off: the OS did not finish its power-off save within 5 s"\n'
+                     '                  " (0 blocks written)", flush=True)\n'
+                     '            break\n'
+                     '        print("[usbrun] power off: working state saved (5440 blocks written)", flush=True)\n'
+                     '        print("[usbrun] power off: wrote card", flush=True)\n'
+                     '        print("[usbrun] switching on again into X.syx", flush=True)\n'
+                     '        time.sleep(1)\n'
+                     '        print("[usbrun] up again after 61 s: gui.snap", flush=True)\n'
+                     'time.sleep(30)\n')
+        for no_save in (False, True):
+            os.environ.pop('FAKE_DIGIEMU_NO_SAVE', None)
+            if no_save:
+                os.environ['FAKE_DIGIEMU_NO_SAVE'] = '1'
+            self.addCleanup(lambda: os.environ.pop('FAKE_DIGIEMU_NO_SAVE', None))
+            log_path = os.path.join(TMP, 'digiemu-po.log')
+            log = open(log_path, 'w', encoding='utf-8')
+            self.addCleanup(log.close)
+            proc = subprocess.Popen([sys.executable, script], stdin=subprocess.PIPE, stdout=log,
+                                    stderr=subprocess.STDOUT, env=dict(os.environ))
+            self.addCleanup(proc.kill)
+            e = dict(proc=proc, session=self.s.sid, build='X.syx', address='tcp:127.0.0.1:7999', log=log_path,
+                     power_off=True, boots=1)
+            self.d.emulators[(self.s.sid, 'digitone')] = e
+            rc, line = self.d.power_cycle(self.s, 'digitone')
+            if no_save:
+                self.assertEqual(rc, 1, line)
+                self.assertIn('did not finish its power-off save', line)
+            else:
+                self.assertEqual(rc, 0, line)
+                self.assertIn('working state saved (5440 blocks written)', line)
+                self.assertIn('up again at tcp:127.0.0.1:7999', line)
+                self.assertEqual(e['boots'], 2)
+            proc.kill()
+            proc.wait()
+        e['power_off'] = False
+        proc = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)'])
+        self.addCleanup(proc.kill)
+        e['proc'] = proc
+        self.assertIn('did not start with --power-off', self.d.power_cycle(self.s, 'digitone')[1])
+        proc.kill()
+        proc.wait()
+
     @needs_runner
     def test_power_cycle_run_plan(self, unit='rytm'):
         self.fake_power_off_emulator(unit)
