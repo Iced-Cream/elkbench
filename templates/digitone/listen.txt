@@ -11,6 +11,7 @@ name = listening check
 unit = digitone
 refs = refs/digitone-listen
 out = runs
+audio-tools = C:/path/to/elkbench/audio
 note = ~T SETUP (slot 121, INIT NEW) active, T1 trig on step 1; stopped at the end
 #
 # The test project setup runs inside the plan (the same sections as setup-test-project.txt), so
