@@ -302,7 +302,7 @@ policy, `examples/write-policy/policy.py` (tests beside it).
   there.
 - **Test slots empty at every release:** every run ends with 121-128 empty, whatever it put
   there and however it ended: `clear_at_release = '121-128'` in each unit's section of
-  config.toml makes `release` back each project there up into the run folder, erase it and list
+  config.toml (Rytm, A4, Digitone) makes `release` back each project there up into the run folder, erase it and list
   the slots empty, and keeps the claim if it can't. So a run finds them empty, and its setup's
   start check (121 empty) only stops it when a session ended without releasing. Nobody saves
   their own work there by hand, so the cleanup touches only test projects.

@@ -258,8 +258,17 @@ def slot_numbers(spec):
     return sorted(out)
 
 
+def clears_at_release(unit):
+    """Release empties `unit`'s test slots: it sets clear_at_release and has a data store runner
+    (analogrun on the Rytm and A4; digirun lists and analogrun's `data` erases on the Digitone and
+    Digitakt, as the data tool does)."""
+    u = UNITS.get(unit) or {}
+    return bool(u.get('clear_at_release')) and u.get('runner') in (True, 'digirun')
+
+
 def occupied_slots(ls_text):
-    """`analogrun data ls /projects` output -> the slot numbers that hold a project."""
+    """`analogrun data ls /projects` (or digirun's, the same rows) output -> the slot numbers
+    that hold a project."""
     return {int(m.group(2)) for m in re.finditer(r'^(.*?)\s+id\s+(\d+)\s+\d+ B(.*)$', ls_text, re.M)
             if 'no valid data' not in m.group(3)}
 
@@ -1522,7 +1531,7 @@ class Daemon:
         # checks): what they hold is backed up into the session's evidence folder, then erased.
         cleared = {}
         for u in mine:
-            if not (UNITS[u].get('clear_at_release') and UNITS[u]['runner'] is True):
+            if not clears_at_release(u):
                 continue
             ok, lines = self.empty_test_slots(s, u)
             if not ok and not a.get('accept_slots_left'):
@@ -1570,16 +1579,21 @@ class Daemon:
     def empty_test_slots(self, s, u):
         """At release: back up and erase every project in the unit's `clear_at_release` slots
         (analogrun `data clear`, which asks the local write policy and keeps the copy), then list
-        the projects to show them empty. -> (ok, lines)."""
+        the projects to show them empty. -> (ok, lines). On a digirun unit (Digitone, Digitakt)
+        digirun lists and analogrun erases, as the data tool does there."""
         slots = UNITS[u]['clear_at_release']
         try:
             self.check_connected(u, 'hardware')
+            writer = runner()
+            lister = os.path.join(need(DIGIHEALTH, 'digihealth', 'the Digitone/Digitakt runner (digihealth)'),
+                                  'tools', 'digirun.py') if UNITS[u]['runner'] == 'digirun' else writer
         except Refused as e:
             return False, ['not emptied: %s' % e]
-        script, folder = runner(), os.path.join(s.folder(u), 'release-clear-%s' % time.strftime('%H%M%S'))
+        folder = os.path.join(s.folder(u), 'release-clear-%s' % time.strftime('%H%M%S'))
         port = self.busy_port(u, 'hardware', 'release: empty the test slots')
         try:
             def run(*args):
+                script = lister if args[0] == 'ls' else writer
                 return subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, script, '--port',
                                        UNITS[u]['port'], 'data'] + list(args),
                                       cwd=os.path.dirname(os.path.dirname(script)), env=s.env(),
@@ -1733,7 +1747,7 @@ class Daemon:
             raise Refused('nothing to approve: give plans, flashes or recall_restores')
         for u in sorted({i['unit'] for i in infos} | {f.get('unit') for f in a.get('flashes') or []}
                         | {f.get('unit') for f in a.get('recall_restores') or []}):
-            if UNITS.get(u, {}).get('clear_at_release') and UNITS[u]['runner'] is True:
+            if clears_at_release(u):
                 text.append('AT RELEASE on %s, however the run ends: project slots %s, whatever they hold, '
                             'backed up to the run folder and erased (data clear), then listed to show them empty'
                             % (u, slot_text(UNITS[u]['clear_at_release'])))
