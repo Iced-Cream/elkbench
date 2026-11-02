@@ -1670,6 +1670,14 @@ class InProcess(unittest.TestCase):
         self.assertEqual(info['check']['errors'], [])
         self.assertEqual(daemon.starts_needed(info), {'fresh': 'start', 'dirty': 'start', 'occupied': 'start'})
 
+    def test_a_flash_plan_needs_no_built_in_starts(self):
+        """A plan that flashes boots the OS before its flash, often stock with no remote keys: the
+        built-in starts cannot be built there, and the flash is gated as a transition."""
+        self.with_starts()
+        info = self.d.plan_info(os.path.join(PLANS, 'menus-flash.txt'))
+        self.assertEqual(info['check']['errors'], [])
+        self.assertEqual(daemon.starts_needed(info), {})
+
     def test_a_pass_after_ungated_writes_is_not_recorded(self):
         """Proposal B.3 and B.4: a pass records what ran before it on the session's emulator, and a
         pass that ran after an emulator-only write is not recorded."""

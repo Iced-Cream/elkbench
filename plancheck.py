@@ -257,7 +257,7 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
         if start and not why:
             errors.append('[%s] say contrast %s: say why it stops there (`say contrast %s: why`)'
                           % (name, start, start))
-    if steps and not flash_only:
+    if steps and not flash:                  # a flash plan starts on the OS before its flash
         first = steps[0][0]
         if not any(n == first for n, _, _ in contrasts):
             if len(starts) > 1:

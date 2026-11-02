@@ -113,7 +113,9 @@ close those gaps.
 - **Every plan runs from the messy starts.** A hardware plan's go needs a run from `dirty` and
   from `occupied` (where the unit has them) besides its own pass. Each must pass, or stop
   where the plan says it stops (next point). A plan that runs half way and then fails from a
-  messy start would do the same on a unit left that way.
+  messy start would do the same on a unit left that way. A plan that flashes is left out: it
+  starts on the OS before its flash (often stock, where no start can be built), and the flash is
+  gated as a transition.
 - **Contrast runs: a check must be seen to fail.** A section names the starts from which it
   must stop the run, and why: `say contrast occupied, testslot: slot 121 holds a project, so
   the cleared-slot check stops`. The run from that start has to stop in that section: not
