@@ -1,0 +1,28 @@
+# Template: one flash transition on a Digitone, for its emulator gate and the hardware run.
+# Copy it once per flash in the run, in the run's order, including stock back over the last build.
+# Each copy is its own plan and its own item in the go: a file flashed twice is listed twice.
+#
+# The gate (docs/testing-practices.md, section 1): the emulator flashes this file over what the unit
+# will have on it at that point (run_plan target emulator build = THAT OS), and the transition passes
+# when the upgrade completes: erase, write, reboot, the new OS answering. A stalled flash ends the run,
+# with no recovery flash. In digiemu a stock 1.44 over a digihealth build came back in about 43 s,
+# with no prompt on the home screen.
+#
+# A pre-check in an emulator by hand (not the gate): a stock OS takes an upgrade only with its OS
+# UPGRADE page open. On the Digitone: SETTINGS, DOWN x12, YES (SYSTEM), UP x10, DOWN x4, YES; the page
+# reads OS UPGRADE / WAITING FOR SYSEX, then send the .syx. NO leaves it.
+format = 1
+name = flash BUILD over PREVIOUS
+unit = digitone
+out = runs
+flash = ../os/BUILD.syx               # the file this transition puts on the unit
+# elkflash = PATH                     # optional: an elkflash checkout; without it elkbench uses tools.elkflash
+note = BUILD flashed over PREVIOUS
+
+[after the flash]
+say proves evidence: the unit answers and the home screen after the reboot
+# ping reads the product and OS version; on the Digitone it needs a digirun that has it (digihealth's
+# runner-capture-ping) and an OS with a remote path (on stock, leave ping out and keep the shot)
+wait 2
+ping
+shot after-flash.png
