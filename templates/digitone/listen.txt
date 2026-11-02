@@ -11,6 +11,10 @@ name = listening check
 unit = digitone
 refs = refs/digitone-listen
 out = runs
+# Every Digitone hardware plan starts from empty test slots: its own gate run starts from the
+# built-in start testslot-cleared, the state every release leaves with clear_at_release (the last
+# test project still the working project, its slot 121 cleared, the active marker on 121).
+start = testslot-cleared
 audio-tools = C:/path/to/elkbench/audio
 audio-driver = Elektron Digitone        # the ASIO driver name, for audio-record on the unit
 audio-python = py -3.14                  # a Python with numpy and scipy, for the audio checks
@@ -50,6 +54,10 @@ shot start-manage-121.png
 # leaves the marker's rows out: rows 56-57 and 61-63 hold the slot number and the top and bottom
 # rows of a name's letters, which an empty slot's dashed line does not light. Record it in the
 # emulator, then see it fail with 121 filled.
+# The contrast: from the built-in occupied and testslot starts, 121 holds a project, and the
+# empty-slot check stops the run. From testslot-cleared (this plan's own start) and dirty, 121 is
+# empty and the plan passes.
+say contrast occupied, testslot: slot 121 holds a project, so the empty-slot check stops the run
 expect-screen manage-121-empty 2 rows=56-57
 expect-screen manage-121-empty 2 rows=61-63
 # back home: the list, PROJECT, SETTINGS (a spare NO on the home screen does nothing)
@@ -199,7 +207,11 @@ wait 1.5
 
 [level check (hardware)]
 say proves works: track 1 sounds (channels 3,4) before the person is asked to listen
-audio-record 3 level
+# Every take is a whole number of bars (a new project: 120 BPM, one T1 note per 2 s bar), so each
+# holds the same notes wherever it starts. A 3 s take held one or two (found on the unit,
+# 2026-11-02: the level read 3 dB low when it held one), so a level-ref recorded as 3 s cannot be
+# reused: record a 4 s one.
+audio-record 4 level
 audio-compare level-ref level 3,4
 
 [L1 track 1 plays steadily]

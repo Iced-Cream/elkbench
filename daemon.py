@@ -4003,8 +4003,10 @@ class Daemon:
                         return 'start %s was not built: data %s %s: %s (%s)' % (name, op, where, last[0].strip(), sub)
                 sinfo = self.plan_info(path)
                 plan = self.batch_plan(sinfo, sub, 'start %s' % name, out=sub)
+                # analogrun hands a Digitone or Digitakt plan to digirun, as in batch_run
+                env = dict(s.env(), **({'DIGIRUN_PATH': os.path.join(DIGIHEALTH, 'tools')} if DIGIHEALTH else {}))
                 p = subprocess.run([sys.executable, RUNNER, '--port', addr, '--quiet', 'run', plan], cwd=ANALOGHEALTH,
-                                   env=s.env(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                   env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
                                    encoding='utf-8', errors='replace', timeout=minutes * 60, **NOWIN)
                 log.append(p.stdout)
                 ok, line = self.plan_outcome(p.returncode, p.stdout)
