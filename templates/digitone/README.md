@@ -16,9 +16,10 @@ Where the Digitone differs from the Rytm:
 - **No play state on screen.** No page tried on OS 1.44 differs between playing and stopped, so a
   level check (on the unit; the emulator plays track 1 too, at its own level) is what proves the
   pattern plays. The listen template has one before its listen step, and needs a `level-ref.wav`.
-- **One load prompt.** LOAD FROM asks only ANY CHANGES WILL BE LOST. PROCEED WITH LOADING?, and
-  only when the working project has unsaved changes. The setup template turns an encoder first
-  so the prompt always comes; YES there discards every unsaved change, as on the Rytm.
+- **The load prompts come only after an unsaved change.** With another project active, LOAD FROM
+  asks SAVE '<name>' BEFORE LOADING? (answered NO) and then PROCEED WITH LOADING?, but only when
+  the working project has unsaved changes. The setup template turns an encoder first so both
+  always come; YES at PROCEED discards every unsaved change, as on the Rytm.
 - **A test project is marked by its pattern A01's name** in a write policy, not by a kit.
 - **No `ping` or `capture`** with a digirun that lacks them (digihealth's runner-capture-ping
   adds them), so the flash gate keeps a shot only.
