@@ -77,4 +77,5 @@ person = "the person at this PC"
 # emu_card = 'C:\tests\rytm\card.img'      # the emulator tool boots a fresh copy of it
 # din = 'USB MIDI Interface'               # the MIDI interface cabled to its DIN ports (both ways, a
 #                                          # name or 'IN,OUT'): hardware steps and plans with
-#                                          # send/capture ... din use it (Rytm and A4); unset: refused
+#                                          # send/capture ... din use it (Rytm, A4; Digitone and
+#                                          # Digitakt with a digirun.py that has --din); unset: refused

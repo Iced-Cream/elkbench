@@ -110,9 +110,10 @@ DATA_OPS = ('ls', 'get', 'put', 'clear', 'roundtrip')
 # Digitone (digirun) steps that do not exist: no key-driven kit save, as a test project there is
 # marked by its pattern A01, not a kit. send and save-project ask the write policy as analogrun does.
 # capture and ping need a digirun that has them (digihealth's runner-capture-ping); an older one
-# lacks them, and then they are refused here too.
+# lacks them, and then they are refused here too. din is its --din option (send/capture ... din).
 DIGI_NO_STEPS = {'save-kit'}
-DIGI_NEWER_STEPS = {'capture': '    capture FILE', 'ping': '    ping '}   # step -> its line in digirun's help
+DIGI_NEWER_STEPS = {'capture': '    capture FILE', 'ping': '    ping ',    # step -> its line in digirun's help
+                    'din': "'--din'"}                                       # option -> its argparse name
 
 
 def digirun_lacks():
@@ -139,7 +140,20 @@ def chunk_args(unit):
 def no_steps(unit):
     """The steps `unit`'s runner lacks: digirun's gaps, and any the unit's facts add."""
     u = UNITS.get(unit) or {}
-    return ((DIGI_NO_STEPS | digirun_lacks()) if u.get('runner') == 'digirun' else set()) | set(u.get('no_steps') or ())
+    return (((DIGI_NO_STEPS | digirun_lacks()) & STEP_OPS if u.get('runner') == 'digirun' else set())
+            | set(u.get('no_steps') or ()))
+
+
+def din_refusal(unit):
+    """Why `unit`'s runner cannot take DIN steps (send/capture ... din), or None when it can:
+    analogrun (Rytm, A4) always, digirun (Digitone, Digitakt) when its digirun.py has --din."""
+    runner = (UNITS.get(unit) or {}).get('runner')
+    if runner is True or runner == 'digirun' and 'din' not in digirun_lacks():
+        return None
+    if runner == 'digirun':
+        return ('DIN steps (send/capture ... din) on the %s need a digirun.py with --din (tools.digihealth)'
+                % unit)
+    return 'DIN steps (send/capture ... din) have no runner on the %s' % unit
 
 
 STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'wait', 'stats',
@@ -1035,8 +1049,8 @@ class Daemon:
             if bad:
                 raise Refused('a %s plan cannot %s (digirun has no such steps there)' % (unit, ', '.join(bad)))
         din = din_steps([l for _, lines in steps for l in lines])
-        if din and UNITS[unit]['runner'] is not True:
-            raise Refused('%s: DIN steps run on the Rytm and A4 only so far' % din[0])
+        if din and din_refusal(unit):
+            raise Refused('%s: %s' % (din[0], din_refusal(unit)))
         flash = rel(settings['flash']) if settings.get('flash') else None
         if flash and UNITS[unit].get('flash_chunk'):
             raise Refused('a %s plan cannot flash: testplan sends elkflash\'s default chunks, and the %s '
@@ -2213,23 +2227,29 @@ class Daemon:
                                       lambda e: self.emulators.__setitem__((s.sid, unit), dict(e, session=s.sid)))
         e = self.emulators[(s.sid, unit)]
         fresh = 'already set up' not in text
-        return ['ok: %s emulator running headless on %s, USB MIDI at %s (%s), ends by '
+        return ['ok: %s emulator running headless on %s, USB MIDI at %s%s (%s), ends by '
                 'itself after %d min' % (unit, os.path.basename(build), e['address'],
+                                         ', DIN MIDI at %s' % e['din'] if e.get('din') else '',
                                          'first boot of this build' if fresh else 'its settled boot', minutes)]
+
+    def digiemu_has(self, option):
+        """Whether this digiemu's tools/usbrun.py takes `option` (--ob-audio-port, --din-port)."""
+        try:
+            with open(os.path.join(DIGIEMU, 'tools', 'usbrun.py'), encoding='utf-8', errors='replace') as fh:
+                return option in fh.read()
+        except OSError:
+            return False
 
     def digiemu_has_ob_audio(self):
         """Whether this digiemu's usbrun serves Overbridge audio (--ob-audio-port)."""
-        try:
-            with open(os.path.join(DIGIEMU, 'tools', 'usbrun.py'), encoding='utf-8', errors='replace') as fh:
-                return '--ob-audio-port' in fh.read()
-        except OSError:
-            return False
+        return self.digiemu_has('--ob-audio-port')
 
     def digiemu_launch(self, build, minutes, tag, work, firmware, started=None):
         """digiemu_usb.py booting `build` (work folder `tag` in WSL), its link on a free port,
         until its OS answers -> (emulator dict, its log text). `firmware` (WSL must see it) gets
-        the OS files flashed into it; started(e) runs as soon as the process is up. Refused, with
-        the emulator stopped, when it does not come up."""
+        the OS files flashed into it; started(e) runs as soon as the process is up. Its DIN MIDI
+        gets a port of its own (e['din']) when this digiemu serves one. Refused, with the emulator
+        stopped, when it does not come up."""
         with socket.socket() as probe:               # a free local port for its USB MIDI link
             probe.bind(('127.0.0.1', 0))
             tcp = probe.getsockname()[1]
@@ -2238,16 +2258,22 @@ class Daemon:
             with socket.socket() as probe:           # and one for its Overbridge audio
                 probe.bind(('127.0.0.1', 0))
                 ob = probe.getsockname()[1]
+        din = None
+        if self.digiemu_has('--din-port'):
+            with socket.socket() as probe:           # and one for its DIN MIDI
+                probe.bind(('127.0.0.1', 0))
+                din = probe.getsockname()[1]
         shutil.rmtree(firmware, ignore_errors=True)
         os.makedirs(firmware)
         cmd = self.digiemu_cmd([Path(os.path.join(HERE, 'digiemu_usb.py')), Path(DIGIEMU), Path(build),
                                 str(tcp), str(minutes), tag, '--firmware-dir', Path(firmware)]
-                               + (['--ob-audio-port', str(ob)] if ob else []))
+                               + (['--ob-audio-port', str(ob)] if ob else [])
+                               + (['--din-port', str(din)] if din else []))
         log_path = os.path.join(work, 'emulator.log')
         log = open(log_path, 'w', encoding='utf-8')
         proc = subprocess.Popen(cmd, cwd=work, stdout=log, stderr=subprocess.STDOUT, **NOWIN)
         e = dict(proc=proc, build=os.path.basename(build), sha=sha256(build),
-                 address='tcp:127.0.0.1:%d' % tcp,
+                 address='tcp:127.0.0.1:%d' % tcp, din='tcp:127.0.0.1:%d' % din if din else None,
                  wsl_tag=tag if cmd[0] == 'wsl' else None, firmware=firmware, ob_audio=ob)
         if started:
             started(e)
@@ -2257,14 +2283,15 @@ class Daemon:
             with open(log_path, encoding='utf-8', errors='replace') as fh:
                 text = fh.read()
         if '[usbrun] USB MIDI link on' in text:
-            for _ in range(20):                      # WSL forwards the port to Windows a moment later
-                try:
-                    socket.create_connection(('127.0.0.1', tcp), timeout=1).close()
-                    break
-                except OSError:
-                    time.sleep(0.5)
-            else:
-                text = ''
+            for port in [tcp] + ([din] if din else []):
+                for _ in range(20):                  # WSL forwards the port to Windows a moment later
+                    try:
+                        socket.create_connection(('127.0.0.1', port), timeout=1).close()
+                        break
+                    except OSError:
+                        time.sleep(0.5)
+                else:
+                    text = ''
         if text and DIGIHEALTH and os.path.exists(DIGIHEALTH):
             script = os.path.join(DIGIHEALTH, 'tools', 'digirun.py')
             for _ in range(12):                      # the OS answers its RPC a moment after the link
@@ -2365,17 +2392,21 @@ class Daemon:
         return self.emu_help_text[stamp]
 
     def emu_has_din(self, unit):
-        """Whether this analog-emu build serves its DIN MIDI over TCP (--din-midi-tcp)."""
+        """Whether this unit's emulator serves its DIN MIDI over TCP: analog-emu's --din-midi-tcp,
+        digiemu's usbrun.py --din-port."""
+        if UNITS[unit].get('emulator') == 'digiemu':
+            return self.digiemu_has('--din-port')
         return '--din-midi-tcp' in self.emu_help(unit)
 
     def din_args(self, s, unit, tgt, lines):
-        """['--din', PORT] for analogrun when `lines` use the unit's DIN MIDI (send/capture ...
-        din), else []: on hardware the interface named in config (units.<unit>.din), which must be
-        connected; in the emulator, this session's emulator's DIN MIDI over TCP."""
+        """['--din', PORT] for analogrun or digirun when `lines` use the unit's DIN MIDI
+        (send/capture ... din), else []: on hardware the interface named in config
+        (units.<unit>.din), which must be connected; in the emulator, this session's emulator's
+        DIN MIDI over TCP."""
         if not din_steps(lines):
             return []
-        if UNITS[unit]['runner'] is not True:
-            raise Refused('DIN steps (send/capture ... din) run on the Rytm and A4 only so far')
+        if din_refusal(unit):
+            raise Refused(din_refusal(unit))
         if tgt == 'hardware':
             name = UNITS[unit].get('din')
             if not name:
@@ -2397,6 +2428,9 @@ class Daemon:
                       '(emulator stop, then start or give build)' % unit)
 
     def no_emu_din(self, unit):
+        if UNITS[unit].get('emulator') == 'digiemu':
+            return ('these steps use DIN MIDI, and this digiemu\'s tools/usbrun.py has no --din-port: DIN '
+                    'steps need a digiemu that serves its DIN MIDI over TCP (tools.digiemu)')
         return ('these steps use DIN MIDI, and this analog-emu %s has no --din-midi-tcp: DIN steps need '
                 'an analog-emu that serves its DIN MIDI over TCP (tools.analog_emu)' % UNITS[unit]['emu_exe'])
 
@@ -2594,7 +2628,7 @@ class Daemon:
                 if not self.emu_has_power_off(unit):
                     raise Refused('this plan has power-cycle steps, and this analog-emu %s has no --power-off '
                                   '(tools.analog_emu needs a build with the power-off save)' % UNITS[unit]['emu_exe'])
-            if info['din'] and UNITS[unit].get('emu_exe') and not self.emu_has_din(unit):
+            if info['din'] and not self.emu_has_din(unit):
                 raise Refused(self.no_emu_din(unit))
             snap = self.setup_snapshot(s, info, a)
             addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'], bool(cycles))
@@ -2840,8 +2874,6 @@ class Daemon:
         """analogrun (or digirun) do STEPS on the unit or its emulator -> (ok, one line, folder)."""
         self.unit(unit, need_runner=need)
         if UNITS[unit]['runner'] == 'digirun':
-            if din_steps(steps.split(';')):
-                raise Refused('DIN steps (send/capture ... din) run on the Rytm and A4 only so far')
             return self.digirun_do(s, unit, tgt, steps, timeout)
         runner()
         if tgt == 'hardware':
@@ -2884,13 +2916,15 @@ class Daemon:
             self.check_hardware(s, [unit])
             self.check_connected(unit, tgt)
             where = UNITS[unit]['port']
-            port = self.busy_port(unit, tgt, 'steps')
+            din = self.din_args(s, unit, tgt, steps.split(';'))
+            port = self.hold_din(din, self.busy_port(unit, tgt, 'steps'))
         else:
             where = self.emu_port(s, unit)           # digiemu's USB MIDI link (digirun --port tcp:)
+            din = self.din_args(s, unit, tgt, steps.split(';'))
             port = self.busy_port('%s@%s' % (unit, where), tgt, 'steps')
         folder = s.folder(unit)
         try:
-            cmd = [sys.executable, script, '--port', where, 'do', steps, '--out', folder]
+            cmd = [sys.executable, script, '--port', where] + din + ['do', steps, '--out', folder]
             if tgt == 'hardware':
                 cmd = [sys.executable, ELKLOCK, 'run', unit, '--'] + cmd
             r = subprocess.run(cmd, cwd=os.path.dirname(script), env=s.env(), capture_output=True,
@@ -3573,7 +3607,10 @@ class Daemon:
                                            work, os.path.join(work, 'firmware'))
             except Refused as why:
                 return None, None, str(why), None
-            return e, e['address'], None, None
+            if din and not e.get('din'):
+                self.end_emulator(e)
+                return None, None, self.no_emu_din(unit), None
+            return e, e['address'], None, e.get('din') if din else None
         exe = os.path.join(ANALOG_EMU, UNITS[unit]['emu_exe'])
         cmd = [exe, build, '--flash', os.path.join(work, 'flash.img'), '--no-audio', '--headless',
                '--no-midi', '--after', str(minutes * 60 + 120)]
@@ -4089,8 +4126,8 @@ TOOLS = [
        stop={'type': 'string', 'description': 'a batch run_id: start no more of its runs'})),
     ('steps', 'analogrun steps (tap, hold, keys, turn, cc, nrpn, note, wait, stats, shot NAME, send FILE [din], '
               'capture NAME S [any|none] [din], ping, save-project, save-kit...) on a unit or its emulator, any '
-              'local write policy applied; up to 2 min. din: over the unit\'s DIN MIDI (Rytm/A4; hardware: units.X.din '
-              'in config).',
+              'local write policy applied; up to 2 min. din: over the unit\'s DIN MIDI (Rytm, A4; Digitone/Digitakt with a digirun.py that has --din; '
+              'hardware: units.X.din in config).',
      S(unit=UNIT(), target=TARGET(), steps={'type': 'string', 'req': True})),
     ('shot', 'Screenshot into this session\'s evidence folder.',
      S(unit=UNIT(), target=TARGET(), name={'type': 'string', 'description': 'bare .png or .bin name'})),
