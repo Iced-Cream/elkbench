@@ -83,6 +83,18 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   own `emulator-run` gate (testplan.py) still applies to flash plans. A pass also records the
   build the emulator booted and how the run started (a fresh emulator, a setup snapshot, or the
   session's emulator as earlier calls left it); the go request shows the start.
+- **`power-cycle`**: a plan step on a line of its own (Rytm and A4). In the emulator, the plan's
+  emulator starts with analog-emu's `--power-off`; at the step elkbench sends it `quit`, so the
+  OS runs its power-fail save and the card image is written, checks the emulator's log for the
+  save, and cold-boots it on that card and flash (without the setup snapshot it may have
+  resumed). On the unit the run waits at the step, as at a `listen` step, until the person has
+  power cycled it by hand and said so (`listen_done`); the go request lists each one. elkbench
+  runs the plan in parts between the power cycles, each with its own run folder, and the pass
+  is keyed by the plan as written. Each power cycle needs a machine assertion after it (the
+  readback of what it had to keep), and a plan with one cannot flash, put it in a `(hardware)`
+  section or in the setup (`snapshot-after`). Batches refuse such plans for now: run them with
+  `run_plan`. The analog-emu build needs `--power-off` (its `--help` does not list it; elkbench
+  looks for its power-off log line in the binary).
 - **`wait N audio`**: a wait that only lets the unit make sound (a recording, a tone, a pause to
   hear something). The runner waits N s on the unit; every emulator twin (run_plan, batch)
   waits 0.5 s instead, as the emulator makes no voice sound. The pass is keyed by the plan as

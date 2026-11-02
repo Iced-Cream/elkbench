@@ -68,6 +68,10 @@ OB_CHANNELS = ('Main L', 'Main R', 'Track 1 L', 'Track 1 R', 'Track 2 L', 'Track
                'Track 3 R', 'Track 4 L', 'Track 4 R', 'Input L', 'Input R')   # the Digitone's Overbridge order
 DIGI_PARALLEL_MAX = 3                          # digiemu runs one batch may have going at once
 AUDIO_WAIT_EMULATOR = 0.5                       # s an emulator twin waits for `wait N audio`
+POWER_OFF_WAIT = 60                             # s analog-emu has to save and exit at a power-cycle
+POWER_OFF_MARK = 'power off: working state saved'    # its log line after a power-off save
+# in the binary of an analog-emu that has --power-off (the line above is put together at run time)
+POWER_OFF_BUILD_MARK = b'power off: no --card, nothing kept'
 GATE_PLANS_MAX = 16                             # plans one gate batch may take
 KNOWN_STARTS = ('a fresh emulator', 'a setup snapshot')    # pass starts a gate batch may keep
 STATUS_WAIT, STATUS_WAIT_MAX = 300, 600     # s that status run_id waits for a run to end
@@ -182,6 +186,41 @@ def emulator_steps(steps):
     return [(name, [short(l) for l in lines]) for name, lines in steps]
 
 
+def is_power_cycle(line):
+    """`power-cycle`: the unit is switched off and on again. In the emulator, elkbench quits
+    analog-emu started with --power-off (the OS runs its power-fail save and the card image is
+    written), then cold-boots it on that card; on the unit, the run waits until the person has
+    done it by hand and said so. testplan never sees the step: elkbench runs the plan in parts."""
+    w = shlex.split(line, comments=True)
+    return bool(w) and w[0].lower() == 'power-cycle'
+
+
+def power_cycles(steps):
+    """-> lines naming every `power-cycle` step of a plan, for run results and the go request."""
+    return ['[%s] power-cycle' % name for name, lines in steps for l in lines if is_power_cycle(l)]
+
+
+def power_cycle_parts(steps):
+    """A plan's sections -> its parts between `power-cycle` steps (a list of section lists, one
+    more than there are power cycles; the first may be empty). A section a power cycle splits
+    goes on in the next part as 'NAME, after the power cycle'."""
+    parts, cur = [], []
+    for name, lines in steps:
+        body, piece = [], name
+        for l in lines:
+            if is_power_cycle(l):
+                if any(x.strip() and not x.strip().startswith('#') for x in body):
+                    cur.append((piece, body))
+                parts.append(cur)
+                cur, body, piece = [], [], name + ', after the power cycle'
+            else:
+                body.append(l)
+        if any(x.strip() and not x.strip().startswith('#') for x in body) or piece == name:
+            cur.append((piece, body))
+    parts.append(cur)
+    return parts
+
+
 def saved_slots(steps):
     """The project slots a plan saves into (save-project N ...): the only saved projects an
     emulator run of it may change."""
@@ -255,6 +294,9 @@ def load_config(path=CONFIG):
 CFG = load_config()
 UNITS = CFG['units']
 PERSON = CFG['person']
+# what the person does at a hardware run's power-cycle step: unit, then ' (n of m)' or ''
+POWER_CYCLE_HAND = ('power cycle the %s%s by hand: switch it off, wait 10 s, switch it on, and let it '
+                    'boot to its start screen; nothing is sent to it meanwhile')
 FALLBACK = CFG['approval_fallback']       # when the client cannot show the prompt: popup, thread or both
 if FALLBACK not in ('popup', 'thread', 'both'):
     raise SystemExit('config.toml: approval_fallback must be popup, thread or both, not %r' % FALLBACK)
@@ -388,6 +430,7 @@ class Job:
         self.log = os.path.join(STATE, 'jobs', self.id + '.log')
         self.listen_file = os.path.join(STATE, 'jobs', self.id + '.listen.json')   # a plan's listen step
         self.listening = None             # what the person listens for while the plan waits
+        self.power_cycle = False          # ... and whether it waits for a power cycle by hand
         self.batch = None                 # a batch's batch.Batch: its progress while it runs
 
     def summary(self):
@@ -515,30 +558,110 @@ class Daemon:
         raise Refused('this session has no %s emulator: give build (the OS .syx to boot), or start '
                       'one with the emulator tool (emulators started by hand are not used)' % unit)
 
-    def emu_ready(self, s, unit, build, snapshot=None):
+    def emu_ready(self, s, unit, build, snapshot=None, power_off=False):
         """-> (address, lines): with `build`, a fresh emulator of this session boots it first
-        (any it runs is stopped), saving the separate emulator calls; else the running one."""
+        (any it runs is stopped), saving the separate emulator calls; else the running one.
+        power_off: it starts with --power-off, for a plan's power-cycle steps."""
         if not build:
+            if power_off and not (self.emulators.get((s.sid, unit)) or {}).get('power_off'):
+                raise Refused('this plan has power-cycle steps: give build, so that its emulator starts '
+                              'with the power-off save (the running one did not)')
             return self.emu_port(s, unit), []
         mine = self.emulators.get((s.sid, unit))
         if mine and mine['proc'].poll() is None:
             self.stop_emulator(mine)
-        lines = self.t_emulator(s, {'action': 'start', 'unit': unit, 'build': build}, snapshot)
+        lines = self.t_emulator(s, {'action': 'start', 'unit': unit, 'build': build}, snapshot, power_off)
         addr = self.emu_port(s, unit)
         if UNITS[unit].get('emulator') != 'digiemu':   # digiemu_start waits for its OS itself
-            # analog-emu's port listens before the OS boots: a flash sent at once got no reply
-            # to its first command. Wait until the OS answers Ping.
-            for _ in range(30):
-                try:
-                    r = subprocess.run([sys.executable, '-m', 'elkflash', 'info', '--port', addr,
-                                        '--timeout', '1'], cwd=ELKFLASH, capture_output=True,
-                                       timeout=10, **NOWIN)
-                    if r.returncode == 0:
-                        break
-                except subprocess.TimeoutExpired:
-                    pass
-                time.sleep(1)
+            self.wait_for_os(addr)
         return addr, lines[:1]
+
+    def wait_for_os(self, addr, tries=30):
+        """analog-emu's port listens before the OS boots: a flash sent at once got no reply to
+        its first command. -> whether the OS answered Ping within about `tries` s."""
+        for _ in range(tries):
+            try:
+                r = subprocess.run([sys.executable, '-m', 'elkflash', 'info', '--port', addr,
+                                    '--timeout', '1'], cwd=ELKFLASH, capture_output=True,
+                                   timeout=10, **NOWIN)
+                if r.returncode == 0:
+                    return True
+            except subprocess.TimeoutExpired:
+                pass
+            time.sleep(1)
+        return False
+
+    def power_cycle(self, s, unit, save=True):
+        """A power cycle of this session's analog-emu (started with --power-off): `quit` on its
+        stdin switches it off, so the OS runs its power-fail save and the card image is written;
+        then a cold boot on that card and flash, without the snapshot it may have resumed (the
+        power-off saves none), on new ports. save=False kills it instead, with no save: a
+        contrast in which a check of what had to be kept must fail. -> (rc, report line)."""
+        e = self.emulators.get((s.sid, unit))
+        if not e or e['proc'].poll() is not None:
+            return 1, 'fail: power-cycle: this session\'s %s emulator is not running\n' % unit
+        if not e.get('power_off'):
+            return 1, 'fail: power-cycle: the %s emulator did not start with --power-off\n' % unit
+        with open(e['log'], encoding='utf-8', errors='replace') as fh:
+            seen = len(fh.read())
+        if save:
+            try:
+                e['proc'].stdin.write(b'quit\n')
+                e['proc'].stdin.close()
+            except (OSError, ValueError):
+                pass
+            try:
+                e['proc'].wait(POWER_OFF_WAIT)
+            except subprocess.TimeoutExpired:
+                self.stop_emulator(e)
+                return 1, 'fail: power-cycle: the emulator did not switch off within %d s (%s)\n' % (
+                    POWER_OFF_WAIT, e['log'])
+            with open(e['log'], encoding='utf-8', errors='replace') as fh:
+                said = fh.read()[seen:]
+            off = [l.strip() for l in said.splitlines() if l.startswith('power off:')]
+            if POWER_OFF_MARK not in said or 'wrote card' not in said:
+                return 1, 'fail: power-cycle: the OS did not finish its power-off save (%s; %s)\n' % (
+                    '; '.join(off) or 'no power-off line', e['log'])
+            how = off[0][len('power off: '):]
+        else:
+            self.stop_emulator(e)
+            how = 'killed, no save'
+        if e['proc'].stdin and not e['proc'].stdin.closed:
+            e['proc'].stdin.close()
+        cmd, n = list(e['cmd']), e.get('boots', 1) + 1
+        if '--snapshot' in cmd:                # the power-off saves no snapshot: a cold boot
+            i = cmd.index('--snapshot')
+            del cmd[i:i + 2]
+            if '--stdin-commands' not in cmd:
+                cmd.append('--stdin-commands')
+        ports = {}
+        for flag in ('--usb-midi-tcp', '--din-midi-tcp'):
+            if flag in cmd:
+                with socket.socket() as probe:
+                    probe.bind(('127.0.0.1', 0))
+                    ports[flag] = probe.getsockname()[1]
+                cmd[cmd.index(flag) + 1] = '127.0.0.1:%d' % ports[flag]
+        log_path = os.path.join(e['work'], 'emulator-boot%d.log' % n)
+        with open(log_path, 'w', encoding='utf-8') as log:
+            proc = subprocess.Popen(cmd, cwd=e['work'], stdout=log, stderr=subprocess.STDOUT,
+                                    stdin=subprocess.PIPE, **NOWIN)
+        addr = 'tcp:127.0.0.1:%d' % ports['--usb-midi-tcp']
+        e.update(proc=proc, cmd=cmd, log=log_path, snapshot=None, boots=n, address=addr,
+                 din='tcp:127.0.0.1:%d' % ports['--din-midi-tcp'] if '--din-midi-tcp' in ports else None)
+        din = '--din-midi-tcp' in ports
+        for _ in range(50):
+            time.sleep(0.2)
+            with open(log_path, encoding='utf-8', errors='replace') as fh:
+                text = fh.read()
+            if ('usb midi tcp: listening' in text and (not din or 'din midi tcp: listening' in text)
+                    or proc.poll() is not None):
+                break
+        if proc.poll() is not None or 'usb midi tcp: listening' not in text:
+            return 1, 'fail: power-cycle: the cold boot did not open its USB MIDI port (%s)\n' % log_path
+        if not self.wait_for_os(addr):
+            return 1, 'fail: power-cycle: the OS did not answer after the cold boot (%s)\n' % log_path
+        return 0, 'ok power-cycle: switched off (%s), cold boot on its card: up again at %s (%s)\n' % (
+            how, addr, log_path)
 
     def check_connected(self, unit, target):
         try:
@@ -679,15 +802,45 @@ class Daemon:
             if after not in names:
                 raise Refused('snapshot-after names no section of the plan: %r' % after)
             setup = names.index(after) + 1
+        cycles = power_cycles(steps)
+        if cycles:
+            self.check_power_cycles(unit, steps, flash, setup)
         # the plan checker's rules (plancheck.py): errors refuse the go, flags go into it
         check = plancheck.check(steps, unit=unit, refs=refs, flash=flash,
                                 stock=bool(flash_sha) and self.is_stock(unit, flash_sha),
                                 emulator=settings.get('emulator', 'no').lower() == 'yes')
         return dict(path=path, here=here, settings=settings, steps=steps, unit=unit, key=key, check=check,
                     flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, setup=setup, din=bool(din),
-                    audio_waits=audio_waits(steps),
+                    audio_waits=audio_waits(steps), power_cycles=cycles,
                     name=settings.get('name') or os.path.splitext(os.path.basename(path))[0],
                     emulator=settings.get('emulator', 'no').lower() == 'yes', rel=rel)
+
+    def check_power_cycles(self, unit, steps, flash, setup):
+        """Refused unless this plan's `power-cycle` steps can run: on the Rytm and A4 (analog-emu's
+        --power-off), alone on their line, outside (hardware) sections and the setup, in a plan
+        that flashes nothing, and each followed by steps (the readback the power cycle is for)."""
+        if UNITS[unit].get('emulator') == 'digiemu' or not UNITS[unit].get('emu_exe'):
+            raise Refused('power-cycle runs on the Rytm and A4 only so far (analog-emu\'s --power-off); '
+                          'the %s emulator has no power-off save' % unit)
+        if flash:
+            raise Refused('a plan with power-cycle cannot flash: flash in a plan of its own, then power cycle')
+        for i, (name, lines) in enumerate(steps):
+            for l in lines:
+                if not is_power_cycle(l):
+                    continue
+                if len(shlex.split(l, comments=True)) > 1 or ';' in l:
+                    raise Refused('[%s] %r: power-cycle takes nothing more, on a line of its own' % (name, l))
+                if name.endswith('(hardware)'):
+                    raise Refused('[%s] power-cycle in a (hardware) section: the emulator skips those, so its '
+                                  'pass would not cover the power cycle' % name)
+                if setup and i < setup:
+                    raise Refused('[%s] power-cycle in the setup (snapshot-after): a setup snapshot cannot '
+                                  'hold a power cycle; put it after the setup' % name)
+        for n, part in enumerate(power_cycle_parts(steps)[1:], 1):
+            if not any(plancheck.is_assert(plancheck.words(l)) for _, ls in part for l in ls):
+                raise Refused('power cycle %d has no machine assertion after it (an expect-screen of what it '
+                              'had to keep, before the next power cycle or the end): a readback judged by eye '
+                              'proves nothing about the card' % n)
 
     def snapshot_key(self, info, build):
         """What a setup snapshot vouches for: the unit, the emulator binary, the build and the
@@ -705,16 +858,19 @@ class Daemon:
             'build': sha256(build), 'card': sha256(card) if card and os.path.isfile(card) else None,
             'setup': setup, 'refs': ref_sums}, sort_keys=True).encode()).hexdigest()
 
-    def twin(self, info, record_refs, sid, emulator_run=None, sections=None, tag=''):
+    def twin(self, info, record_refs, sid, emulator_run=None, sections=None, tag='', hardware=False):
         """An emulator twin of a hardware plan, with every path setting made absolute. Its runs
         go in a folder of the session's own (emulator runs of several sessions may start in the
         same second, and testplan names a run folder by the second). With emulator_run, a
         hardware twin instead: the plan as written, plus the `emulator-run` its flash needs (the
-        recorded emulator pass), so nobody has to add that line by hand."""
+        recorded emulator pass), so nobody has to add that line by hand. With hardware (and
+        sections), a hardware twin of those sections only: one part of a plan with power-cycle."""
         g, rel = info['settings'].get, info['rel']
-        if emulator_run:
+        hardware = hardware or bool(emulator_run)
+        if hardware:
             lines = ['# written by elkbench for a hardware run of %s' % info['path'],
-                     'include = %s' % info['path'], 'emulator-run = %s' % emulator_run,
+                     'include = %s' % info['path']] + (
+                ['emulator-run = %s' % emulator_run] if emulator_run else []) + [
                      'refs = %s' % info['refs'], 'out = %s' % rel(g('out', 'runs'))]
         else:
             lines = ['# written by elkbench for an emulator run of %s' % info['path'],
@@ -729,7 +885,7 @@ class Daemon:
                 lines.append('%s = %s' % (k, rel(g(k))))
         if g('flash') and not g('elkflash') and ELKFLASH:       # the plan names none: config's checkout
             lines.append('elkflash = %s' % ELKFLASH)
-        if not emulator_run:                           # `wait N audio` is short in the emulator
+        if not hardware:                               # `wait N audio` is short in the emulator
             if sections is None and info.get('audio_waits'):
                 sections = info['steps']
             if sections is not None:
@@ -740,7 +896,7 @@ class Daemon:
                 lines += ['', '[%s]' % name] + body
         os.makedirs(os.path.join(STATE, 'twins'), exist_ok=True)
         p = os.path.join(STATE, 'twins', '%s-%s-%s%s%s.txt' % (
-            re.sub(r'\W+', '-', info['name']), info['key'][:8], sid[:8], '-hw' if emulator_run else '',
+            re.sub(r'\W+', '-', info['name']), info['key'][:8], sid[:8], '-hw' if hardware else '',
             re.sub(r'\W+', '-', tag)))
         with open(p, 'w', encoding='utf-8') as fh:
             fh.write('\n'.join(lines) + '\n')
@@ -919,7 +1075,9 @@ class Daemon:
         listened to in elklock (nothing may drive it, the claim cannot time out)."""
         while job.state == 'running' and not job.ended:
             if job.listening is None and os.path.exists(job.listen_file):
-                what = read_json(job.listen_file, {}).get('what') or '(see the plan)'
+                flag = read_json(job.listen_file, {})
+                what = flag.get('what') or '(see the plan)'
+                job.power_cycle = bool(flag.get('power_cycle'))
                 job.listening = what
                 subprocess.run([sys.executable, ELKLOCK, 'listen', job.unit, '--for', what],
                                env=job.sess.env(), capture_output=True, timeout=30, **NOWIN)
@@ -1085,6 +1243,12 @@ class Daemon:
             deadline = time.time() + max(0, min(STATUS_WAIT_MAX, float(a.get('wait_s', STATUS_WAIT))))
             while j.state in ('running', 'asking') and time.time() < deadline and not j.listening:
                 time.sleep(0.5)
+            if j.state == 'running' and j.listening and j.power_cycle:
+                return j.summary() + [
+                    'power cycle: the run waits for a power cycle by hand: %s. Ask %s in your thread to '
+                    'do exactly that and to say when it is done, then wait for their reply, however long it '
+                    'takes; send nothing to the unit. When they say it is done, call listen_done with the '
+                    'id of that reply, then status again.' % (j.listening, PERSON)]
             if j.state == 'running' and j.listening:
                 return j.summary() + [
                     'listening: the run waits at a listen step: %s. Tell %s in your thread exactly what '
@@ -1139,6 +1303,8 @@ class Daemon:
                 ' (from %s)' % ep['start'] if ep.get('start') else '',
                 ''.join('\n' + l for l in plancheck.go_lines(info['check'])),
                 ''.join('\n  NOT TESTED IN THE EMULATOR: ' + h for h in hand) +
+                ''.join('\n  POWER CYCLE BY HAND (the run waits until you say it is done; the emulator pass '
+                        'ran its power-off save and a cold boot): ' + c for c in info['power_cycles']) +
                 ''.join('\n  SHORT IN THE EMULATOR, IN FULL ON THE UNIT: ' + w for w in info['audio_waits'])))
         shared = plancheck.shared_refs(infos)
         if shared:
@@ -1433,6 +1599,10 @@ class Daemon:
         job.title = 'Listening test: finished?'
         job.body = ('An AI session holds the %s for your listening test:\n\n  %s\n\nHave you finished '
                     'listening? Yes gives the unit back to the session; No keeps it waiting.' % (u, what))
+        if plan_job and plan_job.power_cycle:
+            job.title = 'Power cycle: done?'
+            job.body = ('An AI session\'s test plan waits for you to %s.\n\nHave you done it, and is the '
+                        'unit on its start screen? Yes lets the plan go on; No keeps it waiting.' % what)
 
         def settle(ok, how):
             if job.state in ('approved', 'refused'):
@@ -1470,7 +1640,7 @@ class Daemon:
                     'lines': ['asking: %s, the client asks %s whether they have finished listening' % (job.id, PERSON)]}
         return self.popup(job)
 
-    def t_emulator(self, s, a, snapshot=None):
+    def t_emulator(self, s, a, snapshot=None, power_off=False):
         """Start, stop or list the emulators: always headless (no window) and each session its
         own, its USB MIDI port on a TCP port of its own (analog-emu --usb-midi-tcp, digiemu's
         usbrun), so emulators need no loopMIDI and never queue for one another."""
@@ -1553,12 +1723,15 @@ class Daemon:
         log = open(log_path, 'w', encoding='utf-8')
         if snapshot:                    # resume it if it exists; `save` on stdin writes it
             cmd += ['--snapshot', snapshot, '--stdin-commands']
+        if power_off:                   # `quit` on stdin switches it off: the OS saves to the card
+            cmd += ['--power-off'] + ([] if snapshot else ['--stdin-commands'])
         proc = subprocess.Popen(cmd, cwd=work, stdout=log, stderr=subprocess.STDOUT,
-                                stdin=subprocess.PIPE if snapshot else None, **NOWIN)
+                                stdin=subprocess.PIPE if snapshot or power_off else None, **NOWIN)
         self.emulators[(s.sid, a['unit'])] = dict(proc=proc, session=s.sid, build=label, sha=sha,
                                                  address='tcp:127.0.0.1:%d' % tcp, flashed=flashed,
                                                  snapshot=snapshot, log=log_path,
-                                                 din='tcp:127.0.0.1:%d' % din if din else None)
+                                                 din='tcp:127.0.0.1:%d' % din if din else None,
+                                                 cmd=cmd, work=work, power_off=power_off, boots=1)
         for _ in range(30):                           # until it listens (an older build never does)
             time.sleep(0.2)
             with open(log_path, encoding='utf-8', errors='replace') as fh:
@@ -1757,6 +1930,21 @@ class Daemon:
         """Whether this analog-emu build takes --stdin-commands (headless snapshot saves)."""
         return '--stdin-commands' in self.emu_help(unit)
 
+    def emu_has_power_off(self, unit):
+        """Whether this analog-emu build has --power-off. Its --help does not list it, so this
+        looks in the binary for a line only its power-off prints."""
+        exe = os.path.join(ANALOG_EMU or '', UNITS[unit].get('emu_exe') or '')
+        if not os.path.isfile(exe):
+            return False
+        stamp = ('power-off', exe, os.path.getmtime(exe))
+        if stamp not in self.emu_help_text:
+            try:
+                with open(exe, 'rb') as fh:
+                    self.emu_help_text[stamp] = POWER_OFF_BUILD_MARK in fh.read()
+            except OSError:
+                self.emu_help_text[stamp] = False
+        return self.emu_help_text[stamp]
+
     def emu_has_din(self, unit):
         """Whether this analog-emu build serves its DIN MIDI over TCP (--din-midi-tcp)."""
         return '--din-midi-tcp' in self.emu_help(unit)
@@ -1818,21 +2006,23 @@ class Daemon:
         """`cmd` (one command or stages) between a read of the emulator's saved projects and a
         second read: a project outside the slots the plan saves into that was added, removed,
         renamed or changed fails the run (a write the plan did not ask for, such as one into
-        the project that was active)."""
+        the project that was active). `addr` may be a function giving it (a power cycle moves
+        the emulator to new ports)."""
+        where = addr if callable(addr) else (lambda: addr)
         stages = list(cmd) if cmd and (isinstance(cmd[0], (list, tuple)) or callable(cmd[0])) else [cmd]
         seen = {}
         allowed = saved_slots(info['steps'])
 
         def before(rc, out):
             try:
-                seen['before'] = self.saved_projects(addr, os.path.join(folder, 'before'))
+                seen['before'] = self.saved_projects(where(), os.path.join(folder, 'before'))
             except (RuntimeError, OSError, subprocess.SubprocessError) as e:
                 return 1, 'fail: could not read the saved projects before the run: %s\n' % e
             return 0, ''
 
         def after(rc, out):
             try:
-                now = self.saved_projects(addr, os.path.join(folder, 'after'))
+                now = self.saved_projects(where(), os.path.join(folder, 'after'))
             except (RuntimeError, OSError, subprocess.SubprocessError) as e:
                 return 1, 'fail: could not read the saved projects after the run: %s\n' % e
             bad = project_changes(seen['before'], now, allowed)
@@ -1845,19 +2035,22 @@ class Daemon:
         after.__name__ = 'check no other saved project changed'
         return [before] + stages + [after]
 
-    def snapshot_stages(self, s, info, snap, addr, started, din=()):
+    def snapshot_stages(self, s, info, snap, addr, started, din=(), job=None):
         """The runner stages of a snapshot run. Resuming: the steps after setup only. Fresh: the
         setup steps; when they pass, the emulator saves the snapshot (kept for later runs with
         the run that proved it); then the rest on the same emulator. A setup failure ends the
         run with the setup's own report, and no snapshot is kept."""
         cut = info['setup']
         run = lambda plan: [sys.executable, RUNNER, '--port', addr] + list(din) + ['--quiet', 'run', plan]
-        rest = run(self.twin(info, False, s.sid, sections=info['steps'][cut:], tag=' after setup'))
+        if info['power_cycles']:               # the rest in parts, a power cycle between them
+            rest = self.plan_stages(s, info, job, 'emulator', info['steps'][cut:], tag=' after setup')
+        else:
+            rest = [run(self.twin(info, False, s.sid, sections=info['steps'][cut:], tag=' after setup'))]
         if snap['have']:
             meta = read_json(snap['store'] + '.json', {})
             started.append('resumed a setup snapshot: %s passed in %s' % (
                 info['steps'][cut - 1][0], meta.get('run_dir')))
-            return [rest]
+            return rest
         setup = run(self.twin(info, False, s.sid, sections=info['steps'][:cut], tag=' setup'))
         e = self.emulators[(s.sid, info['unit'])]
 
@@ -1885,12 +2078,65 @@ class Daemon:
             return 0, ''
         setup_then_save.__name__ = 'setup, then save its snapshot'
         started.append('setup runs first; a pass is kept as a snapshot for later runs')
-        return [setup_then_save, rest]
+        return [setup_then_save] + rest
+
+    def plan_stages(self, s, info, job, tgt, steps, record_refs=False, tag=''):
+        """The stages that run `steps` (a plan's sections) in parts, a power cycle between
+        each two: each part is a twin of its sections run on its own; in the emulator, the
+        power cycle switches analog-emu off with its power-off save and cold-boots it (each part
+        then runs on the emulator's ports of that moment); on the unit, the run waits until the
+        person has power cycled it by hand and said so (listen_done), as at a listen step."""
+        unit, stages = info['unit'], []
+        parts = power_cycle_parts(steps)
+        for i, part in enumerate(parts):
+            if i:
+                stages.append(self.power_cycle_stage(s, unit, job, tgt, i, len(parts) - 1))
+            if not part:
+                continue
+            plan = self.twin(info, record_refs and tgt == 'emulator', s.sid, sections=part,
+                             tag='%s part %d of %d' % (tag, i + 1, len(parts)), hardware=tgt == 'hardware')
+            lines = [l for _, ls in part for l in ls]
+            if tgt == 'hardware':
+                stages.append([sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] +
+                              self.din_args(s, unit, tgt, lines) + ['--quiet', 'run', plan])
+            else:
+                stages.append(self.emulator_part(s, unit, plan, lines, i + 1))
+        return stages
+
+    def emulator_part(self, s, unit, plan, lines, n):
+        """A stage running one part of a plan on this session's emulator where it is now."""
+        def part(rc, out):
+            cmd = [sys.executable, RUNNER, '--port', self.emu_port(s, unit)] + \
+                self.din_args(s, unit, 'emulator', lines) + ['--quiet', 'run', plan]
+            env = dict(s.env(), **({'DIGIRUN_PATH': os.path.join(DIGIHEALTH, 'tools')} if DIGIHEALTH else {}))
+            p = subprocess.run(cmd, cwd=ANALOGHEALTH, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                               text=True, encoding='utf-8', errors='replace', **NOWIN)
+            return p.returncode, p.stdout
+        part.__name__ = 'part %d of the plan' % n
+        return part
+
+    def power_cycle_stage(self, s, unit, job, tgt, n, of):
+        """A stage for the plan's power cycle n (of `of`)."""
+        if tgt == 'emulator':
+            def cycle(rc, out):
+                return self.power_cycle(s, unit)
+        else:
+            def cycle(rc, out):
+                what = POWER_CYCLE_HAND % (unit, ' (%d of %d)' % (n, of) if of > 1 else '')
+                write_json(job.listen_file, {'what': what, 'since': time.time(), 'power_cycle': True})
+                while os.path.exists(job.listen_file):
+                    time.sleep(0.5)
+                return 0, 'ok power-cycle by hand: %s said it is done\n' % PERSON
+        cycle.__name__ = 'power cycle %d%s' % (n, ' (emulator: power-off save, cold boot)' if tgt == 'emulator'
+                                               else ' (by hand, waits for the person)')
+        return cycle
 
     def t_run_plan(self, s, a):
         tgt = self.target(a.get('target'))
         info = self.plan_info(a.get('plan', ''))
         unit = info['unit']
+        job = Job(s, 'plan', unit, tgt, 'plan ' + info['name'])
+        cycles = info['power_cycles']
         if tgt == 'hardware':
             if info['emulator']:
                 raise Refused('this is an emulator plan; give the hardware plan')
@@ -1913,14 +2159,19 @@ class Daemon:
             # A plan that flashes needs `emulator-run` for testplan's gate: the recorded pass.
             plan = self.twin(info, False, s.sid, emulator_run=ep['run_dir']) \
                 if info['flash'] and ep.get('run_dir') else info['path']
-            cmd = [sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + din + [
-                '--quiet', 'run', plan]
+            cmd = self.plan_stages(s, info, job, tgt, info['steps']) if cycles else [
+                sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + din + ['--quiet', 'run', plan]
             started = []
         else:
+            if cycles:
+                need(ANALOG_EMU, 'analog_emu', 'the analog-emu emulators')
+                if not self.emu_has_power_off(unit):
+                    raise Refused('this plan has power-cycle steps, and this analog-emu %s has no --power-off '
+                                  '(tools.analog_emu needs a build with the power-off save)' % UNITS[unit]['emu_exe'])
             if info['din'] and UNITS[unit].get('emu_exe') and not self.emu_has_din(unit):
                 raise Refused(self.no_emu_din(unit))
             snap = self.setup_snapshot(s, info, a)
-            addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'])
+            addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'], bool(cycles))
             booted = (self.emulators.get((s.sid, unit)) or {}).get('sha')
             din = self.din_args(s, unit, tgt, [l for _, ls in info['steps'] for l in ls])
             port = self.busy_port('%s@%s' % (unit, addr), tgt)
@@ -1930,23 +2181,28 @@ class Daemon:
             began = 'a fresh emulator' if a.get('build') else 'the session\'s running emulator, as earlier calls left it'
             if snap:
                 began = 'a setup snapshot' if snap['have'] else began
-                cmd = self.snapshot_stages(s, info, snap, addr, started, din)
+                cmd = self.snapshot_stages(s, info, snap, addr, started, din, job)
+            elif cycles:
+                cmd = self.plan_stages(s, info, job, tgt, info['steps'], bool(a.get('record_refs')))
             else:
                 plan = info['path'] if info['emulator'] else self.twin(info, bool(a.get('record_refs')), s.sid)
                 cmd = [sys.executable, RUNNER, '--port', addr] + din + ['--quiet', 'run', plan]
             if UNITS[unit]['runner'] is True:          # analogrun's data store: Rytm and A4
-                cmd = self.guard_projects(info, addr, cmd, os.path.join(
+                cmd = self.guard_projects(info, (lambda: self.emu_port(s, unit)) if cycles else addr, cmd, os.path.join(
                     s.folder(unit), 'projects-%s' % time.strftime('%H%M%S')))
-        job = Job(s, 'plan', unit, tgt, 'plan ' + info['name'])
         record = not info['emulator'] or info['settings'].get('record-refs', 'no') != 'yes'
         record = record and not a.get('record_refs')
 
         def done(job, rc, out):
             lines = [l.strip() for l in out.splitlines() if l.strip()]
-            m = next((re.search(r' - (.+)$', l) for l in lines if re.search(r': (PASS|FAIL) \(', l)), None)
-            run_dir = m.group(1).strip() if m else None
-            summ = read_json(os.path.join(run_dir, 'summary.json'), {}) if run_dir else {}
-            ok = rc == 0 and summ.get('pass')
+            # one verdict line per part a plan with power-cycle runs in, else one
+            ms = [re.search(r' - (.+)$', l) for l in lines if re.search(r': (PASS|FAIL) \(', l)]
+            run_dirs = [m.group(1).strip() for m in ms if m]
+            run_dir = run_dirs[-1] if run_dirs else None
+            summs = [read_json(os.path.join(d, 'summary.json'), {}) for d in run_dirs]
+            summ = summs[-1] if summs else {}
+            parts = sum(1 for p in power_cycle_parts(info['steps']) if p) if cycles else 1
+            ok = rc == 0 and len(summs) >= parts and all(x.get('pass') for x in summs)
             job.state = 'pass' if ok else 'fail'
             kept = [l for l in lines if not l.startswith(('claimed', 'already yours', 'last handoff',
                                                           'released', 'not yours', '  os:', 'os:'))]
@@ -1954,20 +2210,24 @@ class Daemon:
             # FAIL line of a long plan. Passing steps become a count; the first failure's
             # screen-diff picture (+ lit only now, - lit only in the reference) stays, up to
             # 12 rows, as reading it costs less than opening the diff PNG.
-            if run_dir and kept and kept[0].endswith(' - ' + run_dir):
-                kept[0] = kept[0][:-len(' - ' + run_dir)]        # the evidence line names it
+            for d in run_dirs:                                    # the evidence line names them
+                kept = [l[:-len(' - ' + d)] if l.endswith(' - ' + d) and re.search(r': (PASS|FAIL) \(', l)
+                        else l for l in kept]
             oks = sum(l.startswith('ok ') for l in kept[1:])
             art = lambda l: re.fullmatch(r'[-+#.]+( \(saved .*)?', l)
             rest = [l for l in kept[1:] if not l.startswith('ok ') and not art(l)]
             pic = [l for l in kept[1:] if art(l)]
             pic = pic[:12] + (['(%d more rows)' % (len(pic) - 12)] if len(pic) > 12 else [])
             job.lines = kept[:1] + (['%d step(s) ok' % oks] if oks else []) + rest[:12] + pic
-            job.lines.append('evidence: %s' % (run_dir or job.log))
-            if run_dir:
-                job.lines.append('log: %s' % os.path.join(run_dir, 'log.txt'))
-                shots = run_files(run_dir)
+            job.lines.append('evidence: %s' % (', '.join(run_dirs) or job.log))
+            for d in run_dirs:
+                job.lines.append('log: %s' % os.path.join(d, 'log.txt'))
+                shots = run_files(d)
                 if shots:
                     job.lines.append('shots: ' + ', '.join(shots))
+            if cycles:
+                job.lines += [('power cycled here (power-off save, cold boot on its card): ' if tgt == 'emulator'
+                               else 'power cycled by hand: ') + c for c in cycles]
             if tgt == 'emulator':
                 job.lines += ['not tested here (skipped in the emulator): ' + h for h in hand_steps(info['steps'])]
                 job.lines += ['short here (%g s in the emulator, in full on the unit): %s' % (AUDIO_WAIT_EMULATOR, w)
@@ -1979,8 +2239,10 @@ class Daemon:
                     s.os_left[unit] = (os.path.basename(info['flash']),
                                        self.is_stock(unit, summ['flash_sha256']), summ['flash_sha256'])
             elif ok and record:
-                self.record_pass(info['key'], {'plan': info['path'], 'run_dir': run_dir, 'unit': unit,
-                                               'start': began, 'os': booted})
+                self.record_pass(info['key'], dict({'plan': info['path'], 'run_dir': run_dir, 'unit': unit,
+                                                    'start': began, 'os': booted},
+                                                   **({'run_dirs': run_dirs, 'power_cycles': len(cycles)}
+                                                      if cycles else {})))
                 if info['flash_sha']:
                     self.record_pass('flash:%s:%s' % (unit, info['flash_sha']),
                                      {'image': info['flash'], 'unit': unit, 'run_dir': run_dir})
@@ -2550,6 +2812,9 @@ class Daemon:
                 units.add(a.get('unit'))
             else:
                 x['info'] = self.plan_info(v.get('plan') or a['plan'])
+                if x['info']['power_cycles']:
+                    raise Refused('%s has power-cycle steps: batches do not power cycle yet, run it with '
+                                  'run_plan target emulator' % x['info']['name'])
                 units.add(x['info']['unit'])
             if gate:
                 info = x['info']
@@ -3075,9 +3340,9 @@ TOOLS = [
                'time out and nothing may drive the unit (no keys, MIDI, screenshots, flash, restore or '
                'release). Put the unit in the state to hear first; a plan uses its own listen step.' % PERSON,
      S(unit=UNIT(), what={'type': 'string', 'req': True, 'description': 'what to listen for, as you tell them'})),
-    ('listen_done', 'End a listening test (yours, or a plan waiting at a listen step) only when %s has said '
-                    'in the thread that they have finished: pass the id of that reply. Without one, '
-                    'the client asks them.' % PERSON,
+    ('listen_done', 'End a listening test (yours, or a plan waiting at a listen or power-cycle step) only when '
+                    '%s has said in the thread that they have finished (or that the power cycle is done): pass '
+                    'the id of that reply. Without one, the client asks them.' % PERSON,
      S(unit=UNIT(), message_id={'type': 'string', 'description': 'the id or link of their "finished" reply'})),
     ('emulator', 'Start, stop or list the emulators (analog-emu for the Rytm / A4, digiemu for the '
                  'Digitone / Digitakt), always headless with their USB MIDI ports, on a fresh card copy; they end by '
@@ -3090,7 +3355,9 @@ TOOLS = [
        keep_flash={'type': 'boolean', 'description': 'boot what an earlier flash left in this session\'s '
                                                      'emulator (no build), on its card as left'})),
     ('run_plan', 'Run a test plan (analogrun run, format 1) in the background; returns a run_id. target '
-                 'emulator records the pass a hardware run needs; hardware needs the claim and an approval token.',
+                 'emulator records the pass a hardware run needs; hardware needs the claim and an approval token. '
+                 'A plan\'s power-cycle steps power the emulator off (its OS saves to the card) and cold-boot it; '
+                 'on the unit the run waits at each until the person has done it by hand (status says so).',
      S(plan={'type': 'string', 'req': True, 'description': 'the hardware plan file (an emulator twin is made for you)'},
        target=TARGET(), approval={'type': 'string'}, build=EMU_BUILD(),
        record_refs={'type': 'boolean', 'description': 'emulator only: save the reference screens'})),
