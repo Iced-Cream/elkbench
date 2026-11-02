@@ -1,0 +1,109 @@
+# elkbench built-in start for the Analog Rytm MKII (OS 1.74 with a remote-key path), emulator only.
+# A gate batch runs it on a fresh emulator, keeps the end state as a snapshot, and runs hardware
+# plans from there (docs/testing-practices.md, "Messy starts and contrast runs"). Names and slots
+# follow the example write policy (examples/write-policy): `~T ` test names, test slots 121-128.
+format = 1
+unit = rytm
+emulator = yes
+name = start testslot
+out = runs
+note = ~T START (slot 121, INIT NEW) active, BD SRC changed unsaved, LFO page open
+
+[start]
+# Boot prompts away (a fresh emulator card shows two: MISSING CAL: SYNTH / NO FACTORY SAMPLES;
+# the third NO lands on the home screen and does nothing)
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.5
+shot start-home.png
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+shot start-manage-121.png
+
+[setup: INIT NEW into 121]
+say proves setup: a new project in 121, named ~T START
+save-project 121 "~T START" RIGHT,UP,UP,UP,UP,UP,UP,YES
+wait 6
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.5
+shot init-new.png
+
+[setup: LOAD FROM 121]
+say proves setup: the new project is the active one (title row K001:KIT 1, BPM:120.0)
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+tap RIGHT
+wait 0.6
+keys UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN
+wait 0.4
+tap YES
+wait 1
+# SAVE 'X' BEFORE LOADING? Y/N: always NO
+shot load-save-before.png
+tap NO
+wait 1
+# ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N: YES loads 121
+shot load-proceed.png
+tap YES
+wait 6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+wait 4.5
+shot loaded.png
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+shot manage-121-active.png
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+
+[an unsaved change: BD SRC knob A]
+say proves setup: an unsaved change in the working kit (BD SRC TUN moved, nothing saved)
+# A freshly booted project already counts as modified (LOAD asks SAVE ... BEFORE LOADING? before any
+# change), so that prompt cannot prove the change: shots of the SRC page before and after the turn do.
+keys TRK(BD)
+wait 0.4
+tap SRC
+wait 0.8
+shot change-src-before.png
+turn A 12 4
+wait 2
+shot change-src-after.png
+
+[end state]
+say proves evidence: the home title row (kit, BPM) and the LFO page left open
+shot end-home.png
+tap LFO
+wait 1
+shot end-lfo.png

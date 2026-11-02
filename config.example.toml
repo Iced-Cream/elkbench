@@ -22,6 +22,11 @@ person = "the person at this PC"
 # writepolicy.py: ANALOGHEALTH_POLICY, else policy.py in %LOCALAPPDATA%\analoghealth).
 # require_write_policy = false
 
+# The built-in emulator starts (<folder>\<unit>\<start>.txt, emulator-only plans): a hardware
+# plan is also gated from these. Default: starts\ in this folder, which follows the example write
+# policy's names and slots (examples\write-policy); point it at your own copies for other rules.
+# starts = 'C:\tests\starts'
+
 [tools]
 # elklock.py; default: elklock\elklock.py in this folder.
 # elklock = 'C:\tools\elklock\elklock.py'
