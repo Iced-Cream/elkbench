@@ -1,19 +1,21 @@
-# Template: the plan after a power cycle by the person's hand, proving what the power cycle had to keep.
-# The run pauses for the power cycle and waits for the person's typed "done" in the thread; the go
-# request names it ("hand power cycle, no emulator gate"), and every plan before and after has its
-# emulator pass. This plan's emulator pass runs on an emulator that never lost power: its start check
-# must be one that a default project fails.
+# Template: a value kept across a power cycle, read back before and after it.
+# The `power-cycle` step runs in the emulator too: elkbench switches analog-emu off with its
+# power-off save (the OS writes its working state to the card), then cold-boots it on that card.
+# On the unit the run waits at the step until the person has power cycled it by hand and said
+# "done" in the thread; the go request names the step. A pass so means "kept across a power
+# cycle", not "kept with nothing happening". After the step the unit is at its start-up screen:
+# reach the page again from a known page.
 format = 1
 name = kept after the power cycle
 unit = rytm
 refs = refs/power-cycle-readback
 out = runs
-note = ~T SETUP active: read only after the power cycle
+note = ~T SETUP active, with the value to keep set by an earlier plan
 
 [start]
-# The readback is the start check: reach the page from a known page (TRIG, then LFO), and compare
-# only the rows that show the kept value. A row that shows which page is open passes on a default
-# project too, and proves nothing about what was kept.
+# The readback before the power cycle: the value is there now. Reach the page from a known page
+# (TRIG, then LFO), and compare only the rows that show the kept value. A row that shows which
+# page is open passes on a default project too, and proves nothing about what was kept.
 wait 3
 tap NO
 wait 0.5
@@ -27,16 +29,26 @@ tap TRIG
 wait 0.8
 tap LFO
 wait 1.5
-shot readback.png
-# the value the earlier plan set and saved, e.g. the LFO's DST field (rows 8-31): stop otherwise
+shot before.png
+# the value the earlier plan set, e.g. the LFO's DST field (rows 8-31): stop otherwise
 expect-screen kept-value 1 rows=8-31
 
-[the rest of the plan]
-say proves set-and-kept: a second kept value, read back the same way
-tap FX
-wait 0.8
+[kept after the power cycle]
+say proves set-and-kept: the value reads back the same after a power cycle
+power-cycle
+# the start-up screen first, then the same way to the page
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+keys TRK(BD)
+wait 0.4
 tap TRIG
 wait 0.8
 tap LFO
 wait 1.5
-expect-screen kept-value-2 1 rows=8-31
+shot after.png
+expect-screen kept-value 1 rows=8-31
