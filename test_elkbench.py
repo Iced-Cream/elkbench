@@ -1415,13 +1415,11 @@ class InProcess(unittest.TestCase):
         daemon.DIGIHEALTH = TMP
         daemon.UNITS['digitone']['clear_at_release'] = list(range(121, 129))
         self.d.check_connected = lambda unit, target: None
-        full = ('~T SETUP                 id  121     40960 B  ops 0x001f\n'
-                '-                        id  122         0 B  ops 0x001f  (no valid data)\n'
-                '~T SETUP                 id  123     40960 B  ops 0x001f\n'
-                'MY SONG                  id    7     40960 B  ops 0x001f\n')
-        empty = ('-                        id  121         0 B  ops 0x001f  (no valid data)\n'
-                 '-                        id  123         0 B  ops 0x001f  (no valid data)\n'
-                 'MY SONG                  id    7     40960 B  ops 0x001f\n')
+        # the Digitone lists only full slots: an empty one has no row at all
+        full = ('PRESETS                  id    1   4194304 B  ops 0x0012  +metadata\n'
+                '~T SETUP                 id  121   4194304 B  ops 0x007e  +metadata\n'
+                '~T SETUP                 id  123   4194304 B  ops 0x007e  +metadata\n')
+        empty = 'PRESETS                  id    1   4194304 B  ops 0x0012  +metadata\n'
         results = iter([subprocess.CompletedProcess([], 0, full, ''),
                         subprocess.CompletedProcess([], 0, 'cleared /projects/121\n', ''),
                         subprocess.CompletedProcess([], 0, 'cleared /projects/123\n', ''),
