@@ -11,6 +11,7 @@ plan's own in the emulator (`run_plan ... record_refs`).
 | `flash-gate.txt` | one flash transition: one copy per flash, in the run's order, stock back over the last build included |
 | `capture-with-level-check.txt` | an audio take behind a level check, so a silent take stops the run |
 | `listen.txt` | a listening check in the fixed three-part format, behind a level check |
+| `power-cycle-readback.txt` | a value kept across a power cycle (the tempo, set by keys and read on the home screen): read back, `power-cycle`, read back again |
 
 Setup, capture and listen start from empty test slots: each says `start = testslot-cleared`, so a
 gate batch runs its own run from that built-in start (the state every release with
