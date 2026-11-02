@@ -9,9 +9,11 @@
 #
 # The run this plan belongs to starts from empty test slots: 121-128 hold nothing when the run
 # begins (backed up and erased before it, or emptied at the last release). In it, setup-test-project
-# builds ~T SETUP in 121, a plan of the run's own sets the value to keep (here: a turn of encoder A
-# on track 1's TRIG page, with nothing saved), then this plan reads it back. The value is in the
-# working state, not in a saved project: that is what a power cycle has to keep.
+# builds ~T SETUP in 121, a plan of the run's own sets the value to keep (here: the pattern tempo
+# raised by keys, TEMPO and then UP x10 for +1.0 BPM, with nothing saved), then this plan reads it
+# back. The value is in the working state, not in a saved project: that is what a power cycle has
+# to keep. Set it by keys: an encoder turn's step count depends on its speed (`turn A 100` moved a
+# value 3 steps in one run and 4 in another), so a plan cannot know the screen it leaves.
 format = 1
 name = kept after the power cycle
 unit = digitone
@@ -20,10 +22,10 @@ out = runs
 note = ~T SETUP active, with the value to keep set by an earlier plan and not saved
 
 [start]
-# The readback before the power cycle: the value is there now. Reach the page from home (NO closes
-# SETTINGS and its panels), then track 1, then TRIG, as the capture template does. The page title
-# row (rows 0-9) shows "Trig Parameters" only for a moment, so compare rows 10-63: they show the
-# page, the track and the encoders' values. Record the reference after the earlier plan's change.
+# The readback before the power cycle: the value is there now. Home (NO closes SETTINGS, TEMPO and
+# their panels), and no page key: a page key shows the page's name in the title row for a moment,
+# over the tempo. Compare home's title row where the tempo is (rows 0-9, cols 96-127). Record the
+# reference after the earlier plan's change.
 tap NO
 wait 0.4
 tap NO
@@ -31,10 +33,6 @@ wait 0.4
 tap NO
 wait 0.4
 tap NO
-wait 1.0
-tap T1
-wait 0.4
-tap TRIG
 wait 1.5
 shot before.png
 # The contrast: on a fresh card (and, once the Digitone has them, from the built-in starts: the
@@ -42,7 +40,7 @@ shot before.png
 # This plan's own pass comes from run_plan after that plan (the gate batch runs only its starts,
 # and those must stop before the power cycle).
 say contrast fresh: a default project has no such value, so the readback stops the run
-expect-screen kept-value 1 rows=10-63
+expect-screen kept-value 1 rows=0-9 cols=96-127
 
 [kept after the power cycle]
 say proves set-and-kept: the value reads back the same after a power cycle
@@ -57,10 +55,6 @@ wait 0.4
 tap NO
 wait 0.4
 tap NO
-wait 1.0
-tap T1
-wait 0.4
-tap TRIG
 wait 1.5
 shot after.png
-expect-screen kept-value 1 rows=10-63
+expect-screen kept-value 1 rows=0-9 cols=96-127
