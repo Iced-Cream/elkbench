@@ -32,7 +32,7 @@ reaches the hardware only with something that has already worked in the emulator
   use another, or name the gap in the plan and get the owner's explicit yes for that step.
   That yes is part of the run's go and covers that run only.
 - **A power cycle is a plan step** (`power-cycle`) where the emulator can run the OS's power-off
-  save (analog-emu's `--power-off`): the emulator pass then covers a real power-off save and a
+  save (analog-emu's or digiemu's `--power-off`): the emulator pass then covers a real power-off save and a
   cold boot on that card, and on the unit the run pauses at the step until the owner says the
   power cycle by hand is done. A readback after it proves what it had to keep, and stops the run
   if it doesn't. A pass from an emulator that never lost power proves only "kept with nothing

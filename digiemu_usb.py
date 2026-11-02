@@ -4,7 +4,7 @@
 Runs under digiemu's own Python (in WSL on Windows), started by elkbench's emulator tool:
 
     python digiemu_usb.py REPO SYX PORT MINUTES TAG [--firmware-dir DIR] [--din-port PORT] [--home DIR]
-                          [--setup-key KEY [--require-setup] [--keep N] [--days D]]
+                          [--setup-key KEY [--require-setup] [--keep N] [--days D]] [--power-off]
 
 The .syx is set up once in a digiemu home (digiemu's `--add`: extract, cold boot, settle;
 about half a minute), shared by every session. Each start copies that folder to a work
@@ -12,6 +12,8 @@ folder of its own (TAG), so the session's card and any OS upgrade stay its own, 
 digiemu's tools/usbrun.py on the settled snapshot: the link listens on 127.0.0.1:PORT, an
 OS upgrade over it reboots into the new OS, and it stops after MINUTES. --din-port serves the
 DIN MIDI ports the same way, raw MIDI bytes both ways (a digiemu whose usbrun.py has it).
+With --power-off, a `power-off` line on stdin switches it off (the OS's own power-off save to
+the card) and it boots again on that card, on the same link.
 
 Setup snapshots (--setup-key KEY, a digiemu whose usbrun.py has --stdin-commands):
 the home's setup-snapshots/KEY folder holds a machine saved after a plan's setup
@@ -50,6 +52,10 @@ def main(argv=None):
     ap.add_argument('--require-setup', action='store_true',
                     help='with --setup-key: stop if that snapshot is not stored')
     ap.add_argument('--keep', type=int, default=10, help='setup snapshots kept at most')
+    ap.add_argument('--power-off', action='store_true',
+                    help='model the supply: a `power-off` line on stdin switches it off, the OS saves '
+                         'its working state to the card, and it boots again on that card (a digiemu '
+                         'whose usbrun.py has --power-off)')
     ap.add_argument('--days', type=float, default=7, help='days an unused setup snapshot is kept')
     ap.add_argument('--home', default=os.path.join(
         os.environ.get('XDG_STATE_HOME') or os.path.expanduser('~/.local/state'), 'elkbench', 'digiemu'))
@@ -93,6 +99,8 @@ def main(argv=None):
             extra = ['--stdin-commands', '--save-to', saved]
             sys.stdout = Watch(sys.stdout, '[usbrun] saved %s' % saved,
                                lambda: publish(saved, store, args.setup_key, args.tag))
+        if args.power_off:
+            extra = extra + ['--power-off'] + ([] if '--stdin-commands' in extra else ['--stdin-commands'])
         if not snap:
             snap, why = bootstrap.choose_snapshot(paths)
             if not snap:

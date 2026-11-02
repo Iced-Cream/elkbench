@@ -38,7 +38,10 @@ Where the Digitone differs from the Rytm:
 - **`ping` and `capture` need a digirun that has them.** digihealth branch
   `digirun-reopen-capture-ping` has both and the key-session reopen; the flash gate's `ping`
   answers on stock 1.44 too, as it uses Elektron's own RPC. An older digirun refuses both steps.
-- **No power-cycle template**: the power-cycle step is Rytm and A4 only.
+- **The power cycle runs in digiemu** with a digiemu whose usbrun has `--power-off`: the OS's own
+  power-off save, then a boot on that card (about a minute; the cold boot, intro and settle).
+  After it the template waits 40 s, as an OS with remote keys answers them that long after it
+  starts on the unit. A run with it starts from empty test slots, like every Digitone hardware run.
 
 The Digitakt has no templates yet: no digihealth build for it has remote keys, and every template
 but the flash gate is key-driven.
