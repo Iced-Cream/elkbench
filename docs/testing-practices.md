@@ -353,8 +353,9 @@ the plan meant, and that each check would have failed if the result were wrong.
   someone's work. A plan proves that prompt with an `expect-screen` named `save-before-load...`
   and answers NO; the checker refuses anything else after it. The box is as wide as the project's
   name, so the check compares the prompt's fixed text only, with `rows=` and `cols=`. The prompt
-  is skipped when the active project came from the slot being loaded (an INIT NEW into that
-  slot, say): the load then goes straight to PROCEED, and a plan for that case does not expect it.
+  is skipped when the active project came from the slot being loaded (a previous run's project,
+  say): the load then goes straight to PROCEED. The slot's active-project marker in MANAGE
+  PROJECTS shows which case it is, so a plan proves it in its start check.
 - **A flash names what it flashes over.** A flash plan sets `os = FILE`, the OS on the unit
   before the flash: two flashes of the same file over different builds are different
   transitions, each with its own emulator pass (stock back over each build in a run, say).
