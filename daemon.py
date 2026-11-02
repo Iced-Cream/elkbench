@@ -1910,6 +1910,11 @@ class Daemon:
             raise Refused('this session already runs a %s emulator on %s; stop it first'
                           % (a['unit'], mine['address']))
         minutes = min(max(int(a.get('minutes') or 60), 1), 240)
+        # power_off: started with --power-off, so that a later plan with power-cycle steps runs on
+        # it as it is (after the plans that set up its state) instead of on a fresh boot
+        power_off = power_off or bool(a.get('power_off'))
+        if power_off and u.get('emulator') == 'digiemu':
+            raise Refused('power_off is for the Rytm and A4 emulators (analog-emu --power-off)')
         if u.get('emulator') == 'digiemu':
             return self.digiemu_start(s, a['unit'], a.get('build'), minutes)
         exe =os.path.join(need(ANALOG_EMU, 'analog_emu', 'the analog-emu emulators'), u['emu_exe'])
@@ -3082,9 +3087,13 @@ class Daemon:
         seed = int(a['seed']) if a.get('seed') is not None else secrets.randbelow(10 ** 6)
         flash = bool(a.get('image'))
         minutes = min(max(int(a.get('minutes') or (10 if flash else 20)), 1), 60)
-        variants, units = [], set()
+        variants, units, notes = [], set(), []
         for i, v in enumerate(given):
-            build = os.path.abspath(v.get('build') or a.get('build') or '')
+            info = None if flash else self.plan_info(v.get('plan') or a['plan'])
+            # a gate plan that names its OS (os = FILE) boots that file unless its variant gives a
+            # build, so plans on different OS files gate in one batch
+            build = v.get('build') or (gate and info['os_file']) or a.get('build') or ''
+            build = os.path.abspath(build)
             if not os.path.isfile(build) or not build.lower().endswith('.syx'):
                 raise Refused('%s %d: build is the OS .syx its emulator boots' % ('plan' if gate else 'variant', i + 1))
             x = dict(name=str(v.get('name') or chr(65 + i)), build=build)
@@ -3094,11 +3103,12 @@ class Daemon:
                     raise Refused('variant %s: no OS .syx file %s' % (x['name'], x['image']))
                 units.add(a.get('unit'))
             else:
-                x['info'] = self.plan_info(v.get('plan') or a['plan'])
-                if x['info']['power_cycles']:
+                x['info'] = info
+                if info['power_cycles'] and not gate:
                     raise Refused('%s has power-cycle steps: batches do not power cycle yet, run it with '
-                                  'run_plan target emulator' % x['info']['name'])
-                units.add(x['info']['unit'])
+                                  'run_plan target emulator (a gate batch runs only its start runs)'
+                                  % info['name'])
+                units.add(info['unit'])
             if gate:
                 info = x['info']
                 if info['emulator']:
@@ -3124,10 +3134,36 @@ class Daemon:
             # (the unit's required built-in starts, and those its `say contrast` lines name),
             # each on a fresh emulator of its own; a plan whose contrast names `fresh` stops
             # there, so its own pass comes from run_plan after the plan that leaves its start
+            # A plan with power-cycle steps: batches do not power cycle yet, so its own pass comes
+            # from run_plan target emulator, and the gate runs only its start runs, each up to its
+            # first power cycle: a start run that must stop in a section before it never reaches it.
             runs_of = []
             for v in variants:
                 u_, home = v['info']['unit'], v['info'].get('home')
                 want, have = starts_needed(v['info']), unit_starts(u_)
+                if v['info']['power_cycles']:
+                    name = v['info']['name']
+                    if home:
+                        raise Refused('%s has power-cycle steps and start = %s: its own pass needs a gate batch, '
+                                      'and batches do not power cycle yet' % (name, home))
+                    before = set()           # the sections wholly before the first power cycle
+                    for n, ls in v['info']['steps']:
+                        if any(is_power_cycle(l) for l in ls):
+                            break
+                        before.add(n)
+                    late = ['%s (must %s)' % (st, 'pass' if e is None else 'stop in [%s]' % e)
+                            for st, e in sorted(want.items()) if e not in before]
+                    if late:
+                        raise Refused('%s: its run from start %s would reach the power cycle, and batches do not '
+                                      'power cycle yet: only start runs that stop before its first power cycle '
+                                      'can be gated' % (name, ', '.join(late)))
+                    notes.append('%s: start runs only, each up to its first power cycle; its own pass comes '
+                                 'from run_plan target emulator (batches do not power cycle yet)' % name)
+                    runs_of += [dict(v, name='%s @%s' % (v['name'], st), start=st, expect=expect, power_cut=True,
+                                     start_plan=have.get(st),
+                                     start_chain=start_chain(u_, st) if have.get(st) else None)
+                                for st, expect in sorted(want.items())]
+                    continue
                 if home:                 # start = START: its own run (and pass) from that start
                     runs_of.append(dict(v, name='%s (from %s)' % (v['name'], home), home=home,
                                         start_plan=have[home], start_chain=start_chain(u_, home)))
@@ -3140,6 +3176,8 @@ class Daemon:
             variants = runs_of
         if len(units) != 1:
             raise Refused('every variant runs on one unit' if flash or len(units) > 1 else 'give unit')
+        if gate and not variants:
+            return ['ok: nothing to gate here: no start runs needed'] + notes
         unit = units.pop()
         u = self.unit(unit)
         digi = u.get('emulator') == 'digiemu'
@@ -3179,7 +3217,7 @@ class Daemon:
                         v['name'], ep.get('run_dir') or stamp(ep['time'])))
                     variants.remove(v)
             if not variants:
-                return ['ok: nothing to gate: every plan\'s pass still stands (force runs them again)'] + kept
+                return ['ok: nothing to gate: every plan\'s pass still stands (force runs them again)'] + kept + notes
         snapshot = bool(a.get('snapshot'))
         if snapshot and digi and not gate:
             raise Refused('no setup snapshots on the %s emulator (digiemu resumes only its settled boot)' % unit)
@@ -3277,7 +3315,8 @@ class Daemon:
                 b.run()
                 job.state = 'stopped' if b.stopped.is_set() else 'done'
                 if gate:
-                    job.lines = self.gate_lines(variants, b.results, parallel, len(snaps), b.stopped.is_set()) + kept
+                    job.lines = self.gate_lines(variants, b.results, parallel, len(snaps),
+                                                b.stopped.is_set()) + kept + notes
                     if any(r['outcome'] != 'pass' for r in b.results) or b.stopped.is_set():
                         job.state = 'fail' if not b.stopped.is_set() else 'stopped'
                     job.lines.append('results: %s' % folder)
@@ -3301,7 +3340,7 @@ class Daemon:
         if gate:
             return ['running: %s, each once on a fresh emulator, %d at a time%s; status with run_id %s '
                     'waits for its end' % (job.desc, parallel, ', setups from snapshots' if snapshot else '',
-                                           job.id)] + kept
+                                           job.id)] + kept + notes
         return ['running: %s, %d runs (%d variant(s) x %d), %d at a time, seed %d%s; status with run_id %s '
                 'waits for its end' % (job.desc, len(b.plan), len(variants), runs, parallel, seed,
                                        ', each variant\'s setup snapshot first' if snapshot else '', job.id)]
@@ -3646,9 +3685,13 @@ class Daemon:
                     cmd += ['--wait-timeout', '400']     # a reboot is a cold boot and a settle
             else:
                 info = v['info']
+                secs = None
+                if v.get('power_cut'):             # a start run of a power-cycle plan: up to its first power cycle
+                    secs = power_cycle_parts(info['steps'])[0]
+                if v.get('store') and snap:        # resumed after its setup
+                    secs = (secs or info['steps'])[info['setup']:]
                 plan = self.batch_plan(info, work, '%s run %d' % ('gate' if v.get('gate') else 'batch', n),
-                                       sections=info['steps'][info['setup']:] if v.get('store') and snap
-                                       else None, out=out)
+                                       sections=secs, out=out)
                 cmd, cwd = [sys.executable, RUNNER, '--port', addr] + (['--din', din] if din else []) + [
                     '--quiet', 'run', plan], ANALOGHEALTH
             env = dict(s.env(), **({'DIGIRUN_PATH': os.path.join(DIGIHEALTH, 'tools')} if DIGIHEALTH else {}))
@@ -3807,7 +3850,10 @@ TOOLS = [
        minutes={'type': 'integer', 'description': 'how long it runs, 1-240 (default 60)'},
        card={'type': 'string', 'description': 'card image to copy (default: the configured one)'},
        keep_flash={'type': 'boolean', 'description': 'boot what an earlier flash left in this session\'s '
-                                                     'emulator (no build), on its card as left'})),
+                                                     'emulator (no build), on its card as left'},
+       power_off={'type': 'boolean', 'description': 'Rytm / A4: start it with the power-off save, so that a '
+                                                    'plan with power-cycle steps can run on it later without '
+                                                    'build (after the plans that set up its state)'})),
     ('run_plan', 'Run a test plan (analogrun run, format 1) in the background; returns a run_id. target '
                  'emulator records the pass a hardware run needs; hardware needs the claim and an approval token. '
                  'A plan\'s power-cycle steps power the emulator off (its OS saves to the card) and cold-boot it; '
