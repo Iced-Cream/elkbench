@@ -1,0 +1,25 @@
+# Template: one flash transition on an Analog Four MKII, for its emulator gate and the hardware run.
+# Copy it once per flash in the run, in the run's order, including stock back over the last build.
+# Each copy is its own plan and its own item in the go: a file flashed twice is listed twice.
+#
+# The gate (docs/testing-practices.md, section 1): the emulator flashes this file over what the unit
+# will have on it at that point (run_plan target emulator build = THAT OS), and the transition passes
+# when the upgrade completes: erase, write, reboot, the new OS answering. A stalled flash ends the run,
+# with no recovery flash. An A4 flash answers again after about 15-20 s; the boot screen ends a few seconds later.
+format = 1
+name = flash BUILD over PREVIOUS
+unit = a4
+out = runs
+flash = ../os/BUILD.syx               # the file this transition puts on the unit
+os = ../os/PREVIOUS.syx               # the OS on the unit before it: the gate boots this build, then flashes
+# elkflash = PATH                     # optional: an elkflash checkout; without it elkbench uses tools.elkflash
+note = BUILD flashed over PREVIOUS
+
+[after the flash]
+say proves evidence: the unit answers and the home screen after the reboot
+# ping reads the product and OS version; it needs a build with analoghealth or a remote-only build
+# (on stock, leave ping out and keep the shot). Some emulator builds answer ping as Analog Keys:
+# compare the product id (0x0E), not the name.
+wait 8
+ping
+shot after-flash.png

@@ -1,0 +1,104 @@
+# Template: a listening check on an Analog Four MKII. The listen text has three parts: what to hear,
+# `allowed:` what the person may do on the unit by hand (or nothing), and `needs:` the audible
+# precondition, which the section proves on screen first. The text is the instruction: a different
+# instruction (said in the thread, say) is a different plan, with its own emulator pass.
+format = 1
+name = listening check
+unit = a4
+refs = refs/a4-listen
+out = runs
+note = ~T SETUP active, unsaved: T1 trig on step 1; stopped
+
+[start]
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+# The start check: the run's own test project is active (the setup plan ran first in this run).
+# The home title row (rows 0-7) of a new project reads K001:KIT 1 and BPM:120.0. The contrast: a
+# fresh card has another project and kit active, so this check stops the run there; this plan's
+# own pass comes from run_plan after the setup plan.
+say contrast fresh: another project or kit is active, so the title row differs
+expect-screen test-project-title 2 rows=0-7
+
+[setup: reload the test project from 121]
+say proves setup: 121 is the active project and loads as a new one, so the pattern has no trig yet
+# Earlier plans in the run may have toggled trigs in the working copy (grid recording toggles a
+# trig: a second RECORD, 1, RECORD takes it away again). So the plan reloads 121 first, and 121
+# must hold the setup's project with no trig: a plan that saves 121 reloads it before its change,
+# or a trig saved there makes this plan's toggle remove it (the pattern then plays empty while the
+# play indicator still shows playing, and an emulator gate can't hear that). A LEVEL
+# turn makes the working copy unsaved, so the load always asks, and it asks only PROCEED WITH
+# LOADING? because 121 is the active project (any other project asks SAVE ... BEFORE LOADING?
+# first, and the check stops the run). 121 is reached in MANAGE PROJECTS (every slot, in order),
+# not by its place in the LOAD PROJECT list, which follows what 122-128 hold.
+tap T1
+wait 0.5
+tap OSC1
+wait 0.6
+turn LEVEL 8 4
+wait 0.5
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+# 121's panel (RIGHT), LOAD FROM (fourth row from the top)
+keys RIGHT,UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN
+wait 0.4
+shot reload-121.png
+tap YES
+wait 0.8
+expect-screen manage-proceed-with-loading 2 rows=21-43 cols=8-120
+tap YES
+wait 5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+# a new project's home screen, compared whole
+expect-screen new-home 3
+
+[setup: T1's OSC1 page, the sequencer stopped]
+say proves setup: the page the trig is recorded from, and a stopped sequencer
+# OSC1 steps between OSC1 (P 1/2) and NOISE (P 2/2), and a track key keeps the page, so OSC1 is
+# entered from another page (FLTR): its first press then always opens P 1/2.
+tap T1
+wait 0.5
+tap FLTR
+wait 0.6
+tap OSC1
+wait 0.6
+# then T1's OSC1 page 1/2, by its knob labels and dials (rows 8-63). The title
+# bar names the page only for a moment before it goes back to the kit's name.
+expect-screen t1-osc1-page 2 rows=8-63
+# and the sequencer stopped (the stop square where the play indicator goes): PLAY on a playing
+# pattern pauses it on the A4, and the setup's grid recording would run on a moving pattern
+expect-screen stopped 2 rows=2-6 cols=119-125
+
+[setup: T1 on step 1]
+say proves setup: one T1 trig on step 1 (grid recording: a key on the live screen adds no trig)
+tap RECORD
+wait 0.6
+tap 1
+wait 0.3
+tap RECORD
+wait 0.6
+
+[L1 T1 plays steadily]
+say proves evidence: the ear of the person, with the pattern proven playing first
+tap PLAY
+wait 1
+# the play indicator only (a triangle playing, a square stopped)
+expect-screen playing 2 rows=2-6 cols=119-125
+listen T1 plays once per bar, steady, with no clicks or dropouts. allowed: nothing on the unit; the volume on your own speakers only. needs: the pattern playing (the play indicator was checked on screen). Say finished when done.
+tap STOP
+wait 1

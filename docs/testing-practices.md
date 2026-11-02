@@ -268,8 +268,13 @@ their answer to the client's prompt. A session can't end it itself.
   loading it leaves the previous project active, and a write meant for the test project lands in
   that one instead. SAVE PROJECT AS carries the working project's state, so it starts a test only
   right after CREATE NEW, never from someone's project. Then confirm on screen that the new
-  project is the one loaded (its home screen).
-  start a test. If the run can't confirm which project is active, it writes nothing to it.
+  project is the one loaded (its home screen). If the run can't confirm which project is
+  active, it writes nothing to it.
+- **On the Analog Four MKII, INIT NEW is not new in a used slot.** INIT NEW into a slot that has
+  ever held a project brings back that project's kit, sounds and pattern data (only the name and
+  tempo are new), however the slot was cleared: data-store clear, DELETE, or the panel's CLEAR
+  (which leaves a project named CLEAN). CREATE NEW starts from nothing, which is one reason the
+  test project comes from it.
 - **Loading another project drops unsaved changes** in the working one. Before the first load,
   know that the working project is saved or is a test project, or have the owner's go cover the
   load. Never save their project yourself.
