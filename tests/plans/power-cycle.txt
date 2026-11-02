@@ -1,0 +1,28 @@
+# Sample plan for the offline tests: a power-cycle step, and the readback after it.
+format = 1
+name = power cycle
+unit = rytm
+refs = refs/menus
+out = runs
+note = menus closed
+
+[start]
+wait 1
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap GLOBAL
+expect-screen global-menu 2
+tap NO
+
+[kept]
+say proves set-and-kept: the global menu still opens after a power cycle
+power-cycle
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap GLOBAL
+expect-screen global-menu 2
