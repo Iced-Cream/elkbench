@@ -774,11 +774,53 @@ class InProcess(unittest.TestCase):
                      'Committed: the device is erasing and writing its flash now and restarts by itself.\n'
                      'waiting\rback after 31 s: Analog Rytm MKII, OS 1.74\n')
         self.done(job, 0, 'ok: back after 31 s: Analog Rytm MKII, OS 1.74\n')
-        self.assertEqual(job.lines[:3], ['sent 1048576 bytes in 35 chunks, 40.0 s (25.6 KiB/s), 0 resends',
-                                         'Committed: the device is erasing and writing its flash now and '
-                                         'restarts by itself.',
-                                         'ok: back after 31 s: Analog Rytm MKII, OS 1.74'])
-        self.assertEqual(job.lines[3], 'log: %s' % flog)
+        self.assertRegex(job.lines[0], r'^elkbench: %s flash \S+ on rytm starts ' % job.id)
+        self.assertEqual(job.lines[1:4], ['sent 1048576 bytes in 35 chunks, 40.0 s (25.6 KiB/s), 0 resends',
+                                          'Committed: the device is erasing and writing its flash now and '
+                                          'restarts by itself.',
+                                          'ok: back after 31 s: Analog Rytm MKII, OS 1.74'])
+        self.assertEqual(job.lines[4], 'log: %s' % flog)
+
+    def test_flash_logs_every_request_and_the_quiet_time_before_it(self):
+        self.d.emu_ready = lambda s, unit, build, snap=None: ('tcp:127.0.0.1:7399', [])
+        proc = type('P', (), {'poll': lambda self: None, 'pid': 99})()
+        self.d.emulators[(self.s.sid, 'rytm')] = dict(proc=proc, session=self.s.sid, build='x',
+                                                      address='tcp:127.0.0.1:7399')
+        os.makedirs(daemon.STATE, exist_ok=True)
+        port = self.d.busy_port('rytm@tcp:127.0.0.1:7399', 'emulator', 'plan setup test project in 121')
+        port.release()
+        port.freed -= 4.2                                     # the plan ended 4.2 s ago
+        self.d.t_flash(self.s, {'unit': 'rytm', 'image': self.saved['stock'][0], 'target': 'emulator'})
+        job, cmd = self.started[-1]
+        self.assertIn('--verbose', cmd)                       # with --quiet: into elkflash.log
+        self.assertEqual(cmd[cmd.index('--verbose') - 1], '--quiet')
+        flog = os.path.join(self.s.folder('rytm'), 'elkflash.log')
+        with open(flog, encoding='utf-8') as fh:
+            first = fh.read().splitlines()[-1]                # written before elkflash appends
+        self.assertRegex(first, r'^elkbench: %s flash \S+ on rytm starts \d\d:\d\d:\d\d, 4\.\d s after the '
+                                r'last use of this port ended \(plan setup test project in 121\)$' % job.id)
+        with open(flog, 'a', encoding='utf-8') as fh:
+            fh.write('no reply to PING, retrying (2/3)\n')
+        self.done(job, 1, 'failed (exit 1): error: no reply to command 0x01 (seq 1) in 9 s\n')
+        self.assertEqual(job.lines[0], first)
+        self.assertIn('no reply to PING, retrying (2/3)', job.lines)   # a resend shows in status
+
+    def test_port_lock_remembers_the_user_before(self):
+        lk = self.d.busy_port('rytm', 'hardware', 'data ls')
+        self.assertEqual(lk.before, (None, None))
+        self.assertIn('no earlier use of this port', daemon.flash_start_line(
+            daemon.Job(self.s, 'flash', 'rytm', 'hardware', 'flash X.syx'), lk))
+        lk.release()
+        freed = lk.freed
+        again = self.d.busy_port('rytm', 'hardware', 'flash X.syx')
+        self.assertIs(again, lk)
+        self.assertEqual(again.before, (freed, 'data ls'))
+        line = daemon.flash_start_line(daemon.Job(self.s, 'flash', 'rytm', 'hardware', 'flash X.syx'), again,
+                                       now=freed + 12.34)
+        self.assertTrue(line.endswith('12.3 s after the last use of this port ended (data ls)'), line)
+        with self.assertRaises(daemon.Refused):
+            self.d.busy_port('rytm', 'hardware', 'steps')             # still one user per port
+        again.release()
 
     def test_saved_project_changes(self):
         steps = [('save', ['save-project 126 "~T X" GLOBAL,YES']), ('more', ['keys YES', 'save-project 7'])]
