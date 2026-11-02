@@ -30,8 +30,10 @@ wait 0.8
 tap LFO
 wait 1.5
 shot before.png
-# the value the earlier plan set, e.g. the LFO's DST field (rows 8-31): stop otherwise
-expect-screen kept-value 1 rows=8-31
+# the value the earlier plan set, e.g. a knob's dial (rows 8-23): stop otherwise. Leave out the
+# label rows below: just after a turn, the value pop-up covers them, and would differ for a
+# reason that has nothing to do with what was kept
+expect-screen kept-value 1 rows=8-23
 
 [kept after the power cycle]
 say proves set-and-kept: the value reads back the same after a power cycle
@@ -51,4 +53,4 @@ wait 0.8
 tap LFO
 wait 1.5
 shot after.png
-expect-screen kept-value 1 rows=8-31
+expect-screen kept-value 1 rows=8-23

@@ -626,6 +626,8 @@ class Daemon:
         else:
             self.stop_emulator(e)
             how = 'killed, no save'
+        if e['proc'].stdin and not e['proc'].stdin.closed:
+            e['proc'].stdin.close()
         cmd, n = list(e['cmd']), e.get('boots', 1) + 1
         if '--snapshot' in cmd:                # the power-off saves no snapshot: a cold boot
             i = cmd.index('--snapshot')
