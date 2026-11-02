@@ -18,7 +18,7 @@ five plans, where its menus allow them:
 
 | folder | unit |
 |---|---|
-| `a4/` | Analog Four MKII, OS 1.56 with a remote-key path. Its test project comes from CREATE NEW and SAVE PROJECT AS: INIT NEW into a used slot brings back the old kit 1 there. The A4 has no built-in starts yet, so its contrasts name `fresh` only. No capture template yet: its level check needs a band check that suits an analog oscillator |
+| `a4/` | Analog Four MKII, OS 1.56 with a remote-key path. Its test project comes from CREATE NEW and SAVE PROJECT AS: INIT NEW into a used slot brings back the old kit 1 there. The A4 has no built-in starts yet, so its contrasts name `fresh` only. Its capture turns oscillator retrig (TRG) on, so each note starts in phase and takes match below the note too |
 
 A refs folder is never shared, across every folder here: the A4's are named `refs/a4-...`. No reference
 screens ship: record each plan's own in the emulator (`run_plan ... record_refs`), and check the
