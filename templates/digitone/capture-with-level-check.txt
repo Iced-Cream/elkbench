@@ -18,9 +18,12 @@ audio-driver = Elektron Digitone        # the ASIO driver name, for audio-record
 audio-python = py -3.14                  # a Python with numpy and scipy, for the audio checks
 note = ~T SETUP (slot 121, INIT NEW) active, T1 trig on step 1; stopped at the end
 #
-# The test project setup runs inside the plan (the same sections as setup-test-project.txt), so
-# each gate runs from a fresh emulator: digiemu has no setup snapshots. Before the plan, the run
-# backs up and clears slot 121 (data get, data clear), as for setup-test-project.
+# The test project setup runs inside the plan (the same sections as setup-test-project.txt). With
+# a digiemu that has setup snapshots, the emulator runs it once per build and resumes it after
+# that (snapshot-after); the T1 sections stay after it, so every resumed run still checks keys
+# and screens. Before the plan, the run backs up and clears slot 121 (data get, data clear), as
+# for setup-test-project.
+snapshot-after = setup: LOAD FROM 121, and prove the load by content
 
 [start]
 # Home first (NO closes SETTINGS and its panels), then MANAGE PROJECTS from the SETTINGS list's
