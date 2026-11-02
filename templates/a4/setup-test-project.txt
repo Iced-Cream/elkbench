@@ -10,7 +10,8 @@
 #   data clear /projects/121
 # List both in the go request as writes: "slot 121 (holds X at listing time: backed up and erased)".
 # The slot must be empty: when it holds a project other than the active one, the OS asks
-# OVERWRITE '<name>'? first, and the save's keys end on the naming screen instead.
+# OVERWRITE '<name>'? first, and the save's keys end on the naming screen instead. Slots 122-128
+# must hold no project either: the last section finds 121 as the LOAD list's last project.
 # The LEVEL turn in the second section makes the active project unsaved, and CREATE NEW then
 # discards it (answered NO to the save): list that in the go request too.
 format = 1
@@ -36,10 +37,12 @@ wait 0.8
 keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
 wait 0.6
 shot start-save-list-121.png
-# The start check: the cursor row reads 121 and an empty slot, which only the run's own clear
-# produced. Record it in the emulator after an emulator-only step has filled and cleared 121, so
-# the clearing path is tested too. Compare the cursor row only (its rows found in the gate).
-expect-screen save-list-121-cleared 2 rows=24-39
+# The start check: the list shows 121 (the cursor row, rows 8-14) to 127 (rows 56-62), all
+# empty, which only the run's own clear produced. Record it in the emulator after an
+# emulator-only step has filled and cleared 121, so the clearing path is tested too. The
+# scrollbar (cols 122-127) is left out. 128 is off the screen: if it holds a project, the last
+# section stops at its PROCEED check with nothing written.
+expect-screen save-list-121-127-empty 2 rows=8-62 cols=0-121
 tap NO
 wait 0.5
 tap NO
@@ -80,8 +83,10 @@ expect-screen save-before-loading 2 rows=34-40 cols=22-106
 tap NO
 wait 0.8
 shot proceed.png
-# ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N; YES makes the new project.
-expect-screen proceed-with-loading 2 rows=21-44
+# ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N; YES makes the new project. The box's
+# inside only: the LOAD list's cursor row shows beside it, at a height that follows how many
+# projects the unit holds.
+expect-screen proceed-with-loading 2 rows=21-43 cols=8-120
 tap YES
 wait 4
 tap NO
@@ -93,14 +98,14 @@ wait 0.5
 shot new-home.png
 expect-screen new-home 3
 
-[setup: SAVE PROJECT AS 121, and prove it by content]
-say proves setup: the active project is the new one, saved in 121 (its home screen below the title row)
+[setup: SAVE PROJECT AS 121]
+say proves setup: the new project saved into 121 (proven active in the next section)
 # GLOBAL > PROJECT > SAVE PROJECT AS (second row) > slot 121 (end of the list, up 7) > YES (the
-# naming screen) > YES (save). The name is the plan's own, at most 15 characters.
+# naming screen) > YES (save). The name is the plan's own, at most 15 characters. On the A4,
+# save-project does not mark kit 1 `~T` after CREATE NEW (its kit has no name to mark), so
+# nothing on the home screen tells the saved copy from any new project.
 save-project 121 "~T SETUP" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,YES,YES
 wait 2
-# A popup (Received KIT 1, from the kit's ~T mark) can come after the save: a spare NO on the
-# home screen does nothing.
 tap NO
 wait 0.5
 tap NO
@@ -108,6 +113,42 @@ wait 0.5
 tap NO
 wait 0.5
 shot saved.png
-# The content proof: the home screen of a new project, below the title row (the title row now
-# shows the kit's ~T mark, a name the plan wrote). A name check passes on a copy of any project.
-expect-screen saved-new-home 3 rows=8-63
+
+[setup: 121 is the active project]
+say proves setup: loading 121 asks only PROCEED, which the OS does only when 121 is the active project
+# The proof is the OS's own answer, not a name. With unsaved changes, LOAD asks SAVE ... BEFORE
+# LOADING? first when the chosen project is not the active one, and only PROCEED WITH LOADING?
+# when it is. So: a LEVEL turn, LOAD PROJECT, 121 (the list's last project, one up from CREATE
+# NEW), YES, and the PROCEED box must be the first thing on screen. YES then reloads 121 itself.
+tap T1
+wait 0.5
+tap OSC1
+wait 0.6
+turn LEVEL 8 4
+wait 0.5
+tap GLOBAL
+wait 0.5
+keys UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP
+tap YES
+wait 0.5
+keys UP,UP,UP
+tap YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP
+wait 0.4
+shot load-121.png
+tap YES
+wait 0.8
+shot load-121-asks.png
+expect-screen proceed-with-loading 2 rows=21-43 cols=8-120
+tap YES
+# a saved project loads for longer than CREATE NEW; a NO during the load is lost
+wait 5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+shot loaded.png
+expect-screen new-home 3
