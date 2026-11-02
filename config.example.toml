@@ -63,7 +63,7 @@ person = "the person at this PC"
 # analogrun, digiusb, digirun, elkflash and obtr (for example your own scripts).
 # guard = ['my_record_script']
 
-# Per unit (rytm, a4, digitone): any built-in fact (port, emu, asio, engine) can be
+# Per unit (rytm, a4, digitone, digitakt): any built-in fact (port, emu, asio, engine) can be
 # overridden too.
 # [units.rytm]
 # evidence = 'C:\tests\rytm\runs'          # run folders and test-log.md
