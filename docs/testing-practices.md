@@ -252,7 +252,15 @@ their answer to the client's prompt. A session can't end it itself.
   another slot without loading it leaves the previous project active, and a write meant for the
   test project lands in that one instead. SAVE PROJECT AS makes its copy active, but the copy
   carries the previous project's working state (active kit, patterns, tempo), so don't use it to
-  start a test. If the run can't confirm which project is active, it writes nothing to it.
+  start a test from the project that happens to be active. If the run can't confirm which
+  project is active, it writes nothing to it.
+- **On the Analog Four MKII, INIT NEW is not new in a used slot.** INIT NEW into a slot that has
+  ever held a project brings back that project's kits, sounds and patterns (only the name and
+  tempo are new), however the slot was emptied: data-store clear, DELETE or CLEAR. So the A4's
+  test project comes from CREATE NEW (the LOAD PROJECT list's last row), which starts from
+  nothing, saved into the test slot with SAVE PROJECT AS. A copy of a project made that way
+  carries no old state. Loading the test slot then proves it is active (with unsaved changes the
+  OS asks only "proceed" for the active project) and its home screen proves it is new.
 - **Loading another project drops unsaved changes** in the working one. Before the first load,
   know that the working project is saved or is a test project, or have the owner's go cover the
   load. Never save their project yourself.
