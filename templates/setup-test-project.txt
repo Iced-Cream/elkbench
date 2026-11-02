@@ -7,7 +7,9 @@
 # active, and its home screen proves it is new. The active project comes from 121 afterwards, so a
 # later run's LOAD asks only PROCEED, and the start check needs no active-project marker.
 #
-# Before this plan, the run backs up and clears the test slot (outside the plan for now):
+# The test slot must be empty when this plan starts. With `clear_at_release` covering it in
+# config.toml (as in the example setup: 121-128), every release leaves it so, and the go request
+# says so. Without it, the run backs up and clears the test slot before this plan (hand steps):
 #   data get /projects/121      (the backup, into the run's evidence folder)
 #   data clear /projects/121
 # List both in the go request as writes: "slot 121, whatever it holds: backed up and erased". The go

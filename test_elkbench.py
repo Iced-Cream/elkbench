@@ -1296,6 +1296,45 @@ class InProcess(unittest.TestCase):
         self.assertEqual(cmd[:4], ['wsl', '-e', 'bash', '-lc'])
         self.assertTrue(cmd[4].endswith('~/py /mnt/d/x/y.syx 7400'), cmd[4])
 
+    def test_release_empties_test_slots(self):
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        saved, calls = daemon.UNITS['rytm'].get('clear_at_release'), []
+        daemon.UNITS['rytm']['clear_at_release'] = [121, 122]
+        try:
+            self.d.empty_test_slots = lambda s, u: (calls.append(u), (False, ['slot 122 still holds a project']))[1]
+            with self.assertRaisesRegex(daemon.Refused, 'test slots are not empty, so the claim is kept'):
+                self.d.t_release(self.s, {'unit': 'rytm', 'note': 'menus closed'})
+            self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
+            out = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'cable out', 'accept_slots_left': True})
+            self.assertTrue(out[0].startswith('ok: released'), out)
+            handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], 'rytm.handoff.json')))
+            self.assertIn('test slots 121-122 NOT EMPTY: slot 122 still holds a project', handoff['note'])
+            subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                           env=self.s.env(), capture_output=True)
+            self.d.empty_test_slots = lambda s, u: (True, ['slot 121 backed up (x) and cleared',
+                                                           'test slots 121-122 empty (data ls)'])
+            out = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'menus closed'})
+            self.assertIn('rytm: slot 121 backed up (x) and cleared', out)
+            handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], 'rytm.handoff.json')))
+            self.assertIn('test slots 121-122 empty (data ls)', handoff['note'])
+        finally:
+            del self.d.empty_test_slots
+            daemon.UNITS['rytm']['clear_at_release'] = saved or []
+        self.assertEqual(calls, ['rytm', 'rytm'])
+
+    def test_clear_at_release_setting(self):
+        self.assertEqual(daemon.slot_numbers('121-124, 127'), [121, 122, 123, 124, 127])
+        self.assertEqual(daemon.slot_numbers([128, 121]), [121, 128])
+        self.assertEqual(daemon.slot_numbers(None), [])
+        with self.assertRaises(SystemExit):
+            daemon.slot_numbers('121-x')
+        self.assertEqual(daemon.slot_text([121, 122, 123, 124, 125, 126, 127, 128, 130]), '121-128, 130')
+        ls = ('~T SETUP              id 121  54549 B\n'
+              '                      id 122  0 B (no valid data)\n'
+              'MY SONG               id 3  51200 B\n')
+        self.assertEqual(daemon.occupied_slots(ls), {121, 3})
+
     def test_release_asks_for_stock(self):
         subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
                        env=self.s.env(), capture_output=True)

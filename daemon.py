@@ -236,6 +236,44 @@ def saved_slots(steps):
     return out
 
 
+def slot_numbers(spec):
+    """A unit's `clear_at_release` setting -> sorted project slot numbers: a list of numbers, or
+    text such as '121-128' or '121-124, 127'."""
+    if not spec:
+        return []
+    out = set()
+    for part in ([spec] if isinstance(spec, int) else spec if isinstance(spec, list) else str(spec).split(',')):
+        part = str(part).strip()
+        m = re.fullmatch(r'(\d+)(?:\s*-\s*(\d+))?', part)
+        if not m:
+            raise SystemExit('config.toml: clear_at_release takes slot numbers or ranges such as 121-128, not %r'
+                             % part)
+        lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+        out.update(range(lo, hi + 1))
+    return sorted(out)
+
+
+def occupied_slots(ls_text):
+    """`analogrun data ls /projects` output -> the slot numbers that hold a project."""
+    return {int(m.group(2)) for m in re.finditer(r'^(.*?)\s+id\s+(\d+)\s+\d+ B(.*)$', ls_text, re.M)
+            if 'no valid data' not in m.group(3)}
+
+
+def slot_text(slots):
+    """[121, 122, ..., 128, 130] -> '121-128, 130'."""
+    out, run = [], []
+    for n in sorted(slots):
+        if run and n == run[-1] + 1:
+            run.append(n)
+            continue
+        if run:
+            out.append('%d-%d' % (run[0], run[-1]) if len(run) > 1 else str(run[0]))
+        run = [n]
+    if run:
+        out.append('%d-%d' % (run[0], run[-1]) if len(run) > 1 else str(run[0]))
+    return ', '.join(out)
+
+
 def unit_starts(unit):
     """-> {start: its start plan, or None for `fresh`} that this unit's emulator runs from:
     `fresh` (a fresh emulator, the card as shipped) and the start plans in STARTS/<unit>/."""
@@ -372,6 +410,8 @@ def load_config(path=CONFIG):
         u = dict(facts, **c.get('units', {}).get(name, {}))
         u.setdefault('evidence', os.path.join(root, name, 'runs'))
         u.setdefault('refs', os.path.join(root, name, 'refs'))
+        # test slots the release empties (backed up first), so every run finds them empty
+        u['clear_at_release'] = slot_numbers(u.get('clear_at_release'))
         units[name] = u
     # analoghealth's local write policy (its writepolicy.py): ANALOGHEALTH_POLICY, else policy.py
     # in its config folder
@@ -1419,12 +1459,30 @@ class Daemon:
         if off and not a.get('accept_non_stock'):
             raise Refused('%s is left on %s, not stock: run the stock-restore plan first, or say why '
                           'in the note and pass accept_non_stock' % (off[0], s.os_left[off[0]][0]))
+        # Every run leaves the test slots empty, so the next one finds them so (a plan still
+        # checks): what they hold is backed up into the session's evidence folder, then erased.
+        cleared = {}
+        for u in mine:
+            if not (UNITS[u].get('clear_at_release') and UNITS[u]['runner'] is True):
+                continue
+            ok, lines = self.empty_test_slots(s, u)
+            if not ok and not a.get('accept_slots_left'):
+                raise Refused('%s: the test slots are not empty, so the claim is kept: %s. Fix it and release '
+                              'again, or say why in the note and pass accept_slots_left' % (u, '; '.join(lines)))
+            cleared[u] = (ok, lines)
         out = ['ok: released %s' % ', '.join(mine)]
         for u in mine:
+            if u in cleared:
+                ok, lines = cleared[u]
+                out += ['%s: %s' % (u, l) for l in lines]
+                note_u = '%s; test slots %s %s' % (note, slot_text(UNITS[u]['clear_at_release']),
+                                                   'empty (data ls)' if ok else 'NOT EMPTY: ' + '; '.join(lines))
+            else:
+                note_u = note
             done = s.done.get(u, [])
             os_text = ('%s (%s)' % (s.os_left[u][0], 'stock' if s.os_left[u][1] else 'NOT STOCK')
                        if u in s.os_left else 'not flashed by this session')
-            full = '%s; runs: %s; OS: %s' % (note, '; '.join(done) or 'none', os_text)
+            full = '%s; runs: %s; OS: %s' % (note_u, '; '.join(done) or 'none', os_text)
             # a scratch ELKLOCK_DIR is a test: no device reads for the snapshot then
             snap = ['--no-snapshot'] if os.environ.get('ELKLOCK_DIR') else []
             r = subprocess.run([sys.executable, ELKLOCK, 'release', u, '--note', full[:900]] + snap, env=s.env(),
@@ -1449,6 +1507,57 @@ class Daemon:
             s.purpose.pop(u, None)
             s.os_left.pop(u, None)
         return out
+
+    def empty_test_slots(self, s, u):
+        """At release: back up and erase every project in the unit's `clear_at_release` slots
+        (analogrun `data clear`, which asks the local write policy and keeps the copy), then list
+        the projects to show them empty. -> (ok, lines)."""
+        slots = UNITS[u]['clear_at_release']
+        try:
+            self.check_connected(u, 'hardware')
+        except Refused as e:
+            return False, ['not emptied: %s' % e]
+        script, folder = runner(), os.path.join(s.folder(u), 'release-clear-%s' % time.strftime('%H%M%S'))
+        port = self.busy_port(u, 'hardware')
+        try:
+            def run(*args):
+                return subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, script, '--port',
+                                       UNITS[u]['port'], 'data'] + list(args),
+                                      cwd=os.path.dirname(os.path.dirname(script)), env=s.env(),
+                                      capture_output=True, text=True, encoding='utf-8', errors='replace',
+                                      timeout=300, **NOWIN)
+            os.makedirs(folder, exist_ok=True)
+            log, lines = [], []
+            r = run('ls', '/projects')
+            log.append('$ data ls /projects\n' + r.stdout + r.stderr)
+            if r.returncode:
+                return False, ['data ls /projects failed: %s' % (r.stdout + r.stderr).strip()[-200:]]
+            for n in sorted(set(slots) & occupied_slots(r.stdout)):
+                backup = os.path.join(folder, 'slot%d-backup.bin' % n)
+                c = run('clear', '/projects/%d' % n, backup, '--yes')
+                log.append('$ data clear /projects/%d %s\n%s%s' % (n, backup, c.stdout, c.stderr))
+                if c.returncode:
+                    lines.append('slot %d not cleared (%s)' % (
+                        n, 'the write policy refused' if c.returncode == 2 else 'exit %d' % c.returncode))
+                else:
+                    lines.append('slot %d backed up (%s) and cleared' % (n, backup))
+            r = run('ls', '/projects')
+            log.append('$ data ls /projects\n' + r.stdout + r.stderr)
+            if r.returncode:
+                return False, lines + ['data ls /projects after the clear failed']
+            left = sorted(set(slots) & occupied_slots(r.stdout))
+            listing = [l.rstrip() for l in r.stdout.splitlines() if l.strip()]
+            os.makedirs(os.path.join(STATE, 'unit-state'), exist_ok=True)       # for unit_state
+            write_json(os.path.join(STATE, 'unit-state', u + '.json'),
+                       {'time': time.time(), 'session': s.sid, 'projects': listing,
+                        'listing': os.path.join(folder, 'steps.log')})
+            if left:
+                return False, lines + ['slot(s) %s still hold a project' % slot_text(left)]
+            return True, lines + ['test slots %s empty (data ls)' % slot_text(slots)]
+        finally:
+            port.release()
+            with open(os.path.join(folder, 'steps.log'), 'a', encoding='utf-8') as fh:
+                fh.write('\n'.join(log) + '\n')
 
     def t_status(self, s, a):
         rid = a.get('run_id')
@@ -1563,6 +1672,12 @@ class Daemon:
                                 % (os.path.basename(img), f['unit'], d))
         if not items:
             raise Refused('nothing to approve: give plans, flashes or recall_restores')
+        for u in sorted({i['unit'] for i in infos} | {f.get('unit') for f in a.get('flashes') or []}
+                        | {f.get('unit') for f in a.get('recall_restores') or []}):
+            if UNITS.get(u, {}).get('clear_at_release') and UNITS[u]['runner'] is True:
+                text.append('AT RELEASE on %s, however the run ends: project slots %s, whatever they hold, '
+                            'backed up to the run folder and erased (data clear), then listed to show them empty'
+                            % (u, slot_text(UNITS[u]['clear_at_release'])))
         purpose = (a.get('purpose') or '').strip() or '(no purpose given)'
         body = ('An AI session asks for one go for this hardware run.\n\nSession %s (%s)\n'
                 'Purpose: %s\n\n%s\n\nEach item runs once; the go expires in %d h.\n'
@@ -3742,10 +3857,13 @@ TOOLS = [
              'description': 'rytm, a4, digitone, digitakt, all, or a list'},
        purpose={'type': 'string', 'req': True}, wait_minutes={'type': 'integer', 'description': '0-10, queue for a busy unit'})),
     ('release', 'Release units: writes the elklock handoff note and a test-log row in the unit\'s runs folder. '
-                'Asks for the stock OS back first.',
+                'Asks for the stock OS back first. Where the unit sets clear_at_release, backs up and erases '
+                'those test slots first and lists them empty.',
      S(unit={'type': ['string', 'array'], 'items': {'type': 'string'}, 'req': True},
        note={'type': 'string', 'req': True, 'description': 'state left: OS, project, menus'},
-       accept_non_stock={'type': 'boolean', 'description': 'leave a non-stock OS on purpose (say why in note)'})),
+       accept_non_stock={'type': 'boolean', 'description': 'leave a non-stock OS on purpose (say why in note)'},
+       accept_slots_left={'type': 'boolean', 'description': 'release although the test slots could not be '
+                                                             'emptied (say why in note)'})),
     ('status', 'This session\'s claims and runs, or one run (run_id): waits until that run ends '
                '(up to wait_s) and gives its verdict. Call it again if it still answers running.',
      S(run_id={'type': 'string'},
