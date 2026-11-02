@@ -124,8 +124,12 @@ shot saved.png
 say proves setup: loading 121 asks only PROCEED, which the OS does only when 121 is the active project
 # The proof is the OS's own answer, not a name. With unsaved changes, LOAD asks SAVE ... BEFORE
 # LOADING? first when the chosen project is not the active one, and only PROCEED WITH LOADING?
-# when it is. So: a turn, LOAD PROJECT, 121 (the list's last project, one up from CREATE NEW), YES,
-# and the PROCEED box must be the first thing on screen. YES then reloads 121 itself.
+# when it is. 121 is reached through MANAGE PROJECTS, not the LOAD list: that list shows only the
+# filled slots, so 121 is its last project only when 122-128 are empty. MANAGE PROJECTS lists every
+# slot, so (as in [start]) page downs to the end and UP x7 put 121 on the top row. RIGHT opens the
+# slot panel (CLEAR first: CLEAR, DELETE, RENAME, LOAD FROM, ...), UP x6 then DOWN x3 picks LOAD FROM.
+# So: a turn, MANAGE PROJECTS > 121 > LOAD FROM, YES, and the PROCEED box must be the first thing
+# on screen. YES then reloads 121 itself.
 keys TRK(BD)
 wait 0.4
 tap TRIG
@@ -134,17 +138,16 @@ tap LFO
 wait 1.5
 turn A 24 1
 wait 1.0
-tap GLOBAL
-wait 0.5
-keys UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP
-tap YES
-wait 0.5
-keys UP,UP,UP
-tap YES
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
 wait 0.8
-keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+shot manage-121.png
+tap RIGHT
+wait 0.6
+keys UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN
 wait 0.4
-shot load-121.png
+shot load-from-121.png
 tap YES
 wait 0.8
 shot load-121-asks.png
@@ -152,6 +155,8 @@ expect-screen proceed-with-loading 2 rows=21-44 cols=8-120
 tap YES
 # a saved project loads for longer than CREATE NEW; a NO during the load is lost
 wait 5
+tap NO
+wait 0.5
 tap NO
 wait 0.5
 tap NO

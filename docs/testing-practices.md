@@ -253,7 +253,9 @@ their answer to the client's prompt. A session can't end it itself.
   Four MKII alike: LOAD PROJECT's last row, CREATE NEW, makes a new working project (answer NO to
   "save before loading" and YES to "changes will be lost"); SAVE PROJECT AS then puts it into the
   test slot and makes the saved copy active; loading the test slot proves that, because LOAD asks
-  only PROCEED for the active project's own slot. A new project saved into another slot without
+  only PROCEED for the active project's own slot. Load it from MANAGE PROJECTS (LOAD FROM), which
+  lists every slot: the LOAD PROJECT list shows only filled slots, so its positions change with
+  what the unit holds. A new project saved into another slot without
   loading it leaves the previous project active, and a write meant for the test project lands in
   that one instead. SAVE PROJECT AS carries the working project's state, so it starts a test only
   right after CREATE NEW, never from someone's project. Then confirm on screen that the new
