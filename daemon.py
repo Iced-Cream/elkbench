@@ -69,7 +69,9 @@ OB_CHANNELS = ('Main L', 'Main R', 'Track 1 L', 'Track 1 R', 'Track 2 L', 'Track
 DIGI_PARALLEL_MAX = 3                          # digiemu runs one batch may have going at once
 AUDIO_WAIT_EMULATOR = 0.5                       # s an emulator twin waits for `wait N audio`
 POWER_OFF_WAIT = 60                             # s analog-emu has to save and exit at a power-cycle
-POWER_OFF_MARK = b'power off: working state saved'   # in an analog-emu that has --power-off
+POWER_OFF_MARK = 'power off: working state saved'    # its log line after a power-off save
+# in the binary of an analog-emu that has --power-off (the line above is put together at run time)
+POWER_OFF_BUILD_MARK = b'power off: no --card, nothing kept'
 GATE_PLANS_MAX = 16                             # plans one gate batch may take
 KNOWN_STARTS = ('a fresh emulator', 'a setup snapshot')    # pass starts a gate batch may keep
 STATUS_WAIT, STATUS_WAIT_MAX = 300, 600     # s that status run_id waits for a run to end
@@ -617,7 +619,7 @@ class Daemon:
             with open(e['log'], encoding='utf-8', errors='replace') as fh:
                 said = fh.read()[seen:]
             off = [l.strip() for l in said.splitlines() if l.startswith('power off:')]
-            if POWER_OFF_MARK.decode() not in said or 'wrote card' not in said:
+            if POWER_OFF_MARK not in said or 'wrote card' not in said:
                 return 1, 'fail: power-cycle: the OS did not finish its power-off save (%s; %s)\n' % (
                     '; '.join(off) or 'no power-off line', e['log'])
             how = off[0][len('power off: '):]
@@ -1928,7 +1930,7 @@ class Daemon:
 
     def emu_has_power_off(self, unit):
         """Whether this analog-emu build has --power-off. Its --help does not list it, so this
-        looks for the line its power-off prints in the binary itself."""
+        looks in the binary for a line only its power-off prints."""
         exe = os.path.join(ANALOG_EMU or '', UNITS[unit].get('emu_exe') or '')
         if not os.path.isfile(exe):
             return False
@@ -1936,7 +1938,7 @@ class Daemon:
         if stamp not in self.emu_help_text:
             try:
                 with open(exe, 'rb') as fh:
-                    self.emu_help_text[stamp] = POWER_OFF_MARK in fh.read()
+                    self.emu_help_text[stamp] = POWER_OFF_BUILD_MARK in fh.read()
             except OSError:
                 self.emu_help_text[stamp] = False
         return self.emu_help_text[stamp]

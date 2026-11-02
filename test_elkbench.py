@@ -866,16 +866,17 @@ class InProcess(unittest.TestCase):
         the lines of a power-off whose save did not finish)."""
         folder = os.path.join(TMP, 'fake-emu')
         os.makedirs(folder, exist_ok=True)
-        exe = os.path.join(folder, 'rytm')
-        with open(exe, 'w', encoding='utf-8') as fh:
+        script = os.path.join(folder, 'fake-rytm.py')
+        with open(script, 'w', encoding='utf-8') as fh:
             fh.write('#!%s\n' % sys.executable + (
+                '# power off: no --card, nothing kept (the mark elkbench looks for in a build)\n'
                 'import os, sys\n'
                 'a = sys.argv\n'
                 'print("usb midi tcp: listening on", a[a.index("--usb-midi-tcp") + 1], flush=True)\n'
                 'if "--din-midi-tcp" in a: print("din midi tcp: listening", flush=True)\n'
                 'print("args", " ".join(a[1:]), flush=True)\n'
                 'if "--stdin-commands" not in a:\n'
-                '    import time; time.sleep(600)\n'
+                '    import time; time.sleep(120)\n'
                 'for line in sys.stdin:\n'
                 '    if line.strip() == "quit": break\n'
                 'if "--power-off" in a:\n'
@@ -884,10 +885,17 @@ class InProcess(unittest.TestCase):
                 '    else:\n'
                 '        print("power off: working state saved")\n'
                 '        print("wrote card", a[a.index("--card") + 1] if "--card" in a else "-")\n'))
-        os.chmod(exe, 0o755)
+        if os.name == 'nt':                  # Windows starts a .cmd, not a shebang script
+            exe = 'rytm.cmd'
+            with open(os.path.join(folder, exe), 'w', encoding='utf-8') as fh:
+                fh.write('@"%s" "%s" %%*\r\n' % (sys.executable, script))
+                fh.write('@rem power off: no --card, nothing kept\r\n')
+        else:
+            exe = os.path.basename(script)
+            os.chmod(script, 0o755)
         saved = daemon.ANALOG_EMU, daemon.ELKFLASH
         daemon.ANALOG_EMU, daemon.ELKFLASH = folder, TMP
-        daemon.UNITS['rytm'].update(emu_exe='rytm', emu_card=None)
+        daemon.UNITS['rytm'].update(emu_exe=exe, emu_card=None)
         self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
         self.d.wait_for_os = lambda addr, tries=30: True
         self.addCleanup(lambda: [self.d.stop_emulator(e) for e in self.d.emulators.values()])
