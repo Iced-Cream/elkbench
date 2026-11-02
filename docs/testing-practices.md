@@ -112,7 +112,13 @@ close those gaps.
   - `dirty`: the card's own project active, another pattern and kit, an unsaved change, and
     the LFO page left open;
   - `testslot`: a test project in slot 121 active, with an unsaved change;
-  - `occupied`: every test slot 121-128 holding a throwaway test project.
+  - `occupied`: every test slot 121-128 holding a throwaway test project;
+  - `testslot-cleared`: `testslot`, then slot 121 cleared through the data store, as a run's
+    backup and clear leaves a unit (the active-project marker stays on the empty slot).
+  A start can build on another (`base = START`) and run data store steps (`data = clear PATH;
+  put PATH FILE`) before its own sections, so it can reach states the front panel cannot
+  ([starts/README.md](../starts/README.md)). A hardware plan whose own run must start from a
+  built-in start says `start = START`; its pass then comes from a gate batch run from that start.
   `fresh` (the card as shipped) is a start on every unit. The names and slots follow the
   example write policy (`examples/write-policy/`); a setup with other rules points `starts` in
   config.toml at its own folder.
