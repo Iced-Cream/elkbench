@@ -111,8 +111,9 @@ UNIT_FACTS = {
 DATA_OPS = ('ls', 'get', 'put', 'clear', 'roundtrip')
 # Digitone (digirun) steps that do not exist: no key-driven kit save, as a test project there is
 # marked by its pattern A01, not a kit. send and save-project ask the write policy as analogrun does.
-# capture and ping need a digirun that has them (digihealth's runner-capture-ping); an older one
-# lacks them, and then they are refused here too.
+# capture and ping need a digirun that has them (digihealth's runner-capture-ping, merged with the
+# key-session reopen in branch digirun-reopen-capture-ping); an older one lacks them, and then they
+# are refused here too.
 DIGI_NO_STEPS = {'save-kit'}
 DIGI_NEWER_STEPS = {'capture': '    capture FILE', 'ping': '    ping '}   # step -> its line in digirun's help
 
