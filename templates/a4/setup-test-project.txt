@@ -39,13 +39,14 @@ wait 0.6
 shot start-save-list-121.png
 # The start check: the list shows 121 (the cursor row, rows 8-14) to 127 (rows 56-62), all
 # empty, which only the run's own clear produced. Record it in the emulator after emulator-only
-# steps have filled 121, made another project active (load 002, say) and cleared 121, so the
-# clearing path is tested too. The active project's row carries a small marker at the left of
-# its name field: with 121 active when it was cleared the reference would hold that marker, and
-# the check would stop on a unit where another project is active. The scrollbar (cols 122-127)
-# is left out. 128 is off the screen: if it holds a project, the last
-# section stops at its PROCEED check with nothing written.
-expect-screen save-list-121-127-empty 2 rows=8-62 cols=0-121
+# steps have filled 121 and cleared it. The active project's row carries a small marker at the
+# left of its name field (cols 29-30), even when its slot has been cleared, and which row has it
+# depends on the unit: so the check is in two parts that leave those columns out, the slot
+# numbers (cols 0-28) and the name fields (cols 31-121). The scrollbar (cols 122-127) is left out
+# too. 128 is off the screen: if it holds a project, the last section stops at its PROCEED check
+# with nothing written but 121.
+expect-screen save-list-121-127-empty 2 rows=8-62 cols=0-28
+expect-screen save-list-121-127-empty 2 rows=8-62 cols=31-121
 tap NO
 wait 0.5
 tap NO
