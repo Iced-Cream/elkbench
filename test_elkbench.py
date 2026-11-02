@@ -1899,6 +1899,11 @@ class InProcess(unittest.TestCase):
         with open(plan, 'w', encoding='utf-8') as fh:
             fh.write(text.replace('name = homed', 'name = homed\nstart = dirty'))
         self.assertEqual(daemon.starts_needed(self.d.plan_info(plan)), {'occupied': 'start'})
+        # a required start the plan's start check rejects is named in its contrast: it must stop
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('name = homed', 'name = homed\nstart = testslot').replace(
+                'say contrast occupied:', 'say contrast dirty, occupied:'))
+        self.assertEqual(daemon.starts_needed(self.d.plan_info(plan)), {'dirty': 'start', 'occupied': 'start'})
         for setting, why in (('start = nowhere', 'no built-in start'),
                              ('start = occupied', 'a contrast says the run from occupied stops')):
             with open(plan, 'w', encoding='utf-8') as fh:

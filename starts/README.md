@@ -41,7 +41,10 @@ A hardware plan whose own run should start from a built-in start, not from a fre
 says so with `start = START` (a plan for a state only a start leaves, such as a setup plan
 for a unit whose active project came from 121 before 121 was cleared: `start = testslot-cleared`). Its pass then comes
 from a gate batch, which builds that start and runs the plan from it; run_plan does not record
-it. Its runs from `dirty` and `occupied` and from its contrasts' starts are as for any plan.
+it. Its runs from `dirty` and `occupied` and from its contrasts' starts are as for any plan: a
+required start that the plan's start check rightly rejects is named in that check's contrast
+(`say contrast dirty, occupied, testslot: 121 is not the cleared active slot`), so its run must
+stop there rather than pass.
 
 What the emulator's card holds (analog-emu, seen 2026-11-02): two projects in slots 001 and 002,
 002 active after boot, its pattern A01 on kit 1, slots 121-128 empty. It boots with two prompts.
