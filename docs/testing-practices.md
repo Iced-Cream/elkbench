@@ -76,7 +76,7 @@ reaches the hardware only with something that has already worked in the emulator
 *elkbench enforces*: a hardware plan or flash needs a passing emulator run of the same steps,
 reference screens and OS file (sha256). A plan that flashes gets that emulator run named for
 it, and a pass whose OS file differs is refused before the owner is asked. An emulator run of a
-Rytm or A4 plan reads every saved project before and after the steps (read only, through the
+plan (on every unit) reads every saved project before and after the steps (read only, through the
 data store), and fails if one was added, removed, renamed or changed outside the slots the plan
 saves into. Going back to the
 emulator gives the unit back (section 4).

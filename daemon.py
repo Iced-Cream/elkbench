@@ -241,6 +241,13 @@ def saved_slots(steps):
     return out
 
 
+def guards_projects(unit):
+    """Whether an emulator run of a plan on `unit` reads its saved projects before and after:
+    every unit with a runner. The data store RPC is the same on the Rytm, A4, Digitone and
+    Digitakt, so analogrun's `data ls` and `data get` read them all."""
+    return bool(UNITS.get(unit, {}).get('runner'))
+
+
 def slot_numbers(spec):
     """A unit's `clear_at_release` setting -> sorted project slot numbers: a list of numbers, or
     text such as '121-128' or '121-124, 127'."""
@@ -2402,7 +2409,7 @@ class Daemon:
 
     def saved_projects(self, addr, folder):
         """{slot: (name, sha256)} of every saved project on the emulator at `addr`, read with
-        analogrun data ls / get (read only)."""
+        analogrun data ls / get (read only; on the Digitone and Digitakt too, as data writes)."""
         run = lambda *a: subprocess.run([sys.executable, RUNNER, '--port', addr, 'data'] + list(a),
                                         cwd=ANALOGHEALTH, capture_output=True, text=True, encoding='utf-8',
                                         errors='replace', timeout=120, **NOWIN)
@@ -2618,7 +2625,7 @@ class Daemon:
             else:
                 plan = info['path'] if info['emulator'] else self.twin(info, bool(a.get('record_refs')), s.sid)
                 cmd = [sys.executable, RUNNER, '--port', addr] + din + ['--quiet', 'run', plan]
-            if UNITS[unit]['runner'] is True:          # analogrun's data store: Rytm and A4
+            if guards_projects(unit):
                 cmd = self.guard_projects(info, (lambda: self.emu_port(s, unit)) if cycles else addr, cmd, os.path.join(
                     s.folder(unit), 'projects-%s' % time.strftime('%H%M%S')))
         record = not info['emulator'] or info['settings'].get('record-refs', 'no') != 'yes'
@@ -3681,7 +3688,7 @@ class Daemon:
             if why:
                 return 'variant %s: %s (%s)' % (v['name'], why, work)
             plan = self.batch_plan(info, work, 'its setup', sections=info['steps'][:cut])
-            guard = v.get('gate') and UNITS[unit]['runner'] is True
+            guard = v.get('gate') and guards_projects(unit)
             if guard:                    # a gate's setup may write only the plan's slots too
                 before = self.saved_projects(addr, os.path.join(work, 'projects', 'before'))
             p = subprocess.run([sys.executable, RUNNER, '--port', addr] + (['--din', din] if din else []) +
@@ -3855,7 +3862,7 @@ class Daemon:
                 out = os.path.join(v['info']['rel'](g('out', 'runs')), 'emu-%s' % s.sid[:8],
                                    '%s-r%02d%s' % (os.path.basename(folder), n,
                                                    '-' + (v.get('start') or v['home']) if v.get('start_plan') else ''))
-                if UNITS[unit]['runner'] is True:
+                if guards_projects(unit):
                     try:
                         before = self.saved_projects(addr, os.path.join(work, 'projects', 'before'))
                     except (RuntimeError, OSError, subprocess.SubprocessError) as e:

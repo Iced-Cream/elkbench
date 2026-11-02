@@ -847,6 +847,32 @@ class InProcess(unittest.TestCase):
         before(0, '')
         self.assertEqual(after(0, '')[0], 0)
 
+    def test_every_unit_with_a_runner_guards_its_saved_projects(self):
+        for unit in ('rytm', 'a4', 'digitone', 'digitakt'):
+            if unit in daemon.UNITS:
+                self.assertTrue(daemon.guards_projects(unit), unit)
+        self.assertFalse(daemon.guards_projects('no-such-unit'))
+
+    @needs_runner
+    def test_digitone_emulator_plan_guards_its_saved_projects(self):
+        plan = os.path.join(TMP, 'dn-guard.txt')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write('unit = digitone\n[home]\nexpect-screen home 2\n')
+        proc = type('P', (), {'poll': lambda self: None, 'pid': 97})()
+        saved = daemon.DIGIHEALTH
+        daemon.DIGIHEALTH = TMP
+        guarded = []
+        self.d.guard_projects = lambda info, addr, cmd, folder: (guarded.append(addr), ['guarded'])[1]
+        self.d.emulators[(self.s.sid, 'digitone')] = dict(proc=proc, session=self.s.sid, build='b',
+                                                          address='tcp:127.0.0.1:7402')
+        try:
+            self.d.t_run_plan(self.s, {'plan': plan, 'target': 'emulator'})
+        finally:
+            daemon.DIGIHEALTH = saved
+            self.d.emulators.pop((self.s.sid, 'digitone'), None)
+        self.assertEqual(guarded, ['tcp:127.0.0.1:7402'])
+        self.assertEqual(self.started[-1][1], ['guarded'])
+
     def test_hand_steps_are_named(self):
         steps = [('setup', ['keys PLAY', 'listen the kick plays']), ('turn (hardware)', ['turn A 1']),
                  ('check', ['shot s1', 'listen  "the snare, then silence"  # by hand'])]
