@@ -255,12 +255,17 @@ their answer to the client's prompt. A session can't end it itself.
   and the +Drive sound library and samples are shared. So make a test project active before
   sending any dump, and mark anything saved to the +Drive.
 - **Write to the active project only once it is known to be a test project**, in the same run.
-  Build the test project in a known state: create a new project in the test slot and load it
-  (on the Rytm, INIT NEW then LOAD FROM; answer the "changes will be lost" prompt if it shows),
-  then confirm on screen that the new project is the one loaded. A new project saved into
-  another slot without loading it leaves the previous project active, and a write meant for the
-  test project lands in that one instead. SAVE PROJECT AS makes its copy active, but the copy
-  carries the previous project's working state (active kit, patterns, tempo), so don't use it to
+  Build the test project in a known state from CREATE NEW, on the Rytm MKII and the Analog
+  Four MKII alike: LOAD PROJECT's last row, CREATE NEW, makes a new working project (answer NO to
+  "save before loading" and YES to "changes will be lost"); SAVE PROJECT AS then puts it into the
+  test slot and makes the saved copy active; loading the test slot proves that, because LOAD asks
+  only PROCEED for the active project's own slot. Load it from MANAGE PROJECTS (LOAD FROM), which
+  lists every slot: the LOAD PROJECT list shows only filled slots, so its positions change with
+  what the unit holds. A new project saved into another slot without
+  loading it leaves the previous project active, and a write meant for the test project lands in
+  that one instead. SAVE PROJECT AS carries the working project's state, so it starts a test only
+  right after CREATE NEW, never from someone's project. Then confirm on screen that the new
+  project is the one loaded (its home screen).
   start a test. If the run can't confirm which project is active, it writes nothing to it.
 - **Loading another project drops unsaved changes** in the working one. Before the first load,
   know that the working project is saved or is a test project, or have the owner's go cover the
@@ -403,9 +408,10 @@ the plan meant, and that each check would have failed if the result were wrong.
   someone's work. A plan proves that prompt with an `expect-screen` named `save-before-load...`
   and answers NO; the checker refuses anything else after it. The box is as wide as the project's
   name, so the check compares the prompt's fixed text only, with `rows=` and `cols=`. The prompt
-  is skipped when the active project came from the slot being loaded (a previous run's project,
-  say): the load then goes straight to PROCEED. The slot's active-project marker in MANAGE
-  PROJECTS shows which case it is, so a plan proves it in its start check.
+  is skipped when the active project came from the slot being loaded: the load then goes
+  straight to PROCEED, which is how a setup plan proves its test project is active after
+  CREATE NEW and SAVE PROJECT AS. With no unsaved changes the OS loads without either prompt, so a
+  plan that checks the prompts makes a change first (a turn).
 - **A flash names what it flashes over.** A flash plan sets `os = FILE`, the OS on the unit
   before the flash: two flashes of the same file over different builds are different
   transitions, each with its own emulator pass (stock back over each build in a run, say).

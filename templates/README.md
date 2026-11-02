@@ -6,7 +6,7 @@ only what its comments name. Each template has its own `refs` folder: keep one p
 
 | template | for |
 |---|---|
-| `setup-test-project.txt` | the run's own test project: INIT NEW into a cleared test slot, LOAD FROM it, and prove the load by content (a new project's title row), not by its name. Its start check proves whether the active project came from the test slot (LOAD then skips the save prompt; the comments give the two changes for that case) |
+| `setup-test-project.txt` | the run's own test project: CREATE NEW, SAVE PROJECT AS into a cleared test slot, then LOAD FROM it in MANAGE PROJECTS (the LOAD list shows only filled slots, so its positions move), where PROCEED as the only question proves it is the active project, and the whole home screen proves it is new. Afterwards the active project comes from the test slot whatever it was before, so the start check needs no active-project marker |
 | `flash-gate.txt` | one flash transition: one copy per flash, in the run's order, stock back over the last build included; `os =` names the OS it flashes over, and its gate boots that file |
 | `power-cycle-readback.txt` | a value kept across a power cycle: read back, `power-cycle` (in the emulator a power-off save and a cold boot, on the unit by the person's hand), read back again |
 | `capture-with-level-check.txt` | an audio take behind a level check, so a silent take stops the run |
