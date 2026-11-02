@@ -1,0 +1,42 @@
+# Template: the plan after a power cycle by the person's hand on an Analog Four MKII, proving what
+# the power cycle had to keep. The run pauses for the power cycle and waits for the person's typed
+# "done" in the thread; the go request names it ("hand power cycle, no emulator gate"), and every
+# plan before and after has its emulator pass. This plan's emulator pass runs on an emulator that
+# never lost power: its start check must be one that a default project fails.
+format = 1
+name = kept after the power cycle
+unit = a4
+refs = refs/a4-power-cycle-readback
+out = runs
+note = ~T SETUP active: read only after the power cycle
+
+[start]
+# The readback is the start check: reach the page from a known page (a track key, then the page
+# key), and compare only the rows that show the kept value. A row that shows which page is open
+# passes on a default project too, and proves nothing about what was kept. ENV and LFO each cycle
+# between two pages (ENV1/ENV2, LFO1/LFO2): enter them from another page, so the first press
+# opens the first one.
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+tap T1
+wait 0.5
+tap OSC1
+wait 0.6
+tap LFO
+wait 1.0
+shot readback.png
+# the value the earlier plan set and saved, e.g. LFO1's DEST field (the rows below the title): stop otherwise
+expect-screen kept-value 1 rows=8-63
+
+[the rest of the plan]
+say proves set-and-kept: a second kept value, read back the same way
+tap OSC1
+wait 0.6
+tap FLTR
+wait 0.8
+expect-screen kept-value-2 1 rows=8-63

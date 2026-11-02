@@ -12,8 +12,15 @@ only what its comments name. Each template has its own `refs` folder: keep one p
 | `capture-with-level-check.txt` | an audio take behind a level check, so a silent take stops the run |
 | `listen.txt` | a listening check in the fixed three-part format, its precondition proven on screen first |
 
-The key sequences are for the Analog Rytm MKII on OS 1.74 with a remote-key path in the OS
-(analoghealth, or a remote-only build); the Analog Four MKII's menus differ. No reference
+The templates in this folder are for the Analog Rytm MKII on OS 1.74 with a remote-key path in
+the OS (analoghealth, or a remote-only build). Each other unit has its own folder with the same
+five plans, where its menus allow them:
+
+| folder | unit |
+|---|---|
+| `a4/` | Analog Four MKII, OS 1.56 with a remote-key path. The test project comes from CREATE NEW and SAVE PROJECT AS (the A4 has no INIT NEW into a slot) |
+
+A refs folder is never shared, across every folder here: the A4's are named `refs/a4-...`. No reference
 screens ship: record each plan's own in the emulator (`run_plan ... record_refs`), and check the
 compared rows against what will differ on the unit before asking for a go.
 

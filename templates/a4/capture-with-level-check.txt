@@ -1,0 +1,58 @@
+# Template: an audio capture on an Analog Four MKII behind a level check, so a silent take stops
+# the run instead of passing. The pattern's own trig plays T1 (grid recording: a key on the live
+# screen adds no trig). The emulator's pass says nothing about sound: record the reference takes
+# on the unit. Parameter reads (dump) of a voice go after the first hit: some values reach the
+# voice only at note-on.
+#
+# The level check compares a short take with this plan's own reference take (level-ref.wav in its
+# refs folder), recorded once on the unit from the same steps and kept. audio-compare fails on
+# silence; audio-dropouts alone does not (silence has no dropouts). The channel numbers are
+# Overbridge's for the A4 MKII: read them from a recording's .channels.txt before the go.
+format = 1
+name = capture with level check
+unit = a4
+refs = refs/a4-capture-with-level-check
+out = runs
+audio-tools = C:/path/to/elkbench/audio
+note = ~T SETUP active, unsaved: T1 trig on step 1; stopped
+
+[start]
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+tap T1
+wait 0.5
+tap OSC1
+wait 0.6
+# the start check: T1's OSC1 page (its title rows): stop otherwise
+expect-screen t1-osc1-page 2 rows=0-7
+
+[setup: one T1 trig on step 1, the pattern playing]
+say proves setup: the sequencer starts T1 (a pattern trig, not a MIDI note)
+tap RECORD
+wait 0.6
+tap 1
+wait 0.3
+tap RECORD
+wait 0.6
+tap PLAY
+wait 1
+# the play indicator on (its rows only): proves the precondition the take depends on
+expect-screen playing 2 rows=0-7
+
+[level check (hardware)]
+say proves works: T1 sounds at its reference level on its own channel (3) before any take
+audio-record 3 level
+audio-compare level-ref level 3
+
+[take (hardware)]
+say proves works: the take, compared with its reference
+audio-record 10 take
+audio-dropouts take 1,2
+audio-compare take-ref take 1,2
+tap STOP
+wait 1

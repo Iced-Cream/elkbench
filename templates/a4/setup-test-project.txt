@@ -1,0 +1,113 @@
+# Template: build the run's own test project on an Analog Four MKII (OS 1.56 + analoghealth), and
+# prove it. Copy it beside your plans and change only what the comments name. Rules behind it:
+# docs/testing-practices.md, "Plan checker and templates".
+#
+# The A4 has no INIT NEW into a slot: a new project comes from CREATE NEW (the LOAD PROJECT list's
+# last row), and SAVE PROJECT AS then puts it into the test slot and makes the saved copy active.
+#
+# Before this plan, the run backs up and clears the test slot (outside the plan for now):
+#   data get /projects/121      (the backup, into the run's evidence folder)
+#   data clear /projects/121
+# List both in the go request as writes: "slot 121 (holds X at listing time: backed up and erased)".
+# The slot must be empty: when it holds a project other than the active one, the OS asks
+# OVERWRITE '<name>'? first, and the save's keys end on the naming screen instead.
+# The LEVEL turn in the second section makes the active project unsaved, and CREATE NEW then
+# discards it (answered NO to the save): list that in the go request too.
+format = 1
+name = setup test project in 121
+unit = a4
+refs = refs/a4-setup-test-project     # this plan's own references: never share them with another plan
+out = runs
+note = ~T SETUP (slot 121, CREATE NEW) active, unsaved changes none
+
+[start]
+# Boot prompts away, then SAVE PROJECT AS from its end, cursor on 121. The list holds every slot,
+# 001-128, and opens on the active project, so it is entered from its end (page downs first) and a
+# remembered cursor does not matter. NO leaves the list without saving.
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+shot start-save-list-121.png
+# The start check: the cursor row reads 121 and an empty slot, which only the run's own clear
+# produced. Record it in the emulator after an emulator-only step has filled and cleared 121, so
+# the clearing path is tested too. Compare the cursor row only (its rows found in the gate).
+expect-screen save-list-121-cleared 2 rows=24-39
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+
+[setup: CREATE NEW]
+say proves setup: a new project is the working project (its home screen, compared whole)
+# A LEVEL turn on T1's OSC1 page first, so the active project has unsaved changes and both load
+# questions come every time (with none, the OS loads without a word). Remote turns under about
+# 3 ticks are dropped.
+tap T1
+wait 0.5
+tap OSC1
+wait 0.6
+turn LEVEL 8 4
+wait 0.5
+# GLOBAL > PROJECT (top row) > LOAD PROJECT (top row) > CREATE NEW (the list's last row)
+tap GLOBAL
+wait 0.5
+keys UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP
+tap YES
+wait 0.5
+keys UP,UP,UP
+tap YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN)
+wait 0.4
+shot createnew.png
+tap YES
+wait 0.8
+shot save-prompt.png
+# SAVE '<name>' BEFORE LOADING? Y/N. Always NO: YES saves the active project over its own slot,
+# outside the plan's slots (the checker refuses anything else after a save-before-load check).
+# The box is as wide as the project's name, so the check compares the prompt's fixed text only.
+expect-screen save-before-loading 2 rows=34-40 cols=22-106
+tap NO
+wait 0.8
+shot proceed.png
+# ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N; YES makes the new project.
+expect-screen proceed-with-loading 2 rows=21-44
+tap YES
+wait 4
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+shot new-home.png
+expect-screen new-home 3
+
+[setup: SAVE PROJECT AS 121, and prove it by content]
+say proves setup: the active project is the new one, saved in 121 (its home screen below the title row)
+# GLOBAL > PROJECT > SAVE PROJECT AS (second row) > slot 121 (end of the list, up 7) > YES (the
+# naming screen) > YES (save). The name is the plan's own, at most 15 characters.
+save-project 121 "~T SETUP" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,YES,YES
+wait 2
+# A popup (Received KIT 1, from the kit's ~T mark) can come after the save: a spare NO on the
+# home screen does nothing.
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+shot saved.png
+# The content proof: the home screen of a new project, below the title row (the title row now
+# shows the kit's ~T mark, a name the plan wrote). A name check passes on a copy of any project.
+expect-screen saved-new-home 3 rows=8-63

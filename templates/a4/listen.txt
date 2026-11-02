@@ -1,0 +1,43 @@
+# Template: a listening check on an Analog Four MKII. The listen text has three parts: what to hear,
+# `allowed:` what the person may do on the unit by hand (or nothing), and `needs:` the audible
+# precondition, which the section proves on screen first. The text is the instruction: a different
+# instruction (said in the thread, say) is a different plan, with its own emulator pass.
+format = 1
+name = listening check
+unit = a4
+refs = refs/a4-listen
+out = runs
+note = ~T SETUP active, unsaved: T1 trig on step 1; stopped
+
+[start]
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+tap T1
+wait 0.5
+tap OSC1
+wait 0.6
+# the start check: T1's OSC1 page (its title rows), reached from a track key
+expect-screen t1-osc1-page 2 rows=0-7
+
+[setup: T1 on step 1]
+say proves setup: one T1 trig on step 1 (grid recording: a key on the live screen adds no trig)
+tap RECORD
+wait 0.6
+tap 1
+wait 0.3
+tap RECORD
+wait 0.6
+
+[L1 T1 plays steadily]
+say proves evidence: the ear of the person, with the pattern proven playing first
+tap PLAY
+wait 1
+expect-screen playing 2 rows=0-7
+listen T1 plays once per bar, steady, with no clicks or dropouts. allowed: nothing on the unit; the volume on your own speakers only. needs: the pattern playing (the play indicator was checked on screen). Say finished when done.
+tap STOP
+wait 1
