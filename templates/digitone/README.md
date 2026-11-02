@@ -12,6 +12,11 @@ plan's own in the emulator (`run_plan ... record_refs`).
 | `capture-with-level-check.txt` | an audio take behind a level check, so a silent take stops the run |
 | `listen.txt` | a listening check in the fixed three-part format, behind a level check |
 
+Setup, capture and listen start from empty test slots: each says `start = testslot-cleared`, so a
+gate batch runs its own run from that built-in start (the state every release with
+`clear_at_release` leaves), and its start check names `occupied` and `testslot` in its contrast
+(121 holds a project there, so the empty-slot check stops the run). See `starts/README.md`.
+
 Where the Digitone differs from the Rytm:
 - **Screen checks compare whole rows.** digirun's `expect-screen` takes `rows=` and does not honour
   `cols=` (it ignores it), so every Digitone check names rows only, and a check stays clear of rows

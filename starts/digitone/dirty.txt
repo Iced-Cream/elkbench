@@ -1,0 +1,70 @@
+# elkbench built-in start for the Digitone (OS 1.44 with a remote-key path, such as a digihealth
+# build), emulator only. A gate batch runs it on a fresh emulator and runs hardware plans from its
+# end state (docs/testing-practices.md, "Messy starts and contrast runs"); digiemu keeps no start
+# snapshots yet, so each run builds it first. Key paths are those of templates/digitone. Names and
+# slots follow the example write policy (examples/write-policy): `~T ` test names, test slots 121-128.
+format = 1
+unit = digitone
+emulator = yes
+name = start dirty
+out = runs
+note = the card's own project active (as booted), an unsaved change from knob A, track 1 TRIG page open
+
+[start]
+# A fresh digiemu card boots to the home screen with no prompt; the NOs do nothing there
+wait 3
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot start-home.png
+
+[active project still the card's own]
+say proves evidence: MANAGE PROJECTS from the top, the project of the card marked active, 121-128 empty
+keys SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 1.0
+keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP)
+wait 0.6
+shot manage-top.png
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN)
+wait 0.6
+shot manage-121.png
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+
+[an unsaved change: knob A]
+say proves setup: an unsaved change in the working project (knob A turned, nothing saved)
+# The turn names its parameter in the title row for a moment: the shots before and after show it.
+shot change-before.png
+turn A 40
+wait 0.3
+shot change-value.png
+wait 1.5
+shot change-after.png
+
+[end state]
+say proves evidence: the home title row (pattern, BPM) and track 1 TRIG page left open
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot end-home.png
+tap T1
+wait 0.5
+tap TRIG
+wait 1.0
+shot end-trig.png

@@ -2458,6 +2458,50 @@ class InProcess(unittest.TestCase):
                 daemon.start_chain(unit, 'cleared')
 
     @needs_runner
+    def test_a_digitone_start_is_built_through_digirun(self):
+        """A Digitone start plan goes through analogrun with DIGIRUN_PATH set, as a batch run does,
+        so analogrun can hand it to digirun; its data steps still go through analogrun's `data`."""
+        here = os.path.join(self.with_starts('digitone'), 'digitone')
+        with open(os.path.join(here, 'testslot-cleared.txt'), 'w', encoding='utf-8') as fh:
+            fh.write('format = 1\nname = start testslot-cleared\nunit = digitone\nemulator = yes\n'
+                     'base = testslot\ndata = clear /projects/121\n\n[shot]\nshot x.png\n')
+        saved = daemon.DIGIHEALTH
+        daemon.DIGIHEALTH = TMP
+        self.addCleanup(setattr, daemon, 'DIGIHEALTH', saved)
+        chain = daemon.start_chain('digitone', 'testslot-cleared')
+        calls = []
+
+        def run(cmd, **kw):
+            path = kw.get('env', {}).get('DIGIRUN_PATH')
+            if 'data' in cmd:
+                calls.append(('data', cmd[cmd.index('data') + 1]))
+                return subprocess.CompletedProcess(cmd, 0, 'ok\n', '')
+            twin = read(cmd[-1])
+            out = re.search(r'^out = (.+)$', twin, re.M).group(1)
+            calls.append(('plan', path))
+            os.makedirs(out, exist_ok=True)
+            with open(os.path.join(out, 'summary.json'), 'w') as fh:
+                json.dump({'emulator': True, 'pass': True}, fh)
+            return subprocess.CompletedProcess(cmd, 0, 'x on the emulator: PASS (1 steps, 1 s) - %s\n' % out, '')
+        import types
+        daemon.subprocess = types.SimpleNamespace(**dict(vars(subprocess), run=run))
+        self.addCleanup(setattr, daemon, 'subprocess', subprocess)
+        work = os.path.join(TMP, 'start-digitone')
+        self.assertIsNone(self.d.start_steps(self.s, 'digitone', dict(start='testslot-cleared', start_chain=chain),
+                                             'tcp:127.0.0.1:7005', work, 5))
+        tools = os.path.join(TMP, 'tools')
+        self.assertEqual(calls, [('plan', tools), ('data', 'clear'), ('plan', tools)])
+
+    def test_digitone_starts_ship(self):
+        """The Digitone ships the four built-in starts, and its templates start from testslot-cleared."""
+        self.assertEqual(sorted(f for f in os.listdir(os.path.join(HERE, 'starts', 'digitone'))),
+                         ['dirty.txt', 'occupied.txt', 'testslot-cleared.txt', 'testslot.txt'])
+        for name in ('setup-test-project', 'capture-with-level-check', 'listen'):
+            text = read(os.path.join(HERE, 'templates', 'digitone', name + '.txt'))
+            self.assertIn('\nstart = testslot-cleared\n', text, name)
+            self.assertIn('say contrast occupied, testslot:', text, name)
+
+    @needs_runner
     def test_required_starts_where_release_empties_the_test_slots(self, unit='rytm'):
         """A unit whose release empties its test slots (clear_at_release) is never found with them
         full: its plans run from testslot-cleared, the state every release leaves, not occupied."""

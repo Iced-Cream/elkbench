@@ -1,0 +1,158 @@
+# elkbench built-in start for the Digitone (OS 1.44 with a remote-key path, such as a digihealth
+# build), emulator only. A gate batch runs it on a fresh emulator and runs hardware plans from its
+# end state (docs/testing-practices.md, "Messy starts and contrast runs"); digiemu keeps no start
+# snapshots yet, so each run builds it first. Key paths are those of templates/digitone. Names and
+# slots follow the example write policy (examples/write-policy): `~T ` test names, test slots 121-128.
+format = 1
+unit = digitone
+emulator = yes
+name = start occupied
+out = runs
+note = slots 121-128 hold ~T OCC1-~T OCC8 (SAVE PROJECT AS copies of the card's project); the last copy (128) is the active project
+
+[start]
+# A fresh digiemu card boots to the home screen with no prompt; the NOs do nothing there
+wait 3
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot start-home.png
+
+# SAVE PROJECT AS makes the saved copy the active project (as on the A4), so the active project
+# at the end is ~T OCC8 in 128: a saved project, not one of the card's own, with every test slot full.
+[setup: SAVE PROJECT AS 121]
+say proves setup: a copy of the project of the card saved into 121 as ~T OCC1
+save-project 121 "~T OCC1" SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),YES,YES
+wait 2
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot occ1-saved.png
+
+[setup: SAVE PROJECT AS 122]
+say proves setup: a copy of the project of the card saved into 122 as ~T OCC2
+save-project 122 "~T OCC2" SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),DOWN,YES,YES
+wait 2
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot occ2-saved.png
+
+[setup: SAVE PROJECT AS 123]
+say proves setup: a copy of the project of the card saved into 123 as ~T OCC3
+save-project 123 "~T OCC3" SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot occ3-saved.png
+
+[setup: SAVE PROJECT AS 124]
+say proves setup: a copy of the project of the card saved into 124 as ~T OCC4
+save-project 124 "~T OCC4" SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),DOWN,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot occ4-saved.png
+
+[setup: SAVE PROJECT AS 125]
+say proves setup: a copy of the project of the card saved into 125 as ~T OCC5
+save-project 125 "~T OCC5" SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),DOWN,DOWN,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot occ5-saved.png
+
+[setup: SAVE PROJECT AS 126]
+say proves setup: a copy of the project of the card saved into 126 as ~T OCC6
+save-project 126 "~T OCC6" SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),DOWN,DOWN,DOWN,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot occ6-saved.png
+
+[setup: SAVE PROJECT AS 127]
+say proves setup: a copy of the project of the card saved into 127 as ~T OCC7
+save-project 127 "~T OCC7" SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),DOWN,DOWN,DOWN,DOWN,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot occ7-saved.png
+
+[setup: SAVE PROJECT AS 128]
+say proves setup: a copy of the project of the card saved into 128 as ~T OCC8
+save-project 128 "~T OCC8" SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),DOWN,DOWN,DOWN,DOWN,DOWN,DOWN,DOWN,YES,YES
+wait 2
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+shot occ8-saved.png
+
+[the slots]
+say proves evidence: 121-128 hold ~T OCC1-8, the marker on 128
+keys SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 1.0
+keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),DOWN,DOWN,DOWN,DOWN,DOWN,DOWN,DOWN
+wait 0.6
+shot manage-121.png
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+
+[end state]
+say proves evidence: the home title row
+shot end-home.png

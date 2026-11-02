@@ -26,6 +26,10 @@ name = setup test project in 121
 unit = digitone
 refs = refs/digitone-setup-test-project   # this plan's own references: never share them with another plan
 out = runs
+# Every Digitone hardware plan starts from empty test slots: its own gate run starts from the
+# built-in start testslot-cleared, the state every release leaves with clear_at_release (the last
+# test project still the working project, its slot 121 cleared, the active marker on 121).
+start = testslot-cleared
 note = ~T SETUP (slot 121, CREATE NEW) active, unsaved changes none
 
 [start]
@@ -52,6 +56,10 @@ shot start-manage-121.png
 # leaves the marker's rows out: rows 56-57 and 61-63 hold the slot number and the top and bottom
 # rows of a name's letters, which an empty slot's dashed line does not light. Record it in the
 # emulator, then see it fail with 121 filled.
+# The contrast: from the built-in occupied and testslot starts, 121 holds a project, and the
+# empty-slot check stops the run. From testslot-cleared (this plan's own start) and dirty, 121 is
+# empty and the plan passes.
+say contrast occupied, testslot: slot 121 holds a project, so the empty-slot check stops the run
 expect-screen manage-121-empty 2 rows=56-57
 expect-screen manage-121-empty 2 rows=61-63
 # back home: the list, PROJECT, SETTINGS (a spare NO on the home screen does nothing)

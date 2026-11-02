@@ -30,6 +30,21 @@ test slots 121-128. A setup with other rules keeps its own copies.
 | `occupied` | slots 121-128 holding `~T OCC1`-`~T OCC8` (SAVE PROJECT AS copies of the card's project), the card's own project loaded back and active |
 | `testslot-cleared` | `testslot`, then slot 121 cleared through the data store, as a run's backup and clear leaves a unit: `~T START` still the working project, 121 empty with the active-project marker on it |
 
+## Digitone (OS 1.44 with a remote-key path, such as a digihealth build)
+
+| start | leaves |
+|---|---|
+| `dirty` | the card's own project active, as booted, an unsaved change from knob A, track 1's TRIG page open |
+| `testslot` | a new test project `~T START` (CREATE NEW, then SAVE PROJECT AS into 121), active, an unsaved change from knob A, track 1's TRIG page open |
+| `occupied` | slots 121-128 holding `~T OCC1`-`~T OCC8` (SAVE PROJECT AS copies of the card's project); the last copy, in 128, is the active project |
+| `testslot-cleared` | `testslot`, then slot 121 cleared through the data store, as every release with `clear_at_release` leaves a unit: `~T START` still the working project, 121 empty with the active-project marker on it |
+
+Every Digitone hardware plan starts from empty test slots: the Digitone templates say
+`start = testslot-cleared`, so a gate batch runs each one's own run from that start, and the
+`occupied` and `testslot` runs (121 holds a project) must stop at the empty-slot check. digiemu
+keeps no start snapshots yet, so each run from a start builds it first (`testslot-cleared`
+builds `testslot`, then clears 121): a Digitone gate takes longer than a Rytm one.
+
 The A4 builds its test projects from CREATE NEW, not INIT NEW: INIT NEW into a slot that once held
 a project brings back that project's kit 1 (see `templates/a4/setup-test-project.txt`). SAVE
 PROJECT AS makes the saved copy active, so `occupied` loads the card's project back last.
@@ -76,5 +91,4 @@ Known limits:
   shows its new value for a moment after the turn).
 - The start plans end in shots, not reference checks: no reference screens ship. Each start's
   build run keeps its shots with its snapshot (`run_dir` in the snapshot's `.json`).
-- There are no starts for the Digitone or Digitakt yet: those units are gated from `fresh` and
-  from the starts a plan's contrasts name (none but `fresh` there).
+- There are no starts for the Digitakt yet: it is gated from `fresh` only.
