@@ -10,7 +10,8 @@
 # Before this plan, the run backs up and clears the test slot (outside the plan for now):
 #   data get /projects/121      (the backup, into the run's evidence folder)
 #   data clear /projects/121
-# List both in the go request as writes: "slot 121 (holds X at listing time: backed up and erased)".
+# List both in the go request as writes: "slot 121, whatever it holds: backed up and erased". The go
+# covers any project in the test slot, not one by name.
 # The turn in the second section makes the active project unsaved, and CREATE NEW then discards it
 # (answered NO to the save): list that in the go request too.
 format = 1
