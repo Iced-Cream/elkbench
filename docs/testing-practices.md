@@ -129,7 +129,9 @@ close those gaps.
   example write policy (`examples/write-policy/`); a setup with other rules points `starts` in
   config.toml at its own folder.
 - **Every plan runs from the messy starts.** A hardware plan's go needs a run from `dirty` and
-  from `occupied` (where the unit has them) besides its own pass. Each must pass, or stop
+  from `occupied` (where the unit has them) besides its own pass. Where release empties the
+  test slots (`clear_at_release`, section 6), a unit is never found with them full but always
+  as a release leaves it, so `testslot-cleared` takes the place of `occupied`. Each must pass, or stop
   where the plan says it stops (next point). A plan that runs half way and then fails from a
   messy start would do the same on a unit left that way. A plan that flashes is left out: it
   starts on the OS before its flash (often stock, where no start can be built), and the flash is

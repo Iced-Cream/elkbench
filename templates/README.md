@@ -26,13 +26,15 @@ compared rows against what will differ on the unit before asking for a go.
 
 Each template's start check names its contrast (`say contrast START: why`): the built-in
 starts (`starts/`) from which it must stop the run. A gate batch runs it from those and from
-`dirty` and `occupied`. The capture, listen and readback templates stop on a fresh emulator, so
+`dirty` and `occupied` (`testslot-cleared` instead of `occupied` where the unit sets
+`clear_at_release`). The capture, listen and readback templates stop on a fresh emulator, so
 their own pass comes from `run_plan` after the setup plan (or the plan that set the kept value).
 
 Open, so far:
-- **Backup and clear of the test slot** happen outside the plan: at the previous release where
-  the unit sets `clear_at_release` (config.toml), else as hand steps (`data get`, `data clear`)
-  listed in the go request.
+- **Backup and clear of the test slot**: where the unit sets `clear_at_release` (config.toml),
+  the previous release did them and the go request's AT RELEASE line covers them, so nothing
+  runs before the plan. Without it they are hand steps (`data get`, `data clear`) before the
+  plan, listed in the go request.
 - **The level check's reference take** (`level-ref.wav`) is recorded once on the unit from the
   same steps; the emulator makes no voice sound.
 - **A run nonce in names** (`~T {run}`) is not filled in by elkbench: a reference screen showing

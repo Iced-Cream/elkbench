@@ -38,9 +38,9 @@ wait 0.8
 keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
 wait 0.6
 shot start-manage-121.png
-# The start check: the cursor row at the list's top (rows 0-6) reads 121 and an empty slot, which only
-# the run's own clear produced. Record it in the emulator after an emulator-only step has filled and
-# cleared 121, so the clearing path is tested too.
+# The start check: the cursor row at the list's top (rows 0-6) reads 121 and an empty slot, as a clear
+# leaves it (the last release's, or the run's own). Record it from a cleared 121, as on the unit (the
+# built-in testslot-cleared start leaves one), or after an emulator-only step has filled and cleared it.
 # The contrast: from the built-in occupied and testslot starts, 121 holds a project, and the empty-slot
 # check has to stop the run there (a gate batch runs both). From the dirty start the plan has to pass.
 say contrast occupied, testslot: slot 121 holds a project, so the cleared-slot check stops the run

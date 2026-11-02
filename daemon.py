@@ -77,8 +77,11 @@ POWER_OFF_BUILD_MARK = b'power off: no --card, nothing kept'
 GATE_PLANS_MAX = 16                             # plans one gate batch may take
 KNOWN_STARTS = ('a fresh emulator', 'a setup snapshot')    # pass starts a gate batch may keep
 # Built-in starts (proposal B): a hardware plan's go needs a run from each of these the unit has
-# (in the starts folder), which passes or stops where the plan's `say contrast` says
+# (in the starts folder), which passes or stops where the plan's `say contrast` says. A unit whose
+# release empties its test slots (`clear_at_release`) is never found with them full, but always
+# the way a release leaves it: its plans run from `testslot-cleared` instead of `occupied`.
 REQUIRED_STARTS = ('dirty', 'occupied')
+REQUIRED_STARTS_CLEARED = ('dirty', 'testslot-cleared')
 STATUS_WAIT, STATUS_WAIT_MAX = 300, 600     # s that status run_id waits for a run to end
 IDLE_EXIT = 30 * 60
 # What the units are; config.toml can override any key, and adds where evidence goes.
@@ -338,6 +341,11 @@ def start_chain(unit, start, seen=()):
     return chain + [(start, path, start_data(settings.get('data') or '', os.path.dirname(path), start))]
 
 
+def required_starts(unit):
+    """The built-in starts every hardware plan of this unit runs from (where the unit has them)."""
+    return REQUIRED_STARTS_CLEARED if UNITS.get(unit, {}).get('clear_at_release') else REQUIRED_STARTS
+
+
 def starts_needed(info):
     """-> {start: the section a run from it must stop in, or None: it must pass} for a hardware
     plan: the required starts its unit has (not for a plan that flashes), and every start its
@@ -346,7 +354,7 @@ def starts_needed(info):
     stops = plancheck.expected_stops(info['steps'])
     # a plan that flashes starts on the OS before its flash (often stock, with no remote keys to
     # build a start with), and the flash itself is gated as a transition: only its own contrasts
-    want = {} if info.get('flash') else {st: stops.get(st) for st in REQUIRED_STARTS if st in have}
+    want = {} if info.get('flash') else {st: stops.get(st) for st in required_starts(info['unit']) if st in have}
     want.update(stops)
     if info.get('home') and want.get(info['home'], 0) is None:
         del want[info['home']]           # the plan's own run starts there: its pass covers it
@@ -4006,7 +4014,8 @@ TOOLS = [
               'Such a batch never counts as the emulator pass a hardware run needs. With gate: the emulator '
               'gate for several hardware plans at once: each plan once, side by side, each on a fresh emulator '
               '(resuming its setup snapshot when it has snapshot-after); a pass is recorded as run_plan\'s is. '
-              'Each plan also runs from every start its go needs (the unit\'s built-in dirty and occupied, '
+              'Each plan also runs from every start its go needs (the unit\'s built-in dirty and occupied, or testslot-cleared '
+              'for occupied where the unit sets clear_at_release, '
               'and the starts its `say contrast` lines name), each run passing or stopping where the contrast '
               'says. Runs whose result still stands (same steps, refs, OS files, fresh start) are left out unless force.',
      S(variants={'type': 'array', 'description': '1-6 arms, the first is the one the others are compared with',
