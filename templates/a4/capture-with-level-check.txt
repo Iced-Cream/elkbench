@@ -61,8 +61,7 @@ tap RECORD
 wait 0.6
 tap PLAY
 wait 1
-# the play indicator on (its rows only): proves the precondition the take depends on
-# the play indicator only (a triangle playing, a square stopped)
+# the play indicator only (a triangle playing, a square stopped): proves the precondition the take depends on
 expect-screen playing 2 rows=2-6 cols=119-125
 
 [level check (hardware)]
