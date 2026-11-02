@@ -76,7 +76,7 @@ reaches the hardware only with something that has already worked in the emulator
 *elkbench enforces*: a hardware plan or flash needs a passing emulator run of the same steps,
 reference screens and OS file (sha256). A plan that flashes gets that emulator run named for
 it, and a pass whose OS file differs is refused before the owner is asked. An emulator run of a
-Rytm or A4 plan reads every saved project before and after the steps (read only, through the
+plan (on every unit) reads every saved project before and after the steps (read only, through the
 data store), and fails if one was added, removed, renamed or changed outside the slots the plan
 saves into. Going back to the
 emulator gives the unit back (section 4).
@@ -302,7 +302,7 @@ policy, `examples/write-policy/policy.py` (tests beside it).
   there.
 - **Test slots empty at every release:** every run ends with 121-128 empty, whatever it put
   there and however it ended: `clear_at_release = '121-128'` in each unit's section of
-  config.toml makes `release` back each project there up into the run folder, erase it and list
+  config.toml (Rytm, A4, Digitone) makes `release` back each project there up into the run folder, erase it and list
   the slots empty, and keeps the claim if it can't. So a run finds them empty, and its setup's
   start check (121 empty) only stops it when a session ended without releasing. Nobody saves
   their own work there by hand, so the cleanup touches only test projects.

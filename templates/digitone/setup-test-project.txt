@@ -3,7 +3,9 @@
 # Rules behind it: docs/testing-practices.md, "Plans: what a check must show". Paths found by trial
 # in digiemu (2026-11-02).
 #
-# Before this plan, the run backs up and clears the test slot (outside the plan for now):
+# The test slot must be empty when this plan starts. With `clear_at_release` covering it in
+# config.toml (as in the example setup: 121-128), every release leaves it so, and the go request
+# says so. Without it, the run backs up and clears the test slot before this plan (hand steps):
 #   data get /projects/121      (the backup, into the run's evidence folder)
 #   data clear /projects/121
 # List both in the go request as writes: "slot 121, whatever it holds: backed up and erased". The go
@@ -35,7 +37,7 @@ keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUN
 wait 0.6
 shot start-manage-121.png
 # The start check: 121's row in the list's bottom row (rows 56-63, cols 0-80: its number and name) shows the dashed line of
-# an empty slot, which only the run's own clear produced. Record it in the emulator after an
+# an empty slot, which only a clear produced (the last release's, or the run's own). Record it in the emulator after an
 # emulator-only step has filled and cleared 121, so the clearing path is tested too.
 expect-screen manage-121-cleared 2 rows=56-63 cols=0-80
 
