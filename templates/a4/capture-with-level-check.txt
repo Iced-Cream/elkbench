@@ -80,6 +80,27 @@ wait 1.0
 # a new project's home screen, compared whole
 expect-screen new-home 3
 
+[setup: oscillator retrig on]
+say proves setup: both oscillators start each note in phase, so takes match below the note too
+# Free-running oscillators start each note at another phase, and the bands far below the note
+# then differ by several dB from take to take (seen on the unit with retrig off). TRG (knob G on
+# OSC2's second page, OSC 1&2) restarts both in phase at each note. It belongs to the kit, so it
+# is set after the reload. OSC2 steps between P 1/2 and P 2/2, so it is entered from FLTR: its
+# first press opens P 1/2, the second P 2/2. An on/off value: one turn of 32 sets it, no YES.
+tap T1
+wait 0.5
+tap FLTR
+wait 0.6
+tap OSC2
+wait 0.6
+tap OSC2
+wait 0.6
+turn G 32 8
+wait 1.5
+shot trg-on.png
+# the page (OSC 1&2, by its knob labels and dials) with TRG on, compared whole below the title
+expect-screen osc12-trg-on 2 rows=8-63
+
 [setup: T1's OSC1 page, the sequencer stopped]
 say proves setup: the page the trig is recorded from, and a stopped sequencer
 # OSC1 steps between OSC1 (P 1/2) and NOISE (P 2/2), and a track key keeps the page, so OSC1 is
