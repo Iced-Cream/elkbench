@@ -6,7 +6,7 @@
 #
 # The level check compares a short take with this plan's own reference take (level-ref.wav in its
 # refs folder), recorded once on the unit from the same steps and kept. audio-compare fails on
-# silence; audio-dropouts alone does not (silence has no dropouts). No plan step writes into refs:
+# silence. No plan step writes into refs:
 # the first unit run records the takes with audio-record alone (a copy of this plan without the
 # audio-compare lines), and the person copies level.wav and take.wav from its run folder into
 # this plan's refs folder as level-ref.wav and take-ref.wav. The channel numbers are
@@ -114,8 +114,16 @@ audio-compare level-ref level 3
 
 [take (hardware)]
 say proves works: the take, compared with its reference
+# No audio-dropouts here: the new project's T1 is a raw saw, and a saw's reset once per cycle is
+# a true discontinuity that its click test reports (audio/audiocheck.py). Judge clicks on a steady
+# signal; on a synth track, audio-compare against the reference take is the check.
 audio-record 10 take
-audio-dropouts take 1,2
 audio-compare take-ref take 1,2
+
+[after: the sequencer stopped]
+say proves setup: the pattern is stopped again, so the next plan starts as the unit run does
+# Not in a (hardware) section, so the emulator runs it too: an emulator reference recorded by the
+# next plan then shows the sequencer stopped, as on the unit.
 tap STOP
 wait 1
+expect-screen stopped 2 rows=2-6 cols=119-125
