@@ -14,9 +14,110 @@ unit = digitone
 refs = refs/digitone-capture-with-level-check
 out = runs
 audio-tools = C:/path/to/elkbench/audio
-note = ~T SETUP active, loaded new (A01 UNTITLED, 120.0); stopped
+note = ~T SETUP (slot 121, INIT NEW) active, T1 trig on step 1; stopped at the end
+#
+# The test project setup runs inside the plan (the same sections as setup-test-project.txt), so
+# each gate runs from a fresh emulator: digiemu has no setup snapshots. Before the plan, the run
+# backs up and clears slot 121 (data get, data clear), as for setup-test-project.
 
 [start]
+# Home first (NO closes SETTINGS and its panels), then MANAGE PROJECTS from the SETTINGS list's
+# top (it does not wrap), then the cursor on 121 by a fixed count: FUNC(UP) and FUNC(DOWN) move
+# eight slots, so 18 up reach the top whatever the remembered cursor, and 15 down put 121 in the
+# list's bottom row.
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+keys SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 1.0
+keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN)
+wait 0.6
+shot start-manage-121.png
+# The start check: 121's name field in the bottom row (rows 56-63, cols 32-80) is the dashed line of
+# an empty slot, which only the run's own clear produced. Record it in the emulator after an
+# emulator-only step has filled and cleared 121, so the clearing path is tested too.
+expect-screen manage-121-cleared 2 rows=56-63 cols=32-80
+
+[setup: INIT NEW into 121]
+say proves setup: a new project in 121, named by the plan
+# RIGHT opens the slot's panel; on an empty slot it lists INIT NEW, SAVE TO, TOGGLE, and INIT NEW
+# writes at once (no naming screen, no confirm). save-project names the slot over the data store
+# afterwards. Never press YES in the list without the panel: it ticks the slot. Home first: in the
+# MANAGE PROJECTS list SETTINGS goes home instead of opening SETTINGS.
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+save-project 121 "~T SETUP" SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES,FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),RIGHT,UP,UP,UP,YES
+wait 6
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.5
+shot init-new.png
+
+[setup: LOAD FROM 121, and prove the load by content]
+say proves setup: the new project is the active one (its title row, not its name)
+# With another project active (as on the unit), LOAD FROM asks SAVE '<name>' BEFORE LOADING? Y/N
+# first, then ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N; both come only when the working
+# project has unsaved changes. A plan cannot branch on whether they come, so this turn makes the
+# working project modified, and both always come. It loses nothing the load would not lose anyway:
+# YES at PROCEED discards every unsaved change, so the go request names that.
+turn A 40
+wait 1
+keys SETTINGS,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 1.0
+keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN)
+wait 0.6
+tap RIGHT
+wait 0.8
+# on a filled slot the panel lists CLEAR, DELETE, RENAME, LOAD FROM, SAVE TO, TOGGLE
+keys UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN
+wait 0.4
+tap YES
+wait 1
+shot save-before.png
+# Always NO: YES saves the active project outside the plan's slots (the checker refuses anything
+# else after a save-before-load check). The box is as wide as the project's name, so the check
+# compares only the fixed second line, BEFORE LOADING? Y/N (rows 34-40), inside the narrowest box
+# seen (cols 20-108, an 11-character name).
+expect-screen save-before-loading 2 rows=34-40 cols=20-108
+tap NO
+wait 1
+shot proceed.png
+# the PROCEED box's fixed text (rows 25-29 and 35-39) inside its frame, the same whatever the name
+expect-screen proceed-with-loading 2 rows=20-44 cols=7-121
+tap YES
+# the load takes a while, and digirun gets no answer meanwhile
+wait 8
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 0.6
+tap NO
+wait 1.5
+shot loaded.png
+# The content proof: the home title row (rows 0-9) of a new project reads A01 UNTITLED and 120.0
+# (the factory project reads A01 IMAGINE and 86.0). A name check passes on a copy of any project.
+expect-screen loaded-new-untitled 2 rows=0-9
+
+[T1 TRIG page, from home]
+say proves setup: track 1 TRIG page, entered from home
 # Home first, then track 1 TRIG page from there. The page title row (rows 0-9) shows "Trig
 # Parameters" only for a moment, so the check compares rows 10-63: they differ from the SYN1 page
 # (cols 18-127) and from T2 TRIG page (the track digit, rows 24-31 cols 5-9), so one check proves

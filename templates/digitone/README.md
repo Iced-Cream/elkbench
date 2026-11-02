@@ -21,6 +21,11 @@ Where the Digitone differs from the Rytm:
   the working project has unsaved changes. The setup template turns an encoder first so both
   always come; YES at PROCEED discards every unsaved change, as on the Rytm.
 - **A test project is marked by its pattern A01's name** in a write policy, not by a kit.
+- **Keys after a load need digirun to reopen its key session.** The load stops the unit
+  answering; a digirun from digihealth branch `digirun-reopen-session` opens a new key session
+  for the next key (an older one stops the plan there).
+- **Capture and listen carry the setup inside**, so each runs from a fresh emulator (digiemu has
+  no setup snapshots).
 - **No `ping` or `capture`** with a digirun that lacks them (digihealth's runner-capture-ping
   adds them), so the flash gate keeps a shot only.
 - **No power-cycle template**: the power-cycle step is Rytm and A4 only.
