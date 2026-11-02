@@ -6,7 +6,10 @@
 #
 # The level check compares a short take with this plan's own reference take (level-ref.wav in its
 # refs folder), recorded once on the unit from the same steps and kept. audio-compare fails on
-# silence; audio-dropouts alone does not (silence has no dropouts). The channel numbers are
+# silence; audio-dropouts alone does not (silence has no dropouts). No plan step writes into refs:
+# the first unit run records the takes with audio-record alone (a copy of this plan without the
+# audio-compare lines), and the person copies level.wav and take.wav from its run folder into
+# this plan's refs folder as level-ref.wav and take-ref.wav. The channel numbers are
 # Overbridge's for the A4 MKII: read them from a recording's .channels.txt before the go.
 format = 1
 name = capture with level check
@@ -14,6 +17,9 @@ unit = a4
 refs = refs/a4-capture-with-level-check
 out = runs
 audio-tools = C:/path/to/elkbench/audio
+audio-driver = Elektron Analog Four MKII  # the ASIO driver audio-record records from
+# audio-python = PATH                 # optional: a Python with numpy and scipy for the audio checks,
+#                                     # when the daemon's own has none
 note = ~T SETUP active, unsaved: T1 trig on step 1; stopped
 
 [start]

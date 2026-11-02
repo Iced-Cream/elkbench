@@ -41,6 +41,15 @@ shot start-manage-121.png
 # the slot numbers and the name fields. The scrollbar (cols 122-127) is left out too.
 expect-screen manage-121-128-empty 2 rows=0-63 cols=0-28
 expect-screen manage-121-128-empty 2 rows=0-63 cols=31-121
+# back home: the list, PROJECT, GLOBAL (a spare NO on the home screen does nothing)
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
 
 [setup: INIT NEW into 121]
 say proves setup: a new project in 121, named by the plan
