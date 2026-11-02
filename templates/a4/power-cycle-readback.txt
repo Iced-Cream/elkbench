@@ -30,7 +30,8 @@ wait 0.6
 tap LFO
 wait 1.0
 shot readback.png
-# the value the earlier plan set and saved, e.g. LFO1's DEST field (the rows below the title): stop otherwise
+# the value the earlier plan set and saved, e.g. LFO1's first DST (knob G; LFO 1 P 1/2 has SPD MUL
+# FAD SPH MOD on top, WAV DST DEP DST DEP below), in the rows below the title bar: stop otherwise
 expect-screen kept-value 1 rows=8-63
 
 [the rest of the plan]

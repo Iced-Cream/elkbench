@@ -17,12 +17,17 @@ tap NO
 wait 0.5
 tap NO
 wait 1.0
+# OSC1 steps between OSC1 (P 1/2) and NOISE (P 2/2), and a track key keeps the page, so OSC1 is
+# entered from another page (FLTR): its first press then always opens P 1/2.
 tap T1
 wait 0.5
+tap FLTR
+wait 0.6
 tap OSC1
 wait 0.6
-# the start check: T1's OSC1 page (its title rows), reached from a track key
-expect-screen t1-osc1-page 2 rows=0-7
+# the start check: T1's OSC1 page 1/2, by its knob labels and dials (rows 8-63). The title
+# bar names the page only for a moment before it goes back to the kit's name.
+expect-screen t1-osc1-page 2 rows=8-63
 
 [setup: T1 on step 1]
 say proves setup: one T1 trig on step 1 (grid recording: a key on the live screen adds no trig)
@@ -37,7 +42,8 @@ wait 0.6
 say proves evidence: the ear of the person, with the pattern proven playing first
 tap PLAY
 wait 1
-expect-screen playing 2 rows=0-7
+# the play indicator only (a triangle playing, a square stopped)
+expect-screen playing 2 rows=2-6 cols=119-125
 listen T1 plays once per bar, steady, with no clicks or dropouts. allowed: nothing on the unit; the volume on your own speakers only. needs: the pattern playing (the play indicator was checked on screen). Say finished when done.
 tap STOP
 wait 1
