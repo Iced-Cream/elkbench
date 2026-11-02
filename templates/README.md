@@ -17,6 +17,11 @@ The key sequences are for the Analog Rytm MKII on OS 1.74 with a remote-key path
 screens ship: record each plan's own in the emulator (`run_plan ... record_refs`), and check the
 compared rows against what will differ on the unit before asking for a go.
 
+Each template's start check names its contrast (`say contrast START: why`): the built-in
+starts (`starts/`) from which it must stop the run. A gate batch runs it from those and from
+`dirty` and `occupied`. The capture, listen and readback templates stop on a fresh emulator, so
+their own pass comes from `run_plan` after the setup plan (or the plan that set the kept value).
+
 Open, so far:
 - **Backup and clear of the test slot** happen outside the plan (`data get`, `data clear`), so
   they are listed in the go request as hand steps.

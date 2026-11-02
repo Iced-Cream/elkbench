@@ -28,7 +28,11 @@ wait 0.8
 tap LFO
 wait 1.5
 shot readback.png
-# the value the earlier plan set and saved, e.g. the LFO's DST field (rows 8-31): stop otherwise
+# the value the earlier plan set and saved, e.g. the LFO's DST field (rows 8-31): stop otherwise.
+# The contrast: from a fresh card, or the built-in dirty and occupied starts, no value was kept, so
+# the readback has to stop the run. This plan's own pass comes from run_plan after the plan that
+# set the value (the gate batch runs only its starts).
+say contrast fresh, dirty, occupied: a default project has no kept value, so the readback stops the run
 expect-screen kept-value 1 rows=8-31
 
 [the rest of the plan]

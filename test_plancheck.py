@@ -227,5 +227,19 @@ class Templates(unittest.TestCase):
                             self.fail('%s [%s] %r: %s' % (n, name, l, e))
 
 
+    def test_every_start_parses(self):
+        import shlex
+        folder = os.path.join(HERE, 'starts')
+        files = [os.path.join(r, f) for r, _, fs in os.walk(folder) for f in fs if f.endswith('.txt')]
+        self.assertGreaterEqual(len(files), 3)
+        for p in files:
+            with open(p, encoding='utf-8') as fh:
+                text = fh.read()
+            self.assertRegex(text, r'(?m)^emulator = yes$', p)
+            for name, lines in parse(text):
+                for l in lines:
+                    shlex.split(l, comments=True)
+
+
 if __name__ == '__main__':
     unittest.main()
