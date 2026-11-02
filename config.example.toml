@@ -79,3 +79,5 @@ person = "the person at this PC"
 #                                          # name or 'IN,OUT'): hardware steps and plans with
 #                                          # send/capture ... din use it (Rytm, A4; Digitone and
 #                                          # Digitakt with a digirun.py that has --din); unset: refused
+#                                          # Digitone: give a DIN capture about 8 s (its DIN
+#                                          # reply comes later than over USB)
