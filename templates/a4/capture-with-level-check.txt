@@ -40,7 +40,10 @@ expect-screen test-project-title 2 rows=0-7
 [setup: reload the test project from 121]
 say proves setup: 121 is the active project and loads as a new one, so the pattern has no trig yet
 # Earlier plans in the run may have toggled trigs in the working copy (grid recording toggles a
-# trig: a second RECORD, 1, RECORD takes it away again). So the plan reloads 121 first. A LEVEL
+# trig: a second RECORD, 1, RECORD takes it away again). So the plan reloads 121 first, and 121
+# must hold the setup's project with no trig: a plan that saves 121 reloads it before its change,
+# or a trig saved there makes this plan's toggle remove it (the pattern then plays empty while the
+# play indicator still shows playing, and an emulator gate can't hear that). A LEVEL
 # turn makes the working copy unsaved, so the load always asks, and it asks only PROCEED WITH
 # LOADING? because 121 is the active project (any other project asks SAVE ... BEFORE LOADING?
 # first, and the check stops the run). 121 is reached in MANAGE PROJECTS (every slot, in order),
