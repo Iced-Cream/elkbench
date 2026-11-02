@@ -1,0 +1,79 @@
+# elkbench built-in start for the Analog Four MKII (OS 1.56 with analoghealth), emulator only.
+# A gate batch runs it on a fresh emulator, keeps the end state as a snapshot, and runs hardware
+# plans from there (docs/testing-practices.md, "Messy starts and contrast runs"). Names and slots
+# follow the example write policy (examples/write-policy): `~T ` test names, test slots 121-128.
+format = 1
+unit = a4
+emulator = yes
+name = start dirty
+out = runs
+note = the card's own project (slot 002) active, pattern A02 with kit 2, T1 OSC1 LEV changed unsaved, LFO page open
+
+[start]
+# A fresh A4 emulator card boots to the home screen with no prompt (seen 2026-11-02); the NOs
+# answer any start-up prompt a card may show, and do nothing on the home screen
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+shot start-home.png
+
+[pattern A02, which brings kit 2]
+say proves setup: pattern A02 is active; on the project of the card it links kit 2 (the title row changes kit and BPM)
+# BANK_A shows BANK A : CHOOSE PTN, and a trig key picks the pattern (PTN alone opens the PATTERN
+# menu: RELOAD and SAVE PATTERN). On the card A01 has K001 at 80.0 BPM, A02 K002 at 98.0.
+tap BANK_A
+wait 0.3
+shot bank-a.png
+tap 2
+wait 1.5
+shot a02-home.png
+
+[active project still the card's own]
+say proves evidence: MANAGE PROJECTS marks the project of the card (002) as the active one, 121-128 empty
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP)
+wait 0.6
+shot manage-top.png
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+shot manage-121-128.png
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+
+[an unsaved change: T1 OSC1 LEVEL]
+say proves setup: an unsaved change in the working kit (T1 OSC1 LEV moved, nothing saved)
+# OSC1 is entered from FLTR, so its first press opens P 1/2. LEV is knob E; while it turns, its
+# value replaces the dial for a moment, so the shot right after the turn shows the new value
+# (99 after 12 ticks down, on the card's kits and a new one). Remote turns under about 3 ticks are dropped.
+tap T1
+wait 0.5
+tap FLTR
+wait 0.6
+tap OSC1
+wait 0.6
+shot change-osc1-before.png
+turn E -12 4
+wait 0.3
+shot change-osc1-value.png
+wait 1.5
+shot change-osc1-after.png
+
+[end state]
+say proves evidence: the home title row (kit, BPM) and the LFO page left open
+tap NO
+wait 0.5
+shot end-home.png
+tap LFO
+wait 1
+shot end-lfo.png

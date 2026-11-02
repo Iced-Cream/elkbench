@@ -1,0 +1,37 @@
+# elkbench built-in start for the Analog Four MKII (OS 1.56 with analoghealth), emulator only.
+# The state a run's backup and clear leaves: the test project loaded from slot 121 is still the
+# working project, slot 121 itself is empty, and the active-project marker stays on 121.
+# It builds on `testslot` (base) and clears 121 through the data store (data), as a run does,
+# before its own section. Names and slots follow the example write policy (examples/write-policy):
+# `~T ` test names, test slots 121-128.
+format = 1
+unit = a4
+emulator = yes
+name = start testslot-cleared
+out = runs
+base = testslot
+data = clear /projects/121
+note = testslot's end state, then slot 121 cleared through the data store: ~T START still the working project, 121 empty, LFO page open
+
+[cleared slot]
+say proves evidence: MANAGE PROJECTS shows 121 empty, with the active-project marker still on it
+keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
+wait 0.6
+shot manage-121-cleared.png
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+
+[end state]
+say proves evidence: the home title row (kit, BPM) and the LFO page left open
+shot end-home.png
+tap LFO
+wait 1
+shot end-lfo.png

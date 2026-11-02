@@ -46,6 +46,9 @@ shot start-manage-121.png
 # small marker at the left of its name field, even when its slot has been cleared, so the check is
 # in two parts that leave that column out: the slot number and the name field. The scrollbar
 # (cols 122-127) is left out too.
+# The contrast: from the built-in occupied and testslot starts, 121 holds a project, and the
+# empty-slot check stops the run.
+say contrast occupied, testslot: slot 121 holds a project, so the empty-slot check stops the run
 expect-screen manage-121-empty 2 rows=0-7 cols=0-28
 expect-screen manage-121-empty 2 rows=0-7 cols=31-121
 # back home: the list, PROJECT, GLOBAL (a spare NO on the home screen does nothing)
