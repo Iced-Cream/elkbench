@@ -117,7 +117,7 @@ tap NO
 wait 0.5
 
 [setup: the card's own project active again]
-say proves setup: the card's project loaded back (SAVE ... BEFORE LOADING? answered NO)
+say proves setup: the project of the card loaded back (SAVE ... BEFORE LOADING? answered NO)
 # CARD_SLOT: the slot of the card's own project, from the dirty start's MANAGE shot
 keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
 wait 0.8
@@ -145,7 +145,7 @@ wait 1.0
 shot loaded.png
 
 [the slots and the active project]
-say proves evidence: 121-128 hold ~T OCC1-8 and the card's project is the active one
+say proves evidence: 121-128 hold ~T OCC1-8 and the project of the card is the active one
 keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
 wait 0.8
 keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP

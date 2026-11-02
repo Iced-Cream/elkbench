@@ -36,9 +36,10 @@ shot before.png
 # FAD SPH MOD on top, WAV DST DEP DST DEP below), in the rows below the title bar: stop otherwise.
 # A DST knob opens the destination list as a popup, and the value is set only by YES: the earlier
 # plan confirms it with YES and checks it is shown before it saves.
-# The contrast: on a fresh card the earlier plan set no value, so this check has to stop the run.
+# The contrast: on a fresh card, or from the built-in dirty, occupied and testslot-cleared starts,
+# the earlier plan set no value, so this check has to stop the run.
 # This plan's own pass comes from run_plan after that plan.
-say contrast fresh: a default project has no such value, so the readback stops the run
+say contrast fresh, dirty, occupied, testslot-cleared: a default project has no such value, so the readback stops the run
 expect-screen kept-value 1 rows=8-63
 
 [kept after the power cycle]

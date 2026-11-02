@@ -21,7 +21,7 @@ wait 1.0
 shot start-home.png
 
 [pattern A02]
-say proves setup: pattern A02 is active (the title row names another pattern than a fresh card's)
+say proves setup: pattern A02 is active (the title row names another pattern than a fresh card has)
 # PTN shows the pattern menu, and a trig key picks the pattern in the bank shown
 tap PTN
 wait 0.3
@@ -31,7 +31,7 @@ wait 1.5
 shot a02-home.png
 
 [active project still the card's own]
-say proves evidence: MANAGE PROJECTS marks the card's project as the active one, 121-128 empty
+say proves evidence: MANAGE PROJECTS marks the project of the card as the active one, 121-128 empty
 keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
 wait 0.8
 keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
