@@ -63,15 +63,15 @@ person = "the person at this PC"
 # analogrun, digiusb, digirun, elkflash and obtr (for example your own scripts).
 # guard = ['my_record_script']
 
-# Per unit (rytm, a4, digitone): any built-in fact (port, emu, asio, engine) can be
+# Per unit (rytm, a4, digitone, digitakt): any built-in fact (port, emu, asio, engine) can be
 # overridden too.
 # [units.rytm]
 # evidence = 'C:\tests\rytm\runs'          # run folders and test-log.md
 # refs = 'C:\tests\rytm\refs'              # default folder for expect_screen references
 # stock = ['C:\os\Analog-Rytm_MKII_OS1.74.syx']   # what counts as "stock" at release
 # clear_at_release = '121-128'           # project slots release backs up, erases and lists empty, so
-#                                        # every run finds them so (Rytm and A4; the example policy's
-#                                        # test slots); the go request names it
+#                                        # every run finds them so (Rytm, A4 and Digitone; the example
+#                                        # policy's test slots); the go request names it
 # no_stats = ['C:\os\remote-only.syx']     # builds whose runner channel has no stats command:
 #                                          # plans and steps with a stats step are refused on them
 # emu_card = 'C:\tests\rytm\card.img'      # the emulator tool boots a fresh copy of it

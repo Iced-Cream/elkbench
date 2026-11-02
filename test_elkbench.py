@@ -18,6 +18,7 @@ import tempfile
 import threading
 import time
 import tomllib
+import types
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -296,7 +297,9 @@ class InProcess(unittest.TestCase):
         self.s = daemon.Session('test-session-c', os.getpid(), TMP)
         self.folder = os.path.join(TMP, 'ARMKII')
         self.saved = dict(daemon.UNITS['rytm'])
+        self.saved_a4 = dict(daemon.UNITS['a4'])
         daemon.UNITS['rytm']['evidence'] = os.path.join(self.folder, 'runs')
+        daemon.UNITS['a4']['evidence'] = os.path.join(TMP, 'A4MKII', 'runs')
         self.started = []
         self.d.start = lambda job, cmd, cwd, done, port=None: (self.started.append((job, cmd)),
                                                                setattr(self, 'done', done),
@@ -305,8 +308,10 @@ class InProcess(unittest.TestCase):
 
     def tearDown(self):
         daemon.UNITS['rytm'].update(self.saved)
-        subprocess.run([sys.executable, daemon.ELKLOCK, 'release', 'rytm', '--no-snapshot'],
-                       env=self.s.env(), capture_output=True)
+        daemon.UNITS['a4'].update(self.saved_a4)
+        for unit in ('rytm', 'a4'):
+            subprocess.run([sys.executable, daemon.ELKLOCK, 'release', unit, '--no-snapshot'],
+                           env=self.s.env(), capture_output=True)
 
     def fake_pass(self, info):
         run = os.path.join(TMP, 'emu-run-' + info['key'][:6])
@@ -847,6 +852,32 @@ class InProcess(unittest.TestCase):
         before(0, '')
         self.assertEqual(after(0, '')[0], 0)
 
+    def test_every_unit_with_a_runner_guards_its_saved_projects(self):
+        for unit in ('rytm', 'a4', 'digitone', 'digitakt'):
+            if unit in daemon.UNITS:
+                self.assertTrue(daemon.guards_projects(unit), unit)
+        self.assertFalse(daemon.guards_projects('no-such-unit'))
+
+    @needs_runner
+    def test_digitone_emulator_plan_guards_its_saved_projects(self):
+        plan = os.path.join(TMP, 'dn-guard.txt')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write('unit = digitone\n[home]\nexpect-screen home 2\n')
+        proc = type('P', (), {'poll': lambda self: None, 'pid': 97})()
+        saved = daemon.DIGIHEALTH
+        daemon.DIGIHEALTH = TMP
+        guarded = []
+        self.d.guard_projects = lambda info, addr, cmd, folder: (guarded.append(addr), ['guarded'])[1]
+        self.d.emulators[(self.s.sid, 'digitone')] = dict(proc=proc, session=self.s.sid, build='b',
+                                                          address='tcp:127.0.0.1:7402')
+        try:
+            self.d.t_run_plan(self.s, {'plan': plan, 'target': 'emulator'})
+        finally:
+            daemon.DIGIHEALTH = saved
+            self.d.emulators.pop((self.s.sid, 'digitone'), None)
+        self.assertEqual(guarded, ['tcp:127.0.0.1:7402'])
+        self.assertEqual(self.started[-1][1], ['guarded'])
+
     def test_hand_steps_are_named(self):
         steps = [('setup', ['keys PLAY', 'listen the kick plays']), ('turn (hardware)', ['turn A 1']),
                  ('check', ['shot s1', 'listen  "the snare, then silence"  # by hand'])]
@@ -922,8 +953,14 @@ class InProcess(unittest.TestCase):
             fh.write(text.replace('format = 1', 'format = 1\nsnapshot-after = nope', 1))
         with self.assertRaisesRegex(daemon.Refused, 'snapshot-after names no section'):
             self.d.plan_info(bad)
+        # nothing the emulator runs after the setup: every resumed run would have no step
+        last = re.findall(r'^\[(.+)\]$', text, re.M)[-1]
+        with open(bad, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('format = 1', 'format = 1\nsnapshot-after = %s' % last, 1))
+        with self.assertRaisesRegex(daemon.Refused, 'leaves no section the emulator runs after it'):
+            self.d.plan_info(bad)
 
-    def fake_power_off_emulator(self):
+    def fake_power_off_emulator(self, unit='rytm'):
         """A stand-in analog-emu in TMP: it says its USB MIDI port listens and, given
         --power-off, prints the power-off save on `quit` or the end of stdin (FAKE_EMU_NO_SAVE:
         the lines of a power-off whose save did not finish)."""
@@ -958,7 +995,7 @@ class InProcess(unittest.TestCase):
             os.chmod(script, 0o755)
         saved = daemon.ANALOG_EMU, daemon.ELKFLASH
         daemon.ANALOG_EMU, daemon.ELKFLASH = folder, TMP
-        daemon.UNITS['rytm'].update(emu_exe=exe, emu_card=None)
+        daemon.UNITS[unit].update(emu_exe=exe, emu_card=None)
         self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
         self.d.wait_for_os = lambda addr, tries=30: True
         self.addCleanup(lambda: [self.d.stop_emulator(e) for e in self.d.emulators.values()])
@@ -976,8 +1013,8 @@ class InProcess(unittest.TestCase):
         self.assertEqual(daemon.power_cycle_parts([('a', ['tap NO'])]), [[('a', ['tap NO'])]])
 
     @needs_runner
-    def test_power_cycle_plans_refused(self):
-        plan = os.path.join(PLANS, 'power-cycle.txt')
+    def test_power_cycle_plans_refused(self, unit='rytm'):
+        plan = self.sample('power-cycle.txt', unit)
         text = read(plan)
         info = self.d.plan_info(plan)
         self.assertEqual(info['power_cycles'], ['[kept] power-cycle'])
@@ -986,7 +1023,7 @@ class InProcess(unittest.TestCase):
                 (lambda t: t.replace('power-cycle', 'power-cycle now'), 'takes nothing more'),
                 (lambda t: t.replace('[kept]', '[kept (hardware)]'), r'in a \(hardware\) section'),
                 (lambda t: t.replace('format = 1', 'format = 1\nsnapshot-after = kept'), 'in the setup'),
-                (lambda t: t.replace('unit = rytm', 'unit = digitone'), '(?i)Rytm and A4 only|digi'),
+                (lambda t: t.replace('unit = %s' % unit, 'unit = digitone'), '(?i)Rytm and A4 only|digi'),
                 (lambda t: t.replace('format = 1', 'format = 1\nflash = %s' % os.path.join(TMP, 'os', 'test-build.syx')),
                  'cannot flash')):
             bad = os.path.join(TMP, 'pc-bad.txt')
@@ -1010,7 +1047,7 @@ class InProcess(unittest.TestCase):
         self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
         # a gate runs only start runs that stop before the first power cycle: a run from a start
         # that must pass (no contrast for it) would reach the power cycle
-        self.with_starts()
+        self.with_starts(unit)
         with self.assertRaisesRegex(daemon.Refused, r'start dirty \(must pass\).* would reach the power cycle'):
             self.d.t_batch(self.s, {'gate': True, 'plans': [plan], 'build': build})
         late = os.path.join(TMP, 'pc-late.txt')
@@ -1020,48 +1057,48 @@ class InProcess(unittest.TestCase):
         with self.assertRaisesRegex(daemon.Refused, r'stop in \[kept\]\).* would reach'):
             self.d.t_batch(self.s, {'gate': True, 'plans': [late], 'build': build})
 
-    def test_power_cycle_emulator(self):
-        self.fake_power_off_emulator()
+    def test_power_cycle_emulator(self, unit='rytm'):
+        self.fake_power_off_emulator(unit)
         os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
-        self.assertTrue(self.d.emu_has_power_off('rytm'))
+        self.assertTrue(self.d.emu_has_power_off(unit))
         build = os.path.join(TMP, 'os', 'test-build.syx')
-        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build}, power_off=True)
-        e = self.d.emulators[(self.s.sid, 'rytm')]
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': unit, 'build': build}, power_off=True)
+        e = self.d.emulators[(self.s.sid, unit)]
         self.assertIn('--power-off', e['cmd'])
         self.assertIn('--stdin-commands', e['cmd'])
         first = e['address']
-        rc, line = self.d.power_cycle(self.s, 'rytm')
+        rc, line = self.d.power_cycle(self.s, unit)
         self.assertEqual(rc, 0, line)
         self.assertIn('working state saved', line)
         self.assertNotEqual(e['address'], first)               # new ports, and the address follows
         self.assertEqual(e['boots'], 2)
         self.assertIsNone(e['proc'].poll())
         self.assertTrue(e['log'].endswith('emulator-boot2.log'))
-        rc, line = self.d.power_cycle(self.s, 'rytm', save=False)  # the no-save contrast: killed
+        rc, line = self.d.power_cycle(self.s, unit, save=False)  # the no-save contrast: killed
         self.assertEqual(rc, 0, line)
         self.assertIn('killed, no save', line)
         os.environ['FAKE_EMU_NO_SAVE'] = '1'
         self.addCleanup(lambda: os.environ.pop('FAKE_EMU_NO_SAVE', None))
         self.d.stop_emulator(e)
-        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build}, power_off=True)
-        rc, line = self.d.power_cycle(self.s, 'rytm')
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': unit, 'build': build}, power_off=True)
+        rc, line = self.d.power_cycle(self.s, unit)
         self.assertEqual(rc, 1)
         self.assertIn('did not finish its power-off save', line)
         self.assertIn('did not finish its power-fail handler', line)
-        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build})   # without --power-off
-        self.assertIn('did not start with --power-off', self.d.power_cycle(self.s, 'rytm')[1])
-        self.d.stop_emulator(self.d.emulators[(self.s.sid, 'rytm')])
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': unit, 'build': build})   # without --power-off
+        self.assertIn('did not start with --power-off', self.d.power_cycle(self.s, unit)[1])
+        self.d.stop_emulator(self.d.emulators[(self.s.sid, unit)])
         # power_off on the emulator tool: a plan with power-cycle steps then runs on it without build
-        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build, 'power_off': True})
-        self.assertIn('--power-off', self.d.emulators[(self.s.sid, 'rytm')]['cmd'])
-        self.assertEqual(self.d.emu_ready(self.s, 'rytm', None, power_off=True)[1], [])
-        self.d.stop_emulator(self.d.emulators[(self.s.sid, 'rytm')])
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': unit, 'build': build, 'power_off': True})
+        self.assertIn('--power-off', self.d.emulators[(self.s.sid, unit)]['cmd'])
+        self.assertEqual(self.d.emu_ready(self.s, unit, None, power_off=True)[1], [])
+        self.d.stop_emulator(self.d.emulators[(self.s.sid, unit)])
 
     @needs_runner
-    def test_power_cycle_run_plan(self):
-        self.fake_power_off_emulator()
+    def test_power_cycle_run_plan(self, unit='rytm'):
+        self.fake_power_off_emulator(unit)
         os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
-        plan = os.path.join(PLANS, 'power-cycle.txt')
+        plan = self.sample('power-cycle.txt', unit)
         build = os.path.join(TMP, 'os', 'test-build.syx')
         self.d.guard_projects = lambda info, addr, cmd, folder: cmd
         self.d.t_run_plan(self.s, {'plan': plan, 'target': 'emulator', 'build': build})
@@ -1087,7 +1124,7 @@ class InProcess(unittest.TestCase):
             time.sleep(0.1)
         flag = daemon.read_json(job.listen_file, {})
         self.assertTrue(flag['power_cycle'])
-        self.assertIn('power cycle the rytm by hand', flag['what'])
+        self.assertIn('power cycle the %s by hand' % unit, flag['what'])
         os.remove(job.listen_file)                             # listen_done, on the person's word
         t.join(5)
         self.assertEqual(res[0][0], 0)
@@ -1370,6 +1407,125 @@ class InProcess(unittest.TestCase):
         finally:
             daemon.DIGIHEALTH = saved
 
+    def test_digiemu_setup_snapshots_follow_its_usbrun(self):
+        root = os.path.join(TMP, 'digiemu-snaps')
+        os.makedirs(os.path.join(root, 'tools'), exist_ok=True)
+        saved = daemon.DIGIEMU
+        daemon.DIGIEMU = root
+        try:
+            with open(os.path.join(root, 'tools', 'usbrun.py'), 'w') as fh:
+                fh.write("ap.add_argument('--save-on-exit')\n")
+            self.assertFalse(self.d.emu_has_snapshots('digitone'))
+            with open(os.path.join(root, 'tools', 'usbrun.py'), 'w') as fh:
+                fh.write("ap.add_argument('--stdin-commands', action='store_true')\n")
+            self.assertTrue(self.d.emu_has_snapshots('digitakt'))
+            info = dict(unit='digitone', setup=1, emulator=False, flash=None, refs=TMP,
+                        steps=[('setup', ['say set up']), ('check', ['say check'])])
+            snap = self.d.setup_snapshot(self.s, info, {'build': self.saved['stock'][0]})
+            self.assertTrue(snap['digi'])
+            self.assertFalse(snap['have'])               # known once digiemu has started
+            self.assertEqual(snap['live'], snap['key'])  # digiemu stores it by key, in its own home
+            self.assertTrue(snap['store'].endswith(snap['key'] + '.digi'))
+            # the key changes with the setup steps and with digiemu's checkout
+            other = dict(info, steps=[('setup', ['say other']), ('check', ['say check'])])
+            self.assertNotEqual(snap['key'], self.d.snapshot_key(other, self.saved['stock'][0]))
+            with open(os.path.join(root, '.git'), 'w') as fh:
+                fh.write('gitdir: .gitdir\n')
+            os.makedirs(os.path.join(root, '.gitdir'), exist_ok=True)
+            with open(os.path.join(root, '.gitdir', 'HEAD'), 'w') as fh:
+                fh.write('a' * 40 + '\n')
+            self.assertNotEqual(snap['key'], self.d.snapshot_key(info, self.saved['stock'][0]))
+            # a plan that flashes, or records references, runs from the settled boot
+            self.assertIsNone(self.d.setup_snapshot(self.s, dict(info, flash='x.syx'),
+                                                    {'build': self.saved['stock'][0]}))
+            self.assertIsNone(self.d.setup_snapshot(self.s, info, {'build': self.saved['stock'][0],
+                                                                   'record_refs': True}))
+        finally:
+            daemon.DIGIEMU = saved
+
+    def test_git_head_of_a_checkout_and_a_worktree(self):
+        repo = os.path.join(TMP, 'gh-repo')
+        os.makedirs(os.path.join(repo, '.git', 'refs', 'heads'), exist_ok=True)
+        with open(os.path.join(repo, '.git', 'HEAD'), 'w') as fh:
+            fh.write('ref: refs/heads/main\n')
+        with open(os.path.join(repo, '.git', 'refs', 'heads', 'main'), 'w') as fh:
+            fh.write('1' * 40 + '\n')
+        self.assertEqual(daemon.git_head(repo), '1' * 40)
+        wt = os.path.join(TMP, 'gh-wt')
+        os.makedirs(os.path.join(repo, '.git', 'worktrees', 'wt'), exist_ok=True)
+        os.makedirs(wt, exist_ok=True)
+        with open(os.path.join(wt, '.git'), 'w') as fh:
+            fh.write('gitdir: %s\n' % os.path.join(repo, '.git', 'worktrees', 'wt'))
+        with open(os.path.join(repo, '.git', 'worktrees', 'wt', 'HEAD'), 'w') as fh:
+            fh.write('ref: refs/heads/side\n')
+        with open(os.path.join(repo, '.git', 'worktrees', 'wt', 'commondir'), 'w') as fh:
+            fh.write('../..\n')
+        with open(os.path.join(repo, '.git', 'packed-refs'), 'w') as fh:
+            fh.write('# pack-refs\n%s refs/heads/side\n' % ('2' * 40))
+        self.assertEqual(daemon.git_head(wt), '2' * 40)
+        self.assertIsNone(daemon.git_head(os.path.join(TMP, 'no-such-repo')))
+
+    def test_save_snapshot_now_waits_for_the_emulator_log(self):
+        log = os.path.join(TMP, 'save-now.log')
+
+        class Proc:
+            def __init__(self, line):
+                self.line, self.stdin = line, self
+
+            def write(self, data):
+                assert data == b'save\n'
+                with open(log, 'a') as fh:
+                    fh.write(self.line + '\n')
+
+            def flush(self):
+                pass
+
+            def poll(self):
+                return None
+        open(log, 'w').close()
+        e = dict(proc=Proc('[elkbench] setup snapshot K1 stored'), log=log)
+        self.assertTrue(daemon.save_snapshot_now(e, dict(digi=True, key='K1', live='K1')))
+        open(log, 'w').close()
+        e = dict(proc=Proc('[usbrun] save failed: disk full'), log=log)
+        self.assertFalse(daemon.save_snapshot_now(e, dict(digi=True, key='K1', live='K1')))
+        open(log, 'w').close()
+        self.assertTrue(daemon.save_snapshot_now(Proc('saved /w/setup.snap'),
+                                                 dict(live='/w/setup.snap', log=log)))
+
+    def test_digiemu_usb_stores_and_prunes_setup_snapshots(self):
+        import digiemu_usb
+        store = os.path.join(TMP, 'dusb-store')
+        work = os.path.join(TMP, 'dusb-work')
+        os.makedirs(work, exist_ok=True)
+        saved = os.path.join(work, 'setup.snap')
+        for data in (b'machine', b'card'):
+            with open(saved + ('' if data == b'machine' else '.card'), 'wb') as fh:
+                fh.write(data)
+        seen = []
+        out = digiemu_usb.Watch(types.SimpleNamespace(write=lambda t: len(t), flush=lambda: None),
+                                '[usbrun] saved %s' % saved, lambda: seen.append(1))
+        out.write('[usbrun] 1.0 s emulated\n[usbrun] sav')
+        self.assertEqual(seen, [])
+        out.write('ed %s\n' % saved)
+        self.assertEqual(seen, [1])
+        digiemu_usb.publish(saved, store, 'K1', 't1')
+        with open(os.path.join(store, 'K1', 'setup.snap.card'), 'rb') as fh:
+            self.assertEqual(fh.read(), b'card')
+        # a second session saving the same setup keeps the one stored first
+        for name, data in (('setup.snap', b'other'), ('setup.snap.card', b'other card')):
+            with open(os.path.join(work, name), 'wb') as fh:
+                fh.write(data)
+        digiemu_usb.publish(saved, store, 'K1', 't2')
+        with open(os.path.join(store, 'K1', 'setup.snap'), 'rb') as fh:
+            self.assertEqual(fh.read(), b'machine')
+        self.assertEqual(sorted(os.listdir(store)), ['K1'])
+        for n, key in enumerate(('K2', 'K3', 'K4')):
+            os.makedirs(os.path.join(store, key))
+            os.utime(os.path.join(store, key), (time.time() - 100 + n, time.time() - 100 + n))
+        os.utime(os.path.join(store, 'K1'), (time.time() - 9 * 86400,) * 2)
+        digiemu_usb.prune(store, 'K4', keep=2, days=7)   # K4 in use; K1 too old; K3 the newest other
+        self.assertEqual(sorted(os.listdir(store)), ['K3', 'K4'])
+
     def test_digiemu_paths_in_wsl(self):
         saved = daemon.DIGIEMU, daemon.DIGIEMU_PY
         daemon.DIGIEMU, daemon.DIGIEMU_PY = TMP, ['wsl', '~/py']
@@ -1380,32 +1536,66 @@ class InProcess(unittest.TestCase):
         self.assertEqual(cmd[:4], ['wsl', '-e', 'bash', '-lc'])
         self.assertTrue(cmd[4].endswith('~/py /mnt/d/x/y.syx 7400'), cmd[4])
 
-    def test_release_empties_test_slots(self):
-        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+    def test_release_empties_test_slots(self, unit='rytm'):
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', unit, '--for', 'elkbench test'],
                        env=self.s.env(), capture_output=True)
-        saved, calls = daemon.UNITS['rytm'].get('clear_at_release'), []
-        daemon.UNITS['rytm']['clear_at_release'] = [121, 122]
+        saved, calls = daemon.UNITS[unit].get('clear_at_release'), []
+        daemon.UNITS[unit]['clear_at_release'] = [121, 122]
         try:
             self.d.empty_test_slots = lambda s, u: (calls.append(u), (False, ['slot 122 still holds a project']))[1]
             with self.assertRaisesRegex(daemon.Refused, 'test slots are not empty, so the claim is kept'):
-                self.d.t_release(self.s, {'unit': 'rytm', 'note': 'menus closed'})
-            self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
-            out = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'cable out', 'accept_slots_left': True})
+                self.d.t_release(self.s, {'unit': unit, 'note': 'menus closed'})
+            self.assertTrue(daemon.elklock.mine(daemon.elklock.holder(unit), session=self.s.sid))
+            out = self.d.t_release(self.s, {'unit': unit, 'note': 'cable out', 'accept_slots_left': True})
             self.assertTrue(out[0].startswith('ok: released'), out)
-            handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], 'rytm.handoff.json')))
+            handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], unit + '.handoff.json')))
             self.assertIn('test slots 121-122 NOT EMPTY: slot 122 still holds a project', handoff['note'])
-            subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+            subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', unit, '--for', 'elkbench test'],
                            env=self.s.env(), capture_output=True)
             self.d.empty_test_slots = lambda s, u: (True, ['slot 121 backed up (x) and cleared',
                                                            'test slots 121-122 empty (data ls)'])
-            out = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'menus closed'})
-            self.assertIn('rytm: slot 121 backed up (x) and cleared', out)
-            handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], 'rytm.handoff.json')))
+            out = self.d.t_release(self.s, {'unit': unit, 'note': 'menus closed'})
+            self.assertIn('%s: slot 121 backed up (x) and cleared' % unit, out)
+            handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], unit + '.handoff.json')))
             self.assertIn('test slots 121-122 empty (data ls)', handoff['note'])
         finally:
             del self.d.empty_test_slots
-            daemon.UNITS['rytm']['clear_at_release'] = saved or []
-        self.assertEqual(calls, ['rytm', 'rytm'])
+            daemon.UNITS[unit]['clear_at_release'] = saved or []
+        self.assertEqual(calls, [unit, unit])
+
+    def test_release_empties_digitone_test_slots(self):
+        """On the Digitone, release lists with digirun and erases with analogrun's data clear
+        (which asks the write policy), as the data tool does there."""
+        ran = []
+        saved = daemon.DIGIHEALTH, daemon.subprocess.run, daemon.UNITS['digitone'].get('clear_at_release')
+        daemon.DIGIHEALTH = TMP
+        daemon.UNITS['digitone']['clear_at_release'] = list(range(121, 129))
+        self.d.check_connected = lambda unit, target: None
+        # the Digitone lists only full slots: an empty one has no row at all
+        full = ('PRESETS                  id    1   4194304 B  ops 0x0012  +metadata\n'
+                '~T SETUP                 id  121   4194304 B  ops 0x007e  +metadata\n'
+                '~T SETUP                 id  123   4194304 B  ops 0x007e  +metadata\n')
+        empty = 'PRESETS                  id    1   4194304 B  ops 0x0012  +metadata\n'
+        results = iter([subprocess.CompletedProcess([], 0, full, ''),
+                        subprocess.CompletedProcess([], 0, 'cleared /projects/121\n', ''),
+                        subprocess.CompletedProcess([], 0, 'cleared /projects/123\n', ''),
+                        subprocess.CompletedProcess([], 0, empty, '')])
+        daemon.subprocess.run = lambda cmd, **kw: (ran.append(cmd), next(results))[1]
+        try:
+            self.assertTrue(daemon.clears_at_release('digitone'))
+            ok, lines = self.d.empty_test_slots(self.s, 'digitone')
+        finally:
+            daemon.DIGIHEALTH, daemon.subprocess.run = saved[:2]
+            daemon.UNITS['digitone']['clear_at_release'] = saved[2] or []
+            del self.d.check_connected
+        self.assertTrue(ok, lines)
+        self.assertEqual(lines[-1], 'test slots 121-128 empty (data ls)')
+        digirun = os.path.join(TMP, 'tools', 'digirun.py')
+        self.assertEqual([c[6] for c in ran], [digirun, daemon.RUNNER, daemon.RUNNER, digirun])
+        self.assertEqual([c[10:12] for c in ran], [['ls', '/projects'], ['clear', '/projects/121'],
+                                                 ['clear', '/projects/123'], ['ls', '/projects']])
+        self.assertEqual(ran[1][-1], '--yes')
+        self.assertFalse(daemon.clears_at_release('digitone'))   # unset again
 
     def test_clear_at_release_setting(self):
         self.assertEqual(daemon.slot_numbers('121-124, 127'), [121, 122, 123, 124, 127])
@@ -1851,29 +2041,42 @@ class InProcess(unittest.TestCase):
         self.assertIn("write outside the plan's slots: project 5 added", '\n'.join(res))
         self.assertIsNone(self.d.find_pass(self.d.plan_info(plans[0])['key']))
 
-    def with_starts(self):
-        """Stand-in built-in Rytm starts (dirty, occupied, testslot, testslot-cleared) for one test."""
+    def sample(self, name, unit='rytm'):
+        """A sample plan in tests/plans for `unit`: the Rytm's as it is; another unit's a copy
+        beside it with its own unit and out folder (runs-<unit>), so the two never share runs."""
+        path = os.path.join(PLANS, name)
+        if unit == 'rytm':
+            return path
+        copy = os.path.join(PLANS, '%s-%s.txt' % (name[:-4], unit))
+        with open(copy, 'w', encoding='utf-8') as fh:
+            fh.write(read(path).replace('unit = rytm\n', 'unit = %s\n' % unit, 1).replace(
+                'out = runs\n', 'out = runs-%s\n' % unit, 1))
+        return copy
+
+    def with_starts(self, unit='rytm'):
+        """Stand-in built-in starts (dirty, occupied, testslot, testslot-cleared) of `unit` for one test."""
         folder = os.path.join(TMP, 'starts-%d' % len(os.listdir(TMP)))
-        os.makedirs(os.path.join(folder, 'rytm'))
+        os.makedirs(os.path.join(folder, unit))
         for name in ('dirty', 'occupied', 'testslot', 'testslot-cleared'):
-            with open(os.path.join(folder, 'rytm', name + '.txt'), 'w', encoding='utf-8') as fh:
-                fh.write('format = 1\nname = start %s\nunit = rytm\nemulator = yes\n\n[%s]\nwait 0.1\n' % (name, name))
+            with open(os.path.join(folder, unit, name + '.txt'), 'w', encoding='utf-8') as fh:
+                fh.write('format = 1\nname = start %s\nunit = %s\nemulator = yes\n\n[%s]\nwait 0.1\n'
+                         % (name, unit, name))
         saved = daemon.STARTS
         daemon.STARTS = folder
         self.addCleanup(setattr, daemon, 'STARTS', saved)
         return folder
 
     @needs_runner
-    def test_contrast_and_start_runs(self):
+    def test_contrast_and_start_runs(self, unit='rytm'):
         """Proposal A and B: a gate runs each plan from the built-in starts too; a run from a start
         passes, or stops in the section its contrast names; the go needs them all."""
-        self.with_starts()
+        self.with_starts(unit)
         saved = daemon.ANALOG_EMU, daemon.ELKFLASH
         daemon.ANALOG_EMU = daemon.ELKFLASH = TMP
         self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
         os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
         build = os.path.join(TMP, 'os', 'test-build.syx')
-        text = read(os.path.join(PLANS, 'menus.txt')).replace('name = menus', 'name = contrasted').replace(
+        text = read(self.sample('menus.txt', unit)).replace('name = menus', 'name = contrasted').replace(
             'out = runs', 'out = runs-contrasted')
         plan = os.path.join(PLANS, 'contrasted.txt')
         # no contrast on the start check: refused where the unit has built-in starts
@@ -1957,10 +2160,10 @@ class InProcess(unittest.TestCase):
         self.assertEqual(len(ran), n)
 
     @needs_runner
-    def test_gate_runs_a_power_cycle_plans_start_runs(self):
+    def test_gate_runs_a_power_cycle_plans_start_runs(self, unit='rytm'):
         """A gate batch runs a power-cycle plan's start runs, each up to its first power cycle, and
         records them; its own pass comes from run_plan, and the go then takes the plan."""
-        self.with_starts()
+        self.with_starts(unit)
         saved = daemon.ANALOG_EMU, daemon.ELKFLASH
         daemon.ANALOG_EMU = daemon.ELKFLASH = TMP
         self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
@@ -1969,7 +2172,7 @@ class InProcess(unittest.TestCase):
         build = os.path.join(TMP, 'os', 'test-build.syx')
         plan = os.path.join(PLANS, 'pc-contrasted.txt')
         with open(plan, 'w', encoding='utf-8') as fh:
-            fh.write(read(os.path.join(PLANS, 'power-cycle.txt')).replace(
+            fh.write(read(self.sample('power-cycle.txt', unit)).replace(
                 'name = power cycle', 'name = pc contrasted\nos = %s' % build).replace('out = runs', 'out = runs-pc').replace(
                 'tap GLOBAL\nexpect-screen global-menu 2\ntap NO\n',
                 'tap GLOBAL\nsay contrast fresh, dirty, occupied: the menu differs\nexpect-screen global-menu 2\ntap NO\n', 1))
@@ -2032,9 +2235,9 @@ class InProcess(unittest.TestCase):
         self.assertEqual(len(twins), 3)
 
     @needs_runner
-    def test_a_start_snapshot_is_built_once(self):
+    def test_a_start_snapshot_is_built_once(self, unit='rytm'):
         """With snapshots, a built-in start is built once per build and start plan, then resumed."""
-        folder = self.with_starts()
+        folder = self.with_starts(unit)
         saved = daemon.ANALOG_EMU, daemon.ELKFLASH
         daemon.ANALOG_EMU = daemon.ELKFLASH = TMP
         self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
@@ -2065,17 +2268,17 @@ class InProcess(unittest.TestCase):
         self.d.start_steps = lambda s, unit, v, addr, work, minutes: None
         out = os.path.join(TMP, 'start-snap')
         os.makedirs(out, exist_ok=True)
-        v = dict(start='dirty', build=build, start_plan=os.path.join(folder, 'rytm', 'dirty.txt'))
-        self.assertIsNone(self.d.batch_start(self.s, 'rytm', v, 5, out))
+        v = dict(start='dirty', build=build, start_plan=os.path.join(folder, unit, 'dirty.txt'))
+        self.assertIsNone(self.d.batch_start(self.s, unit, v, 5, out))
         self.assertTrue(os.path.isfile(v['start_store']) and len(booted) == 1)
         w = dict(v)
         del w['start_store']
-        self.assertIsNone(self.d.batch_start(self.s, 'rytm', w, 5, out))
+        self.assertIsNone(self.d.batch_start(self.s, unit, w, 5, out))
         self.assertEqual((w['start_store'], len(booted)), (v['start_store'], 1))     # resumed, not rebuilt
         with open(v['start_plan'], 'a') as fh:                                          # a changed start: rebuilt
             fh.write('wait 0.2\n')
         x = dict(start='dirty', build=build, start_plan=v['start_plan'])
-        self.assertIsNone(self.d.batch_start(self.s, 'rytm', x, 5, out))
+        self.assertIsNone(self.d.batch_start(self.s, unit, x, 5, out))
         self.assertNotEqual(x['start_store'], v['start_store'])
         self.assertEqual(len(booted), 2)
 
@@ -2093,22 +2296,22 @@ class InProcess(unittest.TestCase):
         self.assertEqual(daemon.starts_needed(info), {'fresh': 'start', 'dirty': 'start', 'occupied': 'start'})
 
     @needs_runner
-    def test_a_start_builds_on_a_base_with_data_steps(self):
+    def test_a_start_builds_on_a_base_with_data_steps(self, unit='rytm'):
         """A start file may build on another start (`base`) and run data store steps (`data`)
         between its base and its own sections; loops and bad steps are refused."""
-        folder = self.with_starts()
-        rytm = os.path.join(folder, 'rytm')
-        with open(os.path.join(rytm, 'backup.bin'), 'wb') as fh:
+        folder = self.with_starts(unit)
+        here = os.path.join(folder, unit)
+        with open(os.path.join(here, 'backup.bin'), 'wb') as fh:
             fh.write(b'project')
-        cleared = os.path.join(rytm, 'cleared.txt')
+        cleared = os.path.join(here, 'cleared.txt')
         with open(cleared, 'w', encoding='utf-8') as fh:
-            fh.write('format = 1\nname = start cleared\nunit = rytm\nemulator = yes\nbase = testslot\n'
-                     'data = clear /projects/121; put /projects/122 backup.bin\n\n[shot]\nshot x.png\n')
-        chain = daemon.start_chain('rytm', 'cleared')
+            fh.write('format = 1\nname = start cleared\nunit = %s\nemulator = yes\nbase = testslot\n'
+                     'data = clear /projects/121; put /projects/122 backup.bin\n\n[shot]\nshot x.png\n' % unit)
+        chain = daemon.start_chain(unit, 'cleared')
         self.assertEqual([c[0] for c in chain], ['testslot', 'cleared'])
         self.assertEqual(chain[0][2], [])
         self.assertEqual(chain[1][2], [('clear', '/projects/121', None),
-                                       ('put', '/projects/122', os.path.join(rytm, 'backup.bin'))])
+                                       ('put', '/projects/122', os.path.join(here, 'backup.bin'))])
         # the build: the base's plan, then the data steps, then the start's own sections
         calls = []
 
@@ -2127,46 +2330,46 @@ class InProcess(unittest.TestCase):
         daemon.subprocess = types.SimpleNamespace(**dict(vars(subprocess), run=run))
         self.addCleanup(setattr, daemon, 'subprocess', subprocess)
         work = os.path.join(TMP, 'start-chain')
-        self.assertIsNone(self.d.start_steps(self.s, 'rytm', dict(start='cleared', start_chain=chain),
+        self.assertIsNone(self.d.start_steps(self.s, unit, dict(start='cleared', start_chain=chain),
                                              'tcp:127.0.0.1:7003', work, 5))
-        self.assertEqual(calls, [('plan', os.path.join(rytm, 'testslot.txt')), ('data', 'clear', '/projects/121'),
+        self.assertEqual(calls, [('plan', os.path.join(here, 'testslot.txt')), ('data', 'clear', '/projects/121'),
                                  ('data', 'put', '/projects/122'), ('plan', cleared)])
         # the snapshot key follows the base's text too
         build = os.path.join(TMP, 'os', 'test-build.syx')
-        k1 = self.d.start_key('rytm', build, chain)
-        with open(os.path.join(rytm, 'testslot.txt'), 'a') as fh:
+        k1 = self.d.start_key(unit, build, chain)
+        with open(os.path.join(here, 'testslot.txt'), 'a') as fh:
             fh.write('wait 0.2\n')
-        self.assertNotEqual(k1, self.d.start_key('rytm', build, daemon.start_chain('rytm', 'cleared')))
+        self.assertNotEqual(k1, self.d.start_key(unit, build, daemon.start_chain(unit, 'cleared')))
         # refused: a loop, an unknown base, a bad data step, a missing put file
         for setting, why in (('base = cleared', 'builds on itself'), ('base = nowhere', 'no built-in start'),
                              ('data = wipe /projects/121', 'is `clear PATH` or `put PATH FILE`'),
                              ('data = clear projects/121', 'is `clear PATH` or `put PATH FILE`'),
                              ('data = put /projects/122 gone.bin', 'no file')):
             with open(cleared, 'w', encoding='utf-8') as fh:
-                fh.write('format = 1\nname = start cleared\nunit = rytm\nemulator = yes\n%s\n\n[shot]\n'
-                         'shot x.png\n' % setting)
+                fh.write('format = 1\nname = start cleared\nunit = %s\nemulator = yes\n%s\n\n[shot]\n'
+                         'shot x.png\n' % (unit, setting))
             with self.assertRaisesRegex(daemon.Refused, re.escape(why)):
-                daemon.start_chain('rytm', 'cleared')
+                daemon.start_chain(unit, 'cleared')
 
     @needs_runner
-    def test_required_starts_where_release_empties_the_test_slots(self):
+    def test_required_starts_where_release_empties_the_test_slots(self, unit='rytm'):
         """A unit whose release empties its test slots (clear_at_release) is never found with them
         full: its plans run from testslot-cleared, the state every release leaves, not occupied."""
-        self.with_starts()
-        text = read(os.path.join(PLANS, 'menus.txt')).replace('name = menus', 'name = cleared').replace(
+        self.with_starts(unit)
+        text = read(self.sample('menus.txt', unit)).replace('name = menus', 'name = cleared').replace(
             'out = runs', 'out = runs-cleared').replace(
             'tap GLOBAL\n', 'say contrast testslot: the global menu differs\ntap GLOBAL\n', 1)
         plan = os.path.join(PLANS, 'cleared.txt')
         with open(plan, 'w', encoding='utf-8') as fh:
             fh.write(text)
-        saved = daemon.UNITS['rytm'].get('clear_at_release')
-        self.addCleanup(daemon.UNITS['rytm'].__setitem__, 'clear_at_release', saved or [])
-        daemon.UNITS['rytm']['clear_at_release'] = []
-        self.assertEqual(daemon.required_starts('rytm'), ('dirty', 'occupied'))
+        saved = daemon.UNITS[unit].get('clear_at_release')
+        self.addCleanup(daemon.UNITS[unit].__setitem__, 'clear_at_release', saved or [])
+        daemon.UNITS[unit]['clear_at_release'] = []
+        self.assertEqual(daemon.required_starts(unit), ('dirty', 'occupied'))
         self.assertEqual(daemon.starts_needed(self.d.plan_info(plan)),
                          {'dirty': None, 'occupied': None, 'testslot': 'start'})
-        daemon.UNITS['rytm']['clear_at_release'] = list(range(121, 129))
-        self.assertEqual(daemon.required_starts('rytm'), ('dirty', 'testslot-cleared'))
+        daemon.UNITS[unit]['clear_at_release'] = list(range(121, 129))
+        self.assertEqual(daemon.required_starts(unit), ('dirty', 'testslot-cleared'))
         self.assertEqual(daemon.starts_needed(self.d.plan_info(plan)),
                          {'dirty': None, 'testslot-cleared': None, 'testslot': 'start'})
         # a contrast may still name occupied: then its run is needed, and must stop
@@ -2176,11 +2379,11 @@ class InProcess(unittest.TestCase):
                          {'dirty': None, 'testslot-cleared': None, 'occupied': 'start', 'testslot': 'start'})
 
     @needs_runner
-    def test_a_plan_can_start_from_a_built_in_start(self):
+    def test_a_plan_can_start_from_a_built_in_start(self, unit='rytm'):
         """`start = START` in a hardware plan: its own gate run (and pass) starts from that built-in
         start; run_plan does not record its pass, and the setting is part of what a pass vouches for."""
-        self.with_starts()
-        text = read(os.path.join(PLANS, 'menus.txt')).replace('name = menus', 'name = homed').replace(
+        self.with_starts(unit)
+        text = read(self.sample('menus.txt', unit)).replace('name = menus', 'name = homed').replace(
             'out = runs', 'out = runs-homed').replace(
             'tap GLOBAL\n', 'say contrast occupied: the global menu differs\ntap GLOBAL\n', 1)
         plan = os.path.join(PLANS, 'homed.txt')
@@ -2379,6 +2582,38 @@ class InProcess(unittest.TestCase):
         self.assertAlmostEqual(hi, 0.204, places=2)
         self.assertEqual(b.holm([0.01, 0.04, 0.03]), [0.03, 0.06, 0.06])
         self.assertNotEqual(b.order('ABC', 20, 1), b.order('ABC', 20, 2))
+
+    # The Analog Four MKII runs the same release, power-cycle and start-run code as the Rytm: each
+    # test above that takes `unit` runs again for it (stand-in starts, sample plans with unit = a4).
+    def test_power_cycle_plans_refused_a4(self):
+        self.test_power_cycle_plans_refused('a4')
+
+    def test_power_cycle_emulator_a4(self):
+        self.test_power_cycle_emulator('a4')
+
+    def test_power_cycle_run_plan_a4(self):
+        self.test_power_cycle_run_plan('a4')
+
+    def test_release_empties_test_slots_a4(self):
+        self.test_release_empties_test_slots('a4')
+
+    def test_contrast_and_start_runs_a4(self):
+        self.test_contrast_and_start_runs('a4')
+
+    def test_gate_runs_a_power_cycle_plans_start_runs_a4(self):
+        self.test_gate_runs_a_power_cycle_plans_start_runs('a4')
+
+    def test_a_start_snapshot_is_built_once_a4(self):
+        self.test_a_start_snapshot_is_built_once('a4')
+
+    def test_a_start_builds_on_a_base_with_data_steps_a4(self):
+        self.test_a_start_builds_on_a_base_with_data_steps('a4')
+
+    def test_required_starts_where_release_empties_the_test_slots_a4(self):
+        self.test_required_starts_where_release_empties_the_test_slots('a4')
+
+    def test_a_plan_can_start_from_a_built_in_start_a4(self):
+        self.test_a_plan_can_start_from_a_built_in_start('a4')
 
 
 def stop_daemon(state):

@@ -30,8 +30,9 @@ Where the Digitone differs from the Rytm:
   answering; a digirun from digihealth branch `digirun-reopen-capture-ping` (or
   `digirun-reopen-session`) opens a new key session for the next key (an older one stops the plan
   there).
-- **Capture and listen carry the setup inside**, so each runs from a fresh emulator (digiemu has
-  no setup snapshots).
+- **Capture and listen carry the setup inside**, with `snapshot-after` on its LOAD FROM section:
+  in a digiemu with setup snapshots the emulator runs the setup once per build and resumes it,
+  and the T1 sections run after each resume.
 - **`ping` and `capture` need a digirun that has them.** digihealth branch
   `digirun-reopen-capture-ping` has both and the key-session reopen; the flash gate's `ping`
   answers on stock 1.44 too, as it uses Elektron's own RPC. An older digirun refuses both steps.
