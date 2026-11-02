@@ -18,8 +18,8 @@ refs = refs/a4-capture-with-level-check
 out = runs
 audio-tools = C:/path/to/elkbench/audio
 audio-driver = Elektron Analog Four MKII  # the ASIO driver audio-record records from
-# audio-python = PATH                 # optional: a Python with numpy and scipy for the audio checks,
-#                                     # when the daemon's own has none
+audio-python = py -3.14               # a Python with numpy and scipy for the audio checks (testplan
+#                                     # uses the daemon's own otherwise): set it to yours
 note = ~T SETUP active, unsaved: T1 trig on step 1; stopped
 
 [start]
