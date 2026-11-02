@@ -567,6 +567,40 @@ class Session:
         return e
 
 
+class PortLock:
+    """One user per port. It remembers when it was last let go and by what (`freed`, `what`),
+    and busy_port keeps those of the user before the current one in `before`: a flash logs how
+    long the port had been quiet when it began."""
+
+    def __init__(self):
+        self.lk = threading.Lock()
+        self.holder = self.what = self.freed = None
+        self.before = (None, None)
+
+    def acquire(self, blocking=True):
+        return self.lk.acquire(blocking)
+
+    def locked(self):
+        return self.lk.locked()
+
+    def release(self):
+        self.freed, self.what = time.time(), self.holder
+        self.lk.release()
+
+
+def flash_start_line(job, port, now=None):
+    """The line a flash's log starts with: when, and how long the unit's port had been quiet
+    (a reply lost right after a plan ended is easier to place with it)."""
+    now = now or time.time()
+    freed, what = port.before
+    if freed is None:
+        quiet = 'no earlier use of this port since the daemon started'
+    else:
+        quiet = '%.1f s after the last use of this port ended (%s)' % (now - freed, what or 'a short call')
+    return 'elkbench: %s %s on %s starts %s, %s' % (job.id, job.desc, job.unit,
+                                                   time.strftime('%H:%M:%S', time.localtime(now)), quiet)
+
+
 class Held:
     """Port locks taken together, released together (the unit's port and its DIN interface)."""
 
@@ -606,7 +640,7 @@ class Daemon:
         # which can fall between the two flashes of one go
         self.approvals_path = os.path.join(STATE, 'approvals.json')
         self.approvals = read_json(self.approvals_path, {})
-        self.ports = {}                   # (unit, target) -> threading.Lock: one user per port
+        self.ports = {}                   # (unit, target) -> PortLock: one user per port
         self.emulators = {}               # (session, unit) -> dict(proc, session, build, address)
         self.dialog = threading.Lock()
         self.passes_path = os.path.join(STATE, 'emulator-passes.json')
@@ -634,9 +668,9 @@ class Daemon:
     def port_lock(self, unit, target):
         with self.lock:
             return self.ports.setdefault((unit, 'emulator' if target == 'emulator' else 'hw'),
-                                         threading.Lock())
+                                         PortLock())
 
-    def busy_port(self, unit, target):
+    def busy_port(self, unit, target, what=None):
         lk = self.port_lock(unit, target)
         if not lk.acquire(blocking=False):
             running = [j.id + ' ' + j.desc for j in self.jobs.values()
@@ -644,6 +678,7 @@ class Daemon:
                        (j.target == 'emulator') == (target == 'emulator')]
             raise Refused('the %s %s port is in use (%s); try again when it ends'
                           % (unit, target, ', '.join(running) or 'a short call'))
+        lk.before, lk.holder = (lk.freed, lk.what), what
         return lk
 
     def hold_din(self, din, port):
@@ -1542,7 +1577,7 @@ class Daemon:
         except Refused as e:
             return False, ['not emptied: %s' % e]
         script, folder = runner(), os.path.join(s.folder(u), 'release-clear-%s' % time.strftime('%H%M%S'))
-        port = self.busy_port(u, 'hardware')
+        port = self.busy_port(u, 'hardware', 'release: empty the test slots')
         try:
             def run(*args):
                 return subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, script, '--port',
@@ -2540,10 +2575,13 @@ class Daemon:
             item = ('plan', info['key'])
             self.use_approval(s, a.get('approval'), item, 'plan ' + info['name'])
             try:
-                port = self.hold_din(din, self.busy_port(unit, tgt))
+                port = self.hold_din(din, self.busy_port(unit, tgt, 'plan %s' % info['name']))
             except Refused:
                 self.give_back(a.get('approval'), item)
                 raise
+            if info['flash']:                   # its flash log is testplan's: the quiet time goes here
+                self.log_line({'session': s.sid, 'job': job.id,
+                               'flash_starts': flash_start_line(job, self.port_lock(unit, tgt))})
             # A plan that flashes needs `emulator-run` for testplan's gate: the recorded pass.
             plan = self.twin(info, False, s.sid, emulator_run=ep['run_dir']) \
                 if info['flash'] and ep.get('run_dir') else info['path']
@@ -2566,7 +2604,7 @@ class Daemon:
                               '(build)' % (os.path.basename(info['os_file']),
                                            (self.emulators.get((s.sid, unit)) or {}).get('build') or 'an unknown OS'))
             din = self.din_args(s, unit, tgt, [l for _, ls in info['steps'] for l in ls])
-            port = self.busy_port('%s@%s' % (unit, addr), tgt)
+            port = self.busy_port('%s@%s' % (unit, addr), tgt, 'plan %s' % info['name'])
             emu = self.emulators.get((s.sid, unit)) or {}
             if info['flash'] and emu.get('firmware'):  # digiemu reboots from the file the flash was written from
                 shutil.copyfile(info['flash'], os.path.join(emu['firmware'], os.path.basename(info['flash'])))
@@ -2678,7 +2716,8 @@ class Daemon:
         over = None
         folder = s.folder(a['unit'])
         stamp = time.strftime('%H%M%S')
-        tail = ['--yes', '--no-confirm', '--wait', '--quiet', '--log', os.path.join(folder, 'elkflash.log'),
+        # --verbose: every request and reply goes to the log too (--quiet sends all output there)
+        tail = ['--yes', '--no-confirm', '--wait', '--quiet', '--verbose', '--log', os.path.join(folder, 'elkflash.log'),
                 '--screenshot', os.path.join(folder, 'after-flash-%s.png' % stamp)]
         base = [sys.executable, '-m', 'elkflash', 'upgrade', img] + chunk_args(a['unit'])
         if tgt == 'hardware':
@@ -2690,7 +2729,7 @@ class Daemon:
             item = ('flash', a['unit'], d)
             self.use_approval(s, a.get('approval'), item, 'flash %s' % os.path.basename(img))
             try:
-                port = self.busy_port(a['unit'], tgt)
+                port = self.busy_port(a['unit'], tgt, 'flash %s' % os.path.basename(img))
             except Refused:
                 self.give_back(a.get('approval'), item)
                 raise
@@ -2700,7 +2739,7 @@ class Daemon:
             return self.digiemu_check(s, a['unit'], img, d, folder)
         else:
             addr, started = self.emu_ready(s, a['unit'], a.get('build'))
-            port = self.busy_port('%s@%s' % (a['unit'], addr), tgt)
+            port = self.busy_port('%s@%s' % (a['unit'], addr), tgt, 'flash %s' % os.path.basename(img))
             emu = self.emulators[(s.sid, a['unit'])]
             over = emu.get('sha')                   # what this flash goes over: its pass is of that transition
             if emu.get('firmware'):                 # digiemu reboots from the file the flash was written from
@@ -2713,7 +2752,12 @@ class Daemon:
                 cmd = base + ['--in-port', i, '--out-port', o] + tail
         job = Job(s, 'flash', a['unit'], tgt, 'flash ' + os.path.basename(img))
         flog = os.path.join(folder, 'elkflash.log')
-        at = os.path.getsize(flog) if os.path.exists(flog) else 0     # elkflash appends to it
+        quiet = flash_start_line(job, port)
+        self.log_line({'session': s.sid, 'job': job.id, 'flash_starts': quiet})
+        os.makedirs(folder, exist_ok=True)
+        with open(flog, 'a', encoding='utf-8') as fh:
+            fh.write(quiet + '\n')
+        at = os.path.getsize(flog)                                      # elkflash appends to it
 
         def done(job, rc, out):
             lines = [l.strip() for l in out.splitlines() if l.strip()]
@@ -2723,10 +2767,11 @@ class Daemon:
                 with open(flog, encoding='utf-8', errors='replace') as fh:
                     fh.seek(at)
                     said = [l.strip() for l in fh.read().replace('\r', '\n').splitlines()
-                            if re.match(r'\s*(sent \d|Committed|back after|note:|Press YES|SUCCESS)', l)]
+                            if re.match(r'\s*(sent \d|Committed|back after|note:|Press YES|SUCCESS|no reply to PING)', l)]
             except OSError:
                 said = []
-            job.lines = [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + ['log: %s' % flog]
+            job.lines = [quiet] + [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + \
+                ['log: %s' % flog]
             if tgt == 'hardware':
                 if rc == 0:
                     s.os_left[a['unit']] = (os.path.basename(img), self.is_stock(a['unit'], d), d)
@@ -2769,7 +2814,7 @@ class Daemon:
         if stock:
             args += ['--baseline', Path(stock)]
         cmd = self.digiemu_cmd(args)
-        port = self.busy_port(unit, 'emulator')
+        port = self.busy_port(unit, 'emulator', 'fwcheck %s' % os.path.basename(img))
         job = Job(s, 'flash', unit, 'emulator', 'fwcheck ' + os.path.basename(img))
 
         def done(job, rc, out_text):
@@ -2804,11 +2849,11 @@ class Daemon:
             self.check_connected(unit, tgt)
             where = UNITS[unit]['port']
             din = self.din_args(s, unit, tgt, steps.split(';'))
-            port = self.hold_din(din, self.busy_port(unit, tgt))
+            port = self.hold_din(din, self.busy_port(unit, tgt, need))
         else:
             where = self.emu_port(s, unit)
             din = self.din_args(s, unit, tgt, steps.split(';'))
-            port = self.busy_port('%s@%s' % (unit, where), tgt)
+            port = self.busy_port('%s@%s' % (unit, where), tgt, need)
         folder = s.folder(unit)
         try:
             log = os.path.join(folder, 'steps.log')
@@ -2839,10 +2884,10 @@ class Daemon:
             self.check_hardware(s, [unit])
             self.check_connected(unit, tgt)
             where = UNITS[unit]['port']
-            port = self.busy_port(unit, tgt)
+            port = self.busy_port(unit, tgt, 'steps')
         else:
             where = self.emu_port(s, unit)           # digiemu's USB MIDI link (digirun --port tcp:)
-            port = self.busy_port('%s@%s' % (unit, where), tgt)
+            port = self.busy_port('%s@%s' % (unit, where), tgt, 'steps')
         folder = s.folder(unit)
         try:
             cmd = [sys.executable, script, '--port', where, 'do', steps, '--out', folder]
@@ -2993,10 +3038,10 @@ class Daemon:
             self.check_hardware(s, [a['unit']])
             self.check_connected(a['unit'], tgt)
             where = u['port']
-            port = self.busy_port(a['unit'], tgt)
+            port = self.busy_port(a['unit'], tgt, 'data %s' % op)
         else:
             where = self.emu_port(s, a['unit'])
-            port = self.busy_port('%s@%s' % (a['unit'], where), tgt)
+            port = self.busy_port('%s@%s' % (a['unit'], where), tgt, 'data %s' % op)
         try:
             cmd = [sys.executable, script, '--port', where, 'data'] + args
             if tgt == 'hardware':
