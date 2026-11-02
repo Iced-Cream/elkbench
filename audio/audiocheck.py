@@ -11,8 +11,8 @@ dropouts finds three kinds of fault on each channel and exits 1 if there is any:
          block) with sound on both sides
   click  a sample the signal's own short-term prediction cannot explain:
          the residual of a 32-tap linear predictor, fitted per 100 ms block,
-         above --click (default 100; 0 = off) times both the block's median residual and the median
-         of the next 5 ms, where the 5 ms before were already
+         above --click (default 100; 0 = off) times both the block's median
+         residual (over its sounding part) and the median of the next 5 ms, where the 5 ms before were already
          sounding (above -50 dBFS) at no more than 10 dB below the 5 ms after;
          so a new sound's onset is not a click, and neither is a click that
          lands on one (use gap and compare for those)
@@ -96,9 +96,10 @@ def find_gaps(x, rate, min_len=32, floor=1e-7, sound=-60):
 def find_clicks(x, rate, order=32, factor=100.0, sound=-50, rise=10.0):
     """Residual of a per-block linear predictor, against the block's median."""
     block = int(0.1 * rate)
+    ext = int(0.005 * rate)                       # the next 5 ms, past the block's end
     out = []
     for b0 in range(0, len(x) - order, block):
-        seg = x[b0:b0 + block + order]
+        seg = x[b0:b0 + block + order + ext]
         if len(seg) < 4 * order or db(np.sqrt(np.mean(seg ** 2))) < sound:
             continue
         r = np.correlate(seg, seg, "full")[len(seg) - 1:len(seg) + order]
@@ -111,14 +112,24 @@ def find_clicks(x, rate, order=32, factor=100.0, sound=-50, rise=10.0):
             continue
         e = signal.lfilter(np.concatenate(([1], -a)), [1], seg)[order:]
         mag = np.abs(e)
-        med = np.median(mag)
+        # the block's median over its sounding part only: silence before a
+        # note's onset would pull it towards zero, and the note's own
+        # residual would then stand out
+        lvl = np.sqrt(ndimage.uniform_filter1d(seg[order:] ** 2, size=ext, mode="nearest"))
+        sounding = lvl > 10 ** (sound / 20)
+        if sounding[:block].sum() < 4 * order:
+            continue
+        med = np.median(mag[:block][sounding[:block]])
         if med <= 0:
             continue
-        # against the block and the next 5 ms: an isolated sample stands out,
-        # the start of a noisy sound (a hat) does not
-        after = ndimage.median_filter(mag, size=int(0.005 * rate), mode="nearest")
-        after = np.concatenate((after[int(0.0025 * rate) + 3:], np.full(int(0.0025 * rate) + 3, med)))
-        hits = np.flatnonzero(mag > factor * np.maximum(med, after))
+        # against the block and the next 5 ms (measured, also past the block's
+        # end): an isolated sample stands out, the start of a noisy sound (a
+        # hat) does not
+        after = ndimage.median_filter(mag, size=ext, mode="nearest")
+        sh = int(0.0025 * rate) + 3
+        after = np.concatenate((after[sh:], np.full(sh, med)))
+        n = min(block, len(mag))
+        hits = np.flatnonzero(mag[:n] > factor * np.maximum(med, after[:n]))
         last, w = -rate, int(0.005 * rate)
         for h in hits:
             # only inside sound that was already going at about the same
