@@ -1411,6 +1411,40 @@ class InProcess(unittest.TestCase):
             daemon.UNITS[unit]['clear_at_release'] = saved or []
         self.assertEqual(calls, [unit, unit])
 
+    def test_release_empties_digitone_test_slots(self):
+        """On the Digitone, release lists with digirun and erases with analogrun's data clear
+        (which asks the write policy), as the data tool does there."""
+        ran = []
+        saved = daemon.DIGIHEALTH, daemon.subprocess.run, daemon.UNITS['digitone'].get('clear_at_release')
+        daemon.DIGIHEALTH = TMP
+        daemon.UNITS['digitone']['clear_at_release'] = list(range(121, 129))
+        self.d.check_connected = lambda unit, target: None
+        # the Digitone lists only full slots: an empty one has no row at all
+        full = ('PRESETS                  id    1   4194304 B  ops 0x0012  +metadata\n'
+                '~T SETUP                 id  121   4194304 B  ops 0x007e  +metadata\n'
+                '~T SETUP                 id  123   4194304 B  ops 0x007e  +metadata\n')
+        empty = 'PRESETS                  id    1   4194304 B  ops 0x0012  +metadata\n'
+        results = iter([subprocess.CompletedProcess([], 0, full, ''),
+                        subprocess.CompletedProcess([], 0, 'cleared /projects/121\n', ''),
+                        subprocess.CompletedProcess([], 0, 'cleared /projects/123\n', ''),
+                        subprocess.CompletedProcess([], 0, empty, '')])
+        daemon.subprocess.run = lambda cmd, **kw: (ran.append(cmd), next(results))[1]
+        try:
+            self.assertTrue(daemon.clears_at_release('digitone'))
+            ok, lines = self.d.empty_test_slots(self.s, 'digitone')
+        finally:
+            daemon.DIGIHEALTH, daemon.subprocess.run = saved[:2]
+            daemon.UNITS['digitone']['clear_at_release'] = saved[2] or []
+            del self.d.check_connected
+        self.assertTrue(ok, lines)
+        self.assertEqual(lines[-1], 'test slots 121-128 empty (data ls)')
+        digirun = os.path.join(TMP, 'tools', 'digirun.py')
+        self.assertEqual([c[6] for c in ran], [digirun, daemon.RUNNER, daemon.RUNNER, digirun])
+        self.assertEqual([c[10:12] for c in ran], [['ls', '/projects'], ['clear', '/projects/121'],
+                                                 ['clear', '/projects/123'], ['ls', '/projects']])
+        self.assertEqual(ran[1][-1], '--yes')
+        self.assertFalse(daemon.clears_at_release('digitone'))   # unset again
+
     def test_clear_at_release_setting(self):
         self.assertEqual(daemon.slot_numbers('121-124, 127'), [121, 122, 123, 124, 127])
         self.assertEqual(daemon.slot_numbers([128, 121]), [121, 128])
