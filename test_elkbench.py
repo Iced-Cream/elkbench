@@ -939,8 +939,24 @@ class InProcess(unittest.TestCase):
         with self.assertRaisesRegex(daemon.Refused, 'power cycle 1 has no machine assertion'):
             self.d.plan_info(noread)
         os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        build = os.path.join(TMP, 'os', 'test-build.syx')
         with self.assertRaisesRegex(daemon.Refused, 'batches do not power cycle yet'):
-            self.d.t_batch(self.s, {'gate': True, 'plans': [plan], 'build': os.path.join(TMP, 'os', 'test-build.syx')})
+            self.d.t_batch(self.s, {'plan': plan, 'variants': [{}], 'build': build})
+        self.d.emu_has_snapshots = lambda unit: False
+        saved = daemon.ANALOG_EMU, daemon.ELKFLASH
+        daemon.ANALOG_EMU = daemon.ELKFLASH = TMP
+        self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
+        # a gate runs only start runs that stop before the first power cycle: a run from a start
+        # that must pass (no contrast for it) would reach the power cycle
+        self.with_starts()
+        with self.assertRaisesRegex(daemon.Refused, r'start dirty \(must pass\).* would reach the power cycle'):
+            self.d.t_batch(self.s, {'gate': True, 'plans': [plan], 'build': build})
+        late = os.path.join(TMP, 'pc-late.txt')
+        with open(late, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('refs = refs/menus', 'refs = %s' % os.path.join(PLANS, 'refs', 'menus')).replace(
+                'power-cycle\n', 'power-cycle\nsay contrast fresh, dirty, occupied, testslot: x\n'))
+        with self.assertRaisesRegex(daemon.Refused, r'stop in \[kept\]\).* would reach'):
+            self.d.t_batch(self.s, {'gate': True, 'plans': [late], 'build': build})
 
     def test_power_cycle_emulator(self):
         self.fake_power_off_emulator()
@@ -972,6 +988,12 @@ class InProcess(unittest.TestCase):
         self.assertIn('did not finish its power-fail handler', line)
         self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build})   # without --power-off
         self.assertIn('did not start with --power-off', self.d.power_cycle(self.s, 'rytm')[1])
+        self.d.stop_emulator(self.d.emulators[(self.s.sid, 'rytm')])
+        # power_off on the emulator tool: a plan with power-cycle steps then runs on it without build
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build, 'power_off': True})
+        self.assertIn('--power-off', self.d.emulators[(self.s.sid, 'rytm')]['cmd'])
+        self.assertEqual(self.d.emu_ready(self.s, 'rytm', None, power_off=True)[1], [])
+        self.d.stop_emulator(self.d.emulators[(self.s.sid, 'rytm')])
 
     @needs_runner
     def test_power_cycle_run_plan(self):
@@ -1832,6 +1854,81 @@ class InProcess(unittest.TestCase):
         out = gate()
         self.assertTrue(out[0].startswith('ok: nothing to gate'), out)
         self.assertEqual(len(ran), n)
+
+    @needs_runner
+    def test_gate_runs_a_power_cycle_plans_start_runs(self):
+        """A gate batch runs a power-cycle plan's start runs, each up to its first power cycle, and
+        records them; its own pass comes from run_plan, and the go then takes the plan."""
+        self.with_starts()
+        saved = daemon.ANALOG_EMU, daemon.ELKFLASH
+        daemon.ANALOG_EMU = daemon.ELKFLASH = TMP
+        self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        # the plan names its OS (os =): the gate boots that file, with no build given
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        plan = os.path.join(PLANS, 'pc-contrasted.txt')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(read(os.path.join(PLANS, 'power-cycle.txt')).replace(
+                'name = power cycle', 'name = pc contrasted\nos = %s' % build).replace('out = runs', 'out = runs-pc').replace(
+                'tap GLOBAL\nexpect-screen global-menu 2\ntap NO\n',
+                'tap GLOBAL\nsay contrast fresh, dirty, occupied: the menu differs\nexpect-screen global-menu 2\ntap NO\n', 1))
+        self.addCleanup(os.remove, plan)
+        info = self.d.plan_info(plan)
+        self.assertEqual(info['check']['errors'], [])
+        self.assertEqual(daemon.starts_needed(info), {'dirty': 'start', 'occupied': 'start', 'fresh': 'start'})
+        self.d.emu_has_snapshots = lambda unit: False
+        booted = []
+
+        def emu(unit, build, work, minutes, snapshot=None, din=False):
+            booted.append(build)
+            return None, 'tcp:127.0.0.1:7001', None, None
+        self.d.batch_emulator = emu
+        self.d.saved_projects = lambda addr, folder: {121: ('~T A', 'a')}
+        twins = []
+
+        def run(cmd, **kw):
+            twin = read(cmd[-1])
+            out = re.search(r'^out = (.+)$', twin, re.M).group(1)
+            os.makedirs(out, exist_ok=True)
+            if 'start ' in twin.splitlines()[0]:
+                with open(os.path.join(out, 'summary.json'), 'w') as fh:
+                    json.dump({'emulator': True, 'pass': True}, fh)
+                return subprocess.CompletedProcess(cmd, 0, 'x on the emulator: PASS (1 steps, 1 s) - %s\n' % out, '')
+            twins.append(twin)
+            d = os.path.join(out, 'run-%d' % len(twins))
+            os.makedirs(d)
+            with open(os.path.join(d, 'summary.json'), 'w') as fh:
+                json.dump({'emulator': True, 'pass': False,
+                           'steps': [{'step': 'start', 'result': 'FAIL', 'detail': 'differs'}]}, fh)
+            return subprocess.CompletedProcess(cmd, 1, 'x on the emulator: FAIL (3 steps, 1 s) - %s\n' % d, '')
+        import types
+        daemon.subprocess = types.SimpleNamespace(**dict(vars(subprocess), run=run))
+        self.addCleanup(setattr, daemon, 'subprocess', subprocess)
+        out = self.d.t_batch(self.s, {'gate': True, 'plans': [plan]})
+        self.assertTrue(out[0].startswith('running'), out)
+        self.assertIn('its own pass comes from run_plan target emulator', '\n'.join(out))
+        res = self.d.t_status(self.s, {'run_id': out[0].split('run_id ')[1].split()[0], 'wait_s': 30})
+        text = '\n'.join(res)
+        self.assertTrue(res[0].startswith('done: '), res)
+        self.assertIn('0 of 0 plan(s) passed and recorded as their emulator pass; 3 of 3 start run(s)', text)
+        self.assertEqual(set(booted), {build})
+        self.assertEqual(len(twins), 3)                        # no main run: it would power cycle
+        for t in twins:
+            self.assertNotIn('power-cycle', t)
+            self.assertNotIn('after the power cycle', t)
+            self.assertNotIn('expect-screen global-menu 2\n', t.split('[kept]')[1])
+            self.assertIn('[start]', t)
+        # the go wants the plan's own pass, which run_plan records
+        with self.assertRaisesRegex(daemon.Refused, 'no passing emulator run'):
+            self.d.go_request(self.s, {'plans': [plan]})
+        self.fake_pass(self.d.plan_info(plan))
+        _, body = self.d.go_request(self.s, {'plans': [plan]})
+        self.assertIn('start fresh: stopped in [start] as its contrast says', body)
+        self.assertIn('POWER CYCLE BY HAND', body)
+        # again: the start runs stand, nothing runs
+        out = self.d.t_batch(self.s, {'gate': True, 'plans': [plan]})
+        self.assertTrue(out[0].startswith('ok: nothing to gate'), out)
+        self.assertEqual(len(twins), 3)
 
     @needs_runner
     def test_a_start_snapshot_is_built_once(self):

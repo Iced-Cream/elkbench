@@ -37,6 +37,9 @@ reaches the hardware only with something that has already worked in the emulator
   power cycle by hand is done. A readback after it proves what it had to keep, and stops the run
   if it doesn't. A pass from an emulator that never lost power proves only "kept with nothing
   happening".
+  Batches don't power cycle yet: such a plan's contrasts belong in sections before its first
+  power cycle (a gate batch runs its start runs up to there), and its own pass comes from
+  `run_plan`, on an emulator started with `power_off` when earlier plans set up its state.
 - **A power cycle by hand outside a plan** is for units or OSes the emulator can't power off.
   It may run ungated when the go names it as such, every other step of the run has its
   emulator pass, the run pauses until the owner says it is done, and the next plan starts with a
