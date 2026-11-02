@@ -1,0 +1,56 @@
+# Template: a listening check on a Digitone. The listen text has three parts: what to hear,
+# `allowed:` what the person may do on the unit by hand (or nothing), and `needs:` the audible
+# precondition. The text is the instruction: a different instruction (said in the thread, say) is a
+# different plan, with its own emulator pass.
+#
+# The Digitone screen shows nothing of PLAY (no page tried on OS 1.44 differs between playing and
+# stopped), so the section proves on screen what the screen can show (track 1 TRIG page, entered
+# from home), and a level check before it proves on the unit that track 1 sounds.
+format = 1
+name = listening check
+unit = digitone
+refs = refs/digitone-listen
+out = runs
+note = ~T SETUP active, loaded new (A01 UNTITLED, 120.0); stopped
+
+[start]
+# Home first, then track 1 TRIG page from there. The page title row (rows 0-9) shows "Trig
+# Parameters" only for a moment, so the check compares rows 10-63: they differ from the SYN1 page
+# (cols 18-127) and from T2 TRIG page (the track digit, rows 24-31 cols 5-9), so one check proves
+# both the page and the track.
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 0.4
+tap NO
+wait 1.0
+tap T1
+wait 0.4
+tap TRIG
+wait 1.5
+expect-screen t1-trig-page 2 rows=10-63
+
+[setup: T1 on step 1, playing]
+say proves setup: one track 1 trig on step 1, the pattern started
+tap RECORD
+wait 0.5
+tap 1
+wait 0.5
+tap RECORD
+wait 0.5
+tap PLAY
+wait 1.5
+
+[level check (hardware)]
+say proves works: track 1 sounds (channels 3,4) before the person is asked to listen
+audio-record 3 level
+audio-compare level-ref level 3,4
+
+[L1 track 1 plays steadily]
+say proves evidence: the ear of the person, with the page proven on screen and the sound by the level check
+expect-screen t1-trig-page-playing 2 rows=10-63
+listen Track 1 plays once per bar, steady, with no clicks or dropouts. allowed: nothing on the unit; the volume on your own speakers only. needs: the pattern playing (the level check passed; the screen shows no play state) on the track 1 TRIG page (checked on screen). Say finished when done.
+tap STOP
+wait 1

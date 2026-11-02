@@ -21,8 +21,8 @@ note = BUILD flashed over PREVIOUS
 
 [after the flash]
 say proves evidence: the unit answers and the home screen after the reboot
-# ping reads the product and OS version; on the Digitone it needs a digirun that has it (digihealth's
-# runner-capture-ping) and an OS with a remote path (on stock, leave ping out and keep the shot)
+# With a digirun that has `ping` (digihealth's runner-capture-ping) and an OS with a remote path,
+# add `ping` before the shot: it reads the product and OS version. digirun without it refuses the
+# step, and stock 1.44 has no remote path, so the template keeps the shot only.
 wait 2
-ping
 shot after-flash.png
