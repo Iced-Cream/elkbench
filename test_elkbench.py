@@ -927,6 +927,12 @@ class InProcess(unittest.TestCase):
             fh.write(text.replace('format = 1', 'format = 1\nsnapshot-after = nope', 1))
         with self.assertRaisesRegex(daemon.Refused, 'snapshot-after names no section'):
             self.d.plan_info(bad)
+        # nothing the emulator runs after the setup: every resumed run would have no step
+        last = re.findall(r'^\[(.+)\]$', text, re.M)[-1]
+        with open(bad, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('format = 1', 'format = 1\nsnapshot-after = %s' % last, 1))
+        with self.assertRaisesRegex(daemon.Refused, 'leaves no section the emulator runs after it'):
+            self.d.plan_info(bad)
 
     def fake_power_off_emulator(self, unit='rytm'):
         """A stand-in analog-emu in TMP: it says its USB MIDI port listens and, given

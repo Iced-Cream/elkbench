@@ -1165,6 +1165,12 @@ class Daemon:
             if after not in names:
                 raise Refused('snapshot-after names no section of the plan: %r' % after)
             setup = names.index(after) + 1
+            # the emulator skips (hardware) sections: with nothing else after the setup, every
+            # run that resumes the snapshot (and the setup run's second part) has no step and fails
+            if not any(ls for n, ls in steps[setup:] if not n.endswith('(hardware)')):
+                raise Refused('snapshot-after = %r leaves no section the emulator runs after it (only '
+                              '(hardware) ones or none): name an earlier section, so steps the emulator '
+                              'can check run after each resume' % after)
         cycles = power_cycles(steps)
         if cycles:
             self.check_power_cycles(unit, steps, flash, setup)
