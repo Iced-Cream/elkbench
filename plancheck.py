@@ -18,6 +18,12 @@ What a plan must carry (see docs/testing-practices.md, "Plan checker and templat
   proves the precondition on screen.
 - **NO to "save before loading".** An `expect-screen` whose reference name contains
   `save-before-load` must be followed by a NO press.
+- **Checks that can fail (contrast runs).** A section names the starts from which it must
+  stop the run: `say contrast START[,START]: why`. START is `fresh` (a fresh emulator: the card
+  as shipped) or one of the unit's built-in starts (elkbench's `starts/` folder, such as
+  `dirty`, `testslot`, `occupied`). Where the unit has built-in starts, the first section needs
+  one: a start check that has never been seen to fail is not yet a check. Each start is named
+  in one section at most.
 """
 import os
 import shlex
@@ -56,6 +62,26 @@ def proves_of(lines):
         if len(w) >= 2 and w[0].lower() == 'say' and w[1].lower().rstrip(':') == 'proves':
             return w[2].lower().rstrip(':') if len(w) > 2 else '?'
     return ''
+
+
+def contrasts_of(steps):
+    """-> [(section, start, why)] from `say contrast START[,START]: why` lines, in plan order;
+    a start written badly comes back as given, for check() to name."""
+    out = []
+    for name, lines in steps:
+        for l in lines:
+            w = words(l)
+            if len(w) >= 2 and w[0].lower() == 'say' and w[1].lower().rstrip(':') == 'contrast':
+                text = l.strip()[len(w[0]):].strip()[len(w[1]):].strip()
+                head, _, why = text.partition(':') if not w[1].endswith(':') else ('', '', text)
+                for start in head.split(','):
+                    out.append((name, start.strip().lower(), why.strip()))
+    return out
+
+
+def expected_stops(steps):
+    """{start: the section a run from that start must stop in} from the plan's contrasts."""
+    return {start: name for name, start, _ in contrasts_of(steps) if start}
 
 
 def listen_parts(text):
@@ -108,13 +134,15 @@ def rows_of(w):
     return span_of(w, 'rows')
 
 
-def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False):
+def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False, starts=('fresh',)):
     """steps: [(section name, [step lines])]. flash: the OS file the plan flashes, or None;
-    stock: whether that file is the unit's stock OS. -> dict(errors=[...], flags=[...],
-    proves=[(section, kind)])."""
+    stock: whether that file is the unit's stock OS; starts: the starts this unit's emulator
+    runs (`fresh` and its built-in ones). -> dict(errors=[...], flags=[...],
+    proves=[(section, kind)], contrasts=[(section, start, why)])."""
     errors, flags, proves = [], [], []
+    contrasts = contrasts_of(steps)
     if emulator:
-        return dict(errors=errors, flags=flags, proves=proves)
+        return dict(errors=errors, flags=flags, proves=proves, contrasts=contrasts)
     all_words = [(name, words(l)) for name, lines in steps for l in lines]
     asserts = [w for _, w in all_words if is_assert(w)]
     writes = [w for _, w in all_words if w and w[0].lower() in WRITE_OPS]
@@ -215,6 +243,34 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
                     flags.append('[%s] note %s: the Rytm starts a track only from notes 0-11 on its auto '
                                  'channel, so this plays nothing' % (name, w[2]))
 
+    # 6. contrasts: each names a start the unit has, once; the start check has one
+    seen = {}
+    for name, start, why in contrasts:
+        if not start or start not in starts:
+            errors.append('[%s] say contrast %s: the %s emulator starts are %s' % (
+                name, start or '(none named)', unit, ', '.join(starts)))
+        elif start in seen and seen[start] != name:
+            errors.append('[%s] and [%s] both name contrast %s: a run from one start stops in one section'
+                          % (seen[start], name, start))
+        else:
+            seen.setdefault(start, name)
+        if start and not why:
+            errors.append('[%s] say contrast %s: say why it stops there (`say contrast %s: why`)'
+                          % (name, start, start))
+    if steps and not flash_only:
+        first = steps[0][0]
+        if not any(n == first for n, _, _ in contrasts):
+            if len(starts) > 1:
+                errors.append('[%s] has no contrast: name a start from which the start check stops the run '
+                              '(`say contrast START: why`; starts: %s), so it is seen to fail'
+                              % (first, ', '.join(starts)))
+            else:
+                flags.append('[%s] start check never seen to fail (no contrast; the %s emulator has only '
+                             'the fresh start)' % (first, unit))
+        for (name, kind) in proves[1:]:
+            if kind in ('set-and-kept', 'works') and not any(n == name for n, _, _ in contrasts):
+                flags.append('[%s] never seen to fail: no `say contrast` start stops the run there' % name)
+
     # 7. listening steps
     for name, lines in steps:
         seen_check = False
@@ -249,7 +305,7 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
                     errors.append('[%s] after expect-screen %s the plan presses %s: "SAVE ... BEFORE LOADING?" '
                                   'is always answered NO' % (name, pending, first or '?'))
                 pending = None
-    return dict(errors=errors, flags=flags, proves=proves)
+    return dict(errors=errors, flags=flags, proves=proves, contrasts=contrasts)
 
 
 def shared_refs(infos):
@@ -276,4 +332,6 @@ def go_lines(result):
         by.setdefault(kind, []).append(name)
     out = ['  proves: ' + '; '.join('%s: %s' % (k, ', '.join('[%s]' % n for n in by[k]))
                                     for k in ('start',) + PROVES if k in by)] if by else []
+    out += ['  contrast: from %s it stops in [%s] (%s)' % (start, name, why)
+            for name, start, why in result.get('contrasts') or []]
     return out + ['  CHECK: ' + f for f in result['flags']]

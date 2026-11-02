@@ -23,6 +23,12 @@ tap NO
 wait 0.5
 tap NO
 wait 1.0
+# The start check: the run's own test project is active (the setup plan ran first in this run).
+# The home title row (rows 0-6) of a new project reads K001:KIT 1 and BPM:120.0. The contrast: a
+# fresh card and the built-in dirty and occupied starts have another project or kit active, so this
+# check stops the run there; this plan's own pass comes from run_plan after the setup plan.
+say contrast fresh, dirty, occupied: another project or kit is active, so the title row differs
+expect-screen test-project-title 2 rows=0-6
 keys TRK(SD)
 wait 0.4
 tap TRIG

@@ -116,6 +116,39 @@ class Rules(unittest.TestCase):
         self.assertEqual(check('[x]\nshot a.png\n', emulator=True)['errors'], [])
 
 
+class Contrasts(unittest.TestCase):
+    STARTS = ('fresh', 'dirty', 'occupied', 'testslot')
+
+    def test_a_start_check_needs_a_contrast_where_the_unit_has_starts(self):
+        r = check(GOOD, starts=self.STARTS)
+        self.assertTrue(any('[start] has no contrast' in e for e in r['errors']), r['errors'])
+        r = check(GOOD)                                     # only `fresh`: a flag, not an error
+        self.assertEqual(r['errors'], [])
+        self.assertTrue(any('start check never seen to fail' in f for f in r['flags']), r['flags'])
+
+    def test_contrasts_are_read_and_listed(self):
+        text = GOOD.replace('tap NO\n', 'tap NO\nsay contrast fresh, testslot: a default project shows no value\n', 1)
+        r = check(text, starts=self.STARTS)
+        self.assertEqual(r['errors'], [])
+        self.assertEqual(r['contrasts'], [('start', 'fresh', 'a default project shows no value'),
+                                          ('start', 'testslot', 'a default project shows no value')])
+        self.assertEqual(plancheck.expected_stops(parse(text)), {'fresh': 'start', 'testslot': 'start'})
+        self.assertTrue(any('[set the value] never seen to fail' in f for f in r['flags']), r['flags'])
+        self.assertIn('  contrast: from testslot it stops in [start] (a default project shows no value)',
+                      plancheck.go_lines(r))
+
+    def test_bad_contrasts_are_refused(self):
+        for line, why in (('say contrast nowhere: x', 'the rytm emulator starts are'),
+                          ('say contrast dirty', 'say why it stops there'),
+                          ('say contrast: x', '(none named)')):
+            r = check(GOOD.replace('tap NO\n', 'tap NO\n%s\n' % line, 1), starts=self.STARTS)
+            self.assertTrue(any(why in e for e in r['errors']), (line, r['errors']))
+        twice = GOOD.replace('tap NO\n', 'tap NO\nsay contrast dirty: a\n', 1).replace(
+            'cc 1 10 64', 'say contrast dirty: b\ncc 1 10 64')
+        r = check(twice, starts=self.STARTS)
+        self.assertTrue(any('both name contrast dirty' in e for e in r['errors']), r['errors'])
+
+
 class References(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.mkdtemp(prefix='plancheck-')
@@ -171,7 +204,8 @@ class Templates(unittest.TestCase):
             with open(os.path.join(folder, n), encoding='utf-8') as fh:
                 text = fh.read()
             flash = re.search(r'^flash\s*=\s*(\S+)', text, re.M)
-            r = plancheck.check(parse(text), flash=flash and flash.group(1))
+            r = plancheck.check(parse(text), flash=flash and flash.group(1),
+                                starts=('fresh', 'dirty', 'occupied', 'testslot'))
             self.assertEqual(r['errors'], [], n)
             ref = re.search(r'^refs\s*=\s*(\S+)', text, re.M)
             if ref:
@@ -191,6 +225,20 @@ class Templates(unittest.TestCase):
                             shlex.split(l, comments=True)
                         except ValueError as e:
                             self.fail('%s [%s] %r: %s' % (n, name, l, e))
+
+
+    def test_every_start_parses(self):
+        import shlex
+        folder = os.path.join(HERE, 'starts')
+        files = [os.path.join(r, f) for r, _, fs in os.walk(folder) for f in fs if f.endswith('.txt')]
+        self.assertGreaterEqual(len(files), 3)
+        for p in files:
+            with open(p, encoding='utf-8') as fh:
+                text = fh.read()
+            self.assertRegex(text, r'(?m)^emulator = yes$', p)
+            for name, lines in parse(text):
+                for l in lines:
+                    shlex.split(l, comments=True)
 
 
 if __name__ == '__main__':
