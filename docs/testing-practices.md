@@ -255,8 +255,9 @@ their answer to the client's prompt. A session can't end it itself.
   start a test from the project that happens to be active. If the run can't confirm which
   project is active, it writes nothing to it.
 - **On the Analog Four MKII, INIT NEW is not new in a used slot.** INIT NEW into a slot that has
-  ever held a project brings back that project's kits, sounds and patterns (only the name and
-  tempo are new), however the slot was emptied: data-store clear, DELETE or CLEAR. So the A4's
+  ever held a project brings back that project's kit, sounds and pattern data (only the name and
+  tempo are new), however the slot was cleared: data-store clear, DELETE, or the panel's CLEAR
+  (which leaves a project named CLEAN). So the A4's
   test project comes from CREATE NEW (the LOAD PROJECT list's last row), which starts from
   nothing, saved into the test slot with SAVE PROJECT AS. A copy of a project made that way
   carries no old state. Loading the test slot then proves it is active (with unsaved changes the
