@@ -1,21 +1,23 @@
-# Template: the plan after a power cycle by the person's hand on an Analog Four MKII, proving what
-# the power cycle had to keep. The run pauses for the power cycle and waits for the person's typed
-# "done" in the thread; the go request names it ("hand power cycle, no emulator gate"), and every
-# plan before and after has its emulator pass. This plan's emulator pass runs on an emulator that
-# never lost power: its start check must be one that a default project fails.
+# Template: a value kept across a power cycle on an Analog Four MKII, read back before and after it.
+# The `power-cycle` step runs in the emulator too: elkbench switches analog-emu off with its
+# power-off save (the OS writes its working state to the card), then cold-boots it on that card.
+# On the unit the run waits at the step until the person has power cycled it by hand and said
+# "done" in the thread; the go request names the step. A pass so means "kept across a power
+# cycle", not "kept with nothing happening". After the step the unit is at its start-up screen:
+# reach the page again from a known page.
 format = 1
 name = kept after the power cycle
 unit = a4
 refs = refs/a4-power-cycle-readback
 out = runs
-note = ~T SETUP active: read only after the power cycle
+note = ~T SETUP active, with the value to keep set and saved by an earlier plan
 
 [start]
-# The readback is the start check: reach the page from a known page (a track key, then the page
-# key), and compare only the rows that show the kept value. A row that shows which page is open
-# passes on a default project too, and proves nothing about what was kept. ENV and LFO each cycle
-# between two pages (ENV1/ENV2, LFO1/LFO2): enter them from another page, so the first press
-# opens the first one.
+# The readback before the power cycle: the value is there now. Reach the page from a known page (a
+# track key, OSC1, then the page key), and compare only the rows that show the kept value. A row
+# that shows which page is open passes on a default project too, and proves nothing about what
+# was kept. ENV and LFO each cycle between two pages (ENV1/ENV2, LFO1/LFO2): entered from another
+# page, the first press opens the first one.
 wait 3
 tap NO
 wait 0.5
@@ -29,17 +31,32 @@ tap OSC1
 wait 0.6
 tap LFO
 wait 1.0
-shot readback.png
-# the value the earlier plan set and saved, e.g. LFO1's first DST (knob G; LFO 1 P 1/2 has SPD MUL
-# FAD SPH MOD on top, WAV DST DEP DST DEP below), in the rows below the title bar: stop otherwise
-# A DST knob opens the destination list as a popup, and the value is set only by YES: the
-# earlier plan that sets it confirms it with YES, and checks it is shown before it saves.
+shot before.png
+# The value the earlier plan set and saved, e.g. LFO1's first DST (knob G; LFO 1 P 1/2 has SPD MUL
+# FAD SPH MOD on top, WAV DST DEP DST DEP below), in the rows below the title bar: stop otherwise.
+# A DST knob opens the destination list as a popup, and the value is set only by YES: the earlier
+# plan confirms it with YES and checks it is shown before it saves.
+# The contrast: on a fresh card the earlier plan set no value, so this check has to stop the run.
+# This plan's own pass comes from run_plan after that plan.
+say contrast fresh: a default project has no such value, so the readback stops the run
 expect-screen kept-value 1 rows=8-63
 
-[the rest of the plan]
-say proves set-and-kept: a second kept value, read back the same way
+[kept after the power cycle]
+say proves set-and-kept: the value reads back the same after a power cycle
+power-cycle
+# the start-up screen first, then the same way to the page
+wait 3
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 1.0
+tap T1
+wait 0.5
 tap OSC1
 wait 0.6
-tap FLTR
-wait 0.8
-expect-screen kept-value-2 1 rows=8-63
+tap LFO
+wait 1.0
+shot after.png
+expect-screen kept-value 1 rows=8-63

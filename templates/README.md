@@ -18,7 +18,7 @@ five plans, where its menus allow them:
 
 | folder | unit |
 |---|---|
-| `a4/` | Analog Four MKII, OS 1.56 with a remote-key path. The test project comes from CREATE NEW and SAVE PROJECT AS (the A4 has no INIT NEW into a slot) |
+| `a4/` | Analog Four MKII, OS 1.56 with a remote-key path. The test project comes from CREATE NEW and SAVE PROJECT AS (the A4 has no INIT NEW into a slot). The A4 has no built-in starts yet, so its contrasts name `fresh` only |
 
 A refs folder is never shared, across every folder here: the A4's are named `refs/a4-...`. No reference
 screens ship: record each plan's own in the emulator (`run_plan ... record_refs`), and check the

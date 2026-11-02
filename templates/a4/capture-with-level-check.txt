@@ -24,6 +24,12 @@ tap NO
 wait 0.5
 tap NO
 wait 1.0
+# The start check: the run's own test project is active (the setup plan ran first in this run).
+# The home title row (rows 0-7) of a new project reads K001:KIT 1 and BPM:120.0. The contrast: a
+# fresh card has another project and kit active, so this check stops the run there; this plan's
+# own pass comes from run_plan after the setup plan.
+say contrast fresh: another project or kit is active, so the title row differs
+expect-screen test-project-title 2 rows=0-7
 # OSC1 steps between OSC1 (P 1/2) and NOISE (P 2/2), and a track key keeps the page, so OSC1 is
 # entered from another page (FLTR): its first press then always opens P 1/2.
 tap T1
@@ -32,7 +38,7 @@ tap FLTR
 wait 0.6
 tap OSC1
 wait 0.6
-# the start check: T1's OSC1 page 1/2, by its knob labels and dials (rows 8-63). The title
+# then T1's OSC1 page 1/2, by its knob labels and dials (rows 8-63). The title
 # bar names the page only for a moment before it goes back to the kit's name.
 expect-screen t1-osc1-page 2 rows=8-63
 # and the sequencer stopped (the stop square where the play indicator goes): PLAY on a playing
