@@ -194,38 +194,60 @@ tap YES
         self.assertFalse(any('BEFORE LOADING' in e for e in r['errors']), r['errors'])
 
 
+def template_files():
+    """Every template under templates/, its subfolders (one per unit) included, as (label, path)."""
+    root = os.path.join(HERE, 'templates')
+    out = []
+    for d, subs, files in os.walk(root):
+        subs.sort()
+        for f in sorted(files):
+            if f.endswith('.txt'):
+                path = os.path.join(d, f)
+                out.append((os.path.relpath(path, root).replace(os.sep, '/'), path))
+    return out
+
+
+def unit_starts(unit):
+    """('fresh', and the unit's built-in starts in starts/UNIT/)."""
+    folder = os.path.join(HERE, 'starts', unit)
+    names = sorted(f[:-4] for f in os.listdir(folder) if f.endswith('.txt')) if os.path.isdir(folder) else []
+    return ('fresh',) + tuple(names)
+
+
 class Templates(unittest.TestCase):
     def test_every_template_passes_the_checker(self):
-        folder = os.path.join(HERE, 'templates')
-        names = sorted(f for f in os.listdir(folder) if f.endswith('.txt'))
-        self.assertGreaterEqual(len(names), 5)
-        refs = set()
-        for n in names:
-            with open(os.path.join(folder, n), encoding='utf-8') as fh:
+        found = template_files()
+        self.assertGreaterEqual(len(found), 5)
+        refs = {}
+        for n, path in found:
+            with open(path, encoding='utf-8') as fh:
                 text = fh.read()
             flash = re.search(r'^flash\s*=\s*(\S+)', text, re.M)
-            r = plancheck.check(parse(text), flash=flash and flash.group(1),
-                                starts=('fresh', 'dirty', 'occupied', 'testslot'))
+            unit = re.search(r'^unit\s*=\s*(\S+)', text, re.M)
+            unit = unit.group(1) if unit else 'rytm'
+            r = plancheck.check(parse(text), unit=unit, flash=flash and flash.group(1),
+                                starts=unit_starts(unit))
             self.assertEqual(r['errors'], [], n)
+            # one refs folder per template, across every unit's folder: a plan copied from one
+            # keeps its refs line, and two plans in a run must never compare the same file
             ref = re.search(r'^refs\s*=\s*(\S+)', text, re.M)
             if ref:
-                self.assertNotIn(ref.group(1), refs, '%s shares its refs folder' % n)
-                refs.add(ref.group(1))
+                self.assertNotIn(ref.group(1), refs, '%s shares its refs folder with %s'
+                                 % (n, refs.get(ref.group(1))))
+                refs[ref.group(1)] = n
 
     def test_every_template_step_parses(self):
         # analogrun splits each step with shlex: a stray quote mark (an apostrophe in a say or
         # listen line) stops the run at that step
         import shlex
-        folder = os.path.join(HERE, 'templates')
-        for n in sorted(f for f in os.listdir(folder) if f.endswith('.txt')):
-            with open(os.path.join(folder, n), encoding='utf-8') as fh:
+        for n, path in template_files():
+            with open(path, encoding='utf-8') as fh:
                 for name, lines in parse(fh.read()):
                     for l in lines:
                         try:
                             shlex.split(l, comments=True)
                         except ValueError as e:
                             self.fail('%s [%s] %r: %s' % (n, name, l, e))
-
 
     def test_every_start_parses(self):
         import shlex
