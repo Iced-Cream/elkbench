@@ -939,8 +939,24 @@ class InProcess(unittest.TestCase):
         with self.assertRaisesRegex(daemon.Refused, 'power cycle 1 has no machine assertion'):
             self.d.plan_info(noread)
         os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        build = os.path.join(TMP, 'os', 'test-build.syx')
         with self.assertRaisesRegex(daemon.Refused, 'batches do not power cycle yet'):
-            self.d.t_batch(self.s, {'gate': True, 'plans': [plan], 'build': os.path.join(TMP, 'os', 'test-build.syx')})
+            self.d.t_batch(self.s, {'plan': plan, 'variants': [{}], 'build': build})
+        self.d.emu_has_snapshots = lambda unit: False
+        saved = daemon.ANALOG_EMU, daemon.ELKFLASH
+        daemon.ANALOG_EMU = daemon.ELKFLASH = TMP
+        self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
+        # a gate runs only start runs that stop before the first power cycle: a run from a start
+        # that must pass (no contrast for it) would reach the power cycle
+        self.with_starts()
+        with self.assertRaisesRegex(daemon.Refused, r'start dirty \(must pass\).* would reach the power cycle'):
+            self.d.t_batch(self.s, {'gate': True, 'plans': [plan], 'build': build})
+        late = os.path.join(TMP, 'pc-late.txt')
+        with open(late, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('refs = refs/menus', 'refs = %s' % os.path.join(PLANS, 'refs', 'menus')).replace(
+                'power-cycle\n', 'power-cycle\nsay contrast fresh, dirty, occupied, testslot: x\n'))
+        with self.assertRaisesRegex(daemon.Refused, r'stop in \[kept\]\).* would reach'):
+            self.d.t_batch(self.s, {'gate': True, 'plans': [late], 'build': build})
 
     def test_power_cycle_emulator(self):
         self.fake_power_off_emulator()
@@ -972,6 +988,12 @@ class InProcess(unittest.TestCase):
         self.assertIn('did not finish its power-fail handler', line)
         self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build})   # without --power-off
         self.assertIn('did not start with --power-off', self.d.power_cycle(self.s, 'rytm')[1])
+        self.d.stop_emulator(self.d.emulators[(self.s.sid, 'rytm')])
+        # power_off on the emulator tool: a plan with power-cycle steps then runs on it without build
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build, 'power_off': True})
+        self.assertIn('--power-off', self.d.emulators[(self.s.sid, 'rytm')]['cmd'])
+        self.assertEqual(self.d.emu_ready(self.s, 'rytm', None, power_off=True)[1], [])
+        self.d.stop_emulator(self.d.emulators[(self.s.sid, 'rytm')])
 
     @needs_runner
     def test_power_cycle_run_plan(self):
@@ -1295,6 +1317,45 @@ class InProcess(unittest.TestCase):
             daemon.DIGIEMU, daemon.DIGIEMU_PY = saved
         self.assertEqual(cmd[:4], ['wsl', '-e', 'bash', '-lc'])
         self.assertTrue(cmd[4].endswith('~/py /mnt/d/x/y.syx 7400'), cmd[4])
+
+    def test_release_empties_test_slots(self):
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        saved, calls = daemon.UNITS['rytm'].get('clear_at_release'), []
+        daemon.UNITS['rytm']['clear_at_release'] = [121, 122]
+        try:
+            self.d.empty_test_slots = lambda s, u: (calls.append(u), (False, ['slot 122 still holds a project']))[1]
+            with self.assertRaisesRegex(daemon.Refused, 'test slots are not empty, so the claim is kept'):
+                self.d.t_release(self.s, {'unit': 'rytm', 'note': 'menus closed'})
+            self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
+            out = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'cable out', 'accept_slots_left': True})
+            self.assertTrue(out[0].startswith('ok: released'), out)
+            handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], 'rytm.handoff.json')))
+            self.assertIn('test slots 121-122 NOT EMPTY: slot 122 still holds a project', handoff['note'])
+            subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                           env=self.s.env(), capture_output=True)
+            self.d.empty_test_slots = lambda s, u: (True, ['slot 121 backed up (x) and cleared',
+                                                           'test slots 121-122 empty (data ls)'])
+            out = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'menus closed'})
+            self.assertIn('rytm: slot 121 backed up (x) and cleared', out)
+            handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], 'rytm.handoff.json')))
+            self.assertIn('test slots 121-122 empty (data ls)', handoff['note'])
+        finally:
+            del self.d.empty_test_slots
+            daemon.UNITS['rytm']['clear_at_release'] = saved or []
+        self.assertEqual(calls, ['rytm', 'rytm'])
+
+    def test_clear_at_release_setting(self):
+        self.assertEqual(daemon.slot_numbers('121-124, 127'), [121, 122, 123, 124, 127])
+        self.assertEqual(daemon.slot_numbers([128, 121]), [121, 128])
+        self.assertEqual(daemon.slot_numbers(None), [])
+        with self.assertRaises(SystemExit):
+            daemon.slot_numbers('121-x')
+        self.assertEqual(daemon.slot_text([121, 122, 123, 124, 125, 126, 127, 128, 130]), '121-128, 130')
+        ls = ('~T SETUP              id 121  54549 B\n'
+              '                      id 122  0 B (no valid data)\n'
+              'MY SONG               id 3  51200 B\n')
+        self.assertEqual(daemon.occupied_slots(ls), {121, 3})
 
     def test_release_asks_for_stock(self):
         subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
@@ -1834,6 +1895,81 @@ class InProcess(unittest.TestCase):
         self.assertEqual(len(ran), n)
 
     @needs_runner
+    def test_gate_runs_a_power_cycle_plans_start_runs(self):
+        """A gate batch runs a power-cycle plan's start runs, each up to its first power cycle, and
+        records them; its own pass comes from run_plan, and the go then takes the plan."""
+        self.with_starts()
+        saved = daemon.ANALOG_EMU, daemon.ELKFLASH
+        daemon.ANALOG_EMU = daemon.ELKFLASH = TMP
+        self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        # the plan names its OS (os =): the gate boots that file, with no build given
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        plan = os.path.join(PLANS, 'pc-contrasted.txt')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(read(os.path.join(PLANS, 'power-cycle.txt')).replace(
+                'name = power cycle', 'name = pc contrasted\nos = %s' % build).replace('out = runs', 'out = runs-pc').replace(
+                'tap GLOBAL\nexpect-screen global-menu 2\ntap NO\n',
+                'tap GLOBAL\nsay contrast fresh, dirty, occupied: the menu differs\nexpect-screen global-menu 2\ntap NO\n', 1))
+        self.addCleanup(os.remove, plan)
+        info = self.d.plan_info(plan)
+        self.assertEqual(info['check']['errors'], [])
+        self.assertEqual(daemon.starts_needed(info), {'dirty': 'start', 'occupied': 'start', 'fresh': 'start'})
+        self.d.emu_has_snapshots = lambda unit: False
+        booted = []
+
+        def emu(unit, build, work, minutes, snapshot=None, din=False):
+            booted.append(build)
+            return None, 'tcp:127.0.0.1:7001', None, None
+        self.d.batch_emulator = emu
+        self.d.saved_projects = lambda addr, folder: {121: ('~T A', 'a')}
+        twins = []
+
+        def run(cmd, **kw):
+            twin = read(cmd[-1])
+            out = re.search(r'^out = (.+)$', twin, re.M).group(1)
+            os.makedirs(out, exist_ok=True)
+            if 'start ' in twin.splitlines()[0]:
+                with open(os.path.join(out, 'summary.json'), 'w') as fh:
+                    json.dump({'emulator': True, 'pass': True}, fh)
+                return subprocess.CompletedProcess(cmd, 0, 'x on the emulator: PASS (1 steps, 1 s) - %s\n' % out, '')
+            twins.append(twin)
+            d = os.path.join(out, 'run-%d' % len(twins))
+            os.makedirs(d)
+            with open(os.path.join(d, 'summary.json'), 'w') as fh:
+                json.dump({'emulator': True, 'pass': False,
+                           'steps': [{'step': 'start', 'result': 'FAIL', 'detail': 'differs'}]}, fh)
+            return subprocess.CompletedProcess(cmd, 1, 'x on the emulator: FAIL (3 steps, 1 s) - %s\n' % d, '')
+        import types
+        daemon.subprocess = types.SimpleNamespace(**dict(vars(subprocess), run=run))
+        self.addCleanup(setattr, daemon, 'subprocess', subprocess)
+        out = self.d.t_batch(self.s, {'gate': True, 'plans': [plan]})
+        self.assertTrue(out[0].startswith('running'), out)
+        self.assertIn('its own pass comes from run_plan target emulator', '\n'.join(out))
+        res = self.d.t_status(self.s, {'run_id': out[0].split('run_id ')[1].split()[0], 'wait_s': 30})
+        text = '\n'.join(res)
+        self.assertTrue(res[0].startswith('done: '), res)
+        self.assertIn('0 of 0 plan(s) passed and recorded as their emulator pass; 3 of 3 start run(s)', text)
+        self.assertEqual(set(booted), {build})
+        self.assertEqual(len(twins), 3)                        # no main run: it would power cycle
+        for t in twins:
+            self.assertNotIn('power-cycle', t)
+            self.assertNotIn('after the power cycle', t)
+            self.assertNotIn('expect-screen global-menu 2\n', t.split('[kept]')[1])
+            self.assertIn('[start]', t)
+        # the go wants the plan's own pass, which run_plan records
+        with self.assertRaisesRegex(daemon.Refused, 'no passing emulator run'):
+            self.d.go_request(self.s, {'plans': [plan]})
+        self.fake_pass(self.d.plan_info(plan))
+        _, body = self.d.go_request(self.s, {'plans': [plan]})
+        self.assertIn('start fresh: stopped in [start] as its contrast says', body)
+        self.assertIn('POWER CYCLE BY HAND', body)
+        # again: the start runs stand, nothing runs
+        out = self.d.t_batch(self.s, {'gate': True, 'plans': [plan]})
+        self.assertTrue(out[0].startswith('ok: nothing to gate'), out)
+        self.assertEqual(len(twins), 3)
+
+    @needs_runner
     def test_a_start_snapshot_is_built_once(self):
         """With snapshots, a built-in start is built once per build and start plan, then resumed."""
         folder = self.with_starts()
@@ -1893,6 +2029,147 @@ class InProcess(unittest.TestCase):
         info = self.d.plan_info(plan)
         self.assertEqual(info['check']['errors'], [])
         self.assertEqual(daemon.starts_needed(info), {'fresh': 'start', 'dirty': 'start', 'occupied': 'start'})
+
+    @needs_runner
+    def test_a_start_builds_on_a_base_with_data_steps(self):
+        """A start file may build on another start (`base`) and run data store steps (`data`)
+        between its base and its own sections; loops and bad steps are refused."""
+        folder = self.with_starts()
+        rytm = os.path.join(folder, 'rytm')
+        with open(os.path.join(rytm, 'backup.bin'), 'wb') as fh:
+            fh.write(b'project')
+        cleared = os.path.join(rytm, 'cleared.txt')
+        with open(cleared, 'w', encoding='utf-8') as fh:
+            fh.write('format = 1\nname = start cleared\nunit = rytm\nemulator = yes\nbase = testslot\n'
+                     'data = clear /projects/121; put /projects/122 backup.bin\n\n[shot]\nshot x.png\n')
+        chain = daemon.start_chain('rytm', 'cleared')
+        self.assertEqual([c[0] for c in chain], ['testslot', 'cleared'])
+        self.assertEqual(chain[0][2], [])
+        self.assertEqual(chain[1][2], [('clear', '/projects/121', None),
+                                       ('put', '/projects/122', os.path.join(rytm, 'backup.bin'))])
+        # the build: the base's plan, then the data steps, then the start's own sections
+        calls = []
+
+        def run(cmd, **kw):
+            if 'data' in cmd:
+                calls.append(('data', cmd[cmd.index('data') + 1], cmd[cmd.index('data') + 2]))
+                return subprocess.CompletedProcess(cmd, 0, 'ok\n', '')
+            twin = read(cmd[-1])
+            out = re.search(r'^out = (.+)$', twin, re.M).group(1)
+            calls.append(('plan', re.search(r'^include = (.+)$', twin, re.M).group(1)))
+            os.makedirs(out, exist_ok=True)
+            with open(os.path.join(out, 'summary.json'), 'w') as fh:
+                json.dump({'emulator': True, 'pass': True}, fh)
+            return subprocess.CompletedProcess(cmd, 0, 'x on the emulator: PASS (1 steps, 1 s) - %s\n' % out, '')
+        import types
+        daemon.subprocess = types.SimpleNamespace(**dict(vars(subprocess), run=run))
+        self.addCleanup(setattr, daemon, 'subprocess', subprocess)
+        work = os.path.join(TMP, 'start-chain')
+        self.assertIsNone(self.d.start_steps(self.s, 'rytm', dict(start='cleared', start_chain=chain),
+                                             'tcp:127.0.0.1:7003', work, 5))
+        self.assertEqual(calls, [('plan', os.path.join(rytm, 'testslot.txt')), ('data', 'clear', '/projects/121'),
+                                 ('data', 'put', '/projects/122'), ('plan', cleared)])
+        # the snapshot key follows the base's text too
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        k1 = self.d.start_key('rytm', build, chain)
+        with open(os.path.join(rytm, 'testslot.txt'), 'a') as fh:
+            fh.write('wait 0.2\n')
+        self.assertNotEqual(k1, self.d.start_key('rytm', build, daemon.start_chain('rytm', 'cleared')))
+        # refused: a loop, an unknown base, a bad data step, a missing put file
+        for setting, why in (('base = cleared', 'builds on itself'), ('base = nowhere', 'no built-in start'),
+                             ('data = wipe /projects/121', 'is `clear PATH` or `put PATH FILE`'),
+                             ('data = clear projects/121', 'is `clear PATH` or `put PATH FILE`'),
+                             ('data = put /projects/122 gone.bin', 'no file')):
+            with open(cleared, 'w', encoding='utf-8') as fh:
+                fh.write('format = 1\nname = start cleared\nunit = rytm\nemulator = yes\n%s\n\n[shot]\n'
+                         'shot x.png\n' % setting)
+            with self.assertRaisesRegex(daemon.Refused, re.escape(why)):
+                daemon.start_chain('rytm', 'cleared')
+
+    @needs_runner
+    def test_a_plan_can_start_from_a_built_in_start(self):
+        """`start = START` in a hardware plan: its own gate run (and pass) starts from that built-in
+        start; run_plan does not record its pass, and the setting is part of what a pass vouches for."""
+        self.with_starts()
+        text = read(os.path.join(PLANS, 'menus.txt')).replace('name = menus', 'name = homed').replace(
+            'out = runs', 'out = runs-homed').replace(
+            'tap GLOBAL\n', 'say contrast occupied: the global menu differs\ntap GLOBAL\n', 1)
+        plan = os.path.join(PLANS, 'homed.txt')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        plain = self.d.plan_info(plan)
+        self.assertIsNone(plain['home'])
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('name = homed', 'name = homed\nstart = testslot'))
+        info = self.d.plan_info(plan)
+        self.assertEqual(info['home'], 'testslot')
+        self.assertNotEqual(info['key'], plain['key'])
+        self.assertEqual(daemon.starts_needed(info), {'dirty': None, 'occupied': 'start'})
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('name = homed', 'name = homed\nstart = dirty'))
+        self.assertEqual(daemon.starts_needed(self.d.plan_info(plan)), {'occupied': 'start'})
+        # a required start the plan's start check rejects is named in its contrast: it must stop
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('name = homed', 'name = homed\nstart = testslot').replace(
+                'say contrast occupied:', 'say contrast dirty, occupied:'))
+        self.assertEqual(daemon.starts_needed(self.d.plan_info(plan)), {'dirty': 'start', 'occupied': 'start'})
+        for setting, why in (('start = nowhere', 'no built-in start'),
+                             ('start = occupied', 'a contrast says the run from occupied stops')):
+            with open(plan, 'w', encoding='utf-8') as fh:
+                fh.write(text.replace('name = homed', 'name = homed\n' + setting))
+            with self.assertRaisesRegex(daemon.Refused, re.escape(why)):
+                self.d.plan_info(plan)
+        # a gate: the plan's own run resumes the start and records the pass from it
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('name = homed', 'name = homed\nstart = testslot'))
+        saved = daemon.ANALOG_EMU, daemon.ELKFLASH
+        daemon.ANALOG_EMU = daemon.ELKFLASH = TMP
+        self.addCleanup(lambda: setattr(daemon, 'ANALOG_EMU', saved[0]) or setattr(daemon, 'ELKFLASH', saved[1]))
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        self.d.emu_has_snapshots = lambda unit: False
+        self.d.batch_emulator = lambda unit, build, work, minutes, snapshot=None, din=False: (
+            None, 'tcp:127.0.0.1:7004', None, None)
+        self.d.saved_projects = lambda addr, folder: {121: ('~T A', 'a')}
+        ran = []
+
+        def run(cmd, **kw):
+            twin = read(cmd[-1])
+            out = re.search(r'^out = (.+)$', twin, re.M).group(1)
+            first = twin.splitlines()[0]
+            if 'start ' in first:
+                ran.append(('build', re.search(r'start (\w+)', first).group(1)))
+                os.makedirs(out, exist_ok=True)
+                with open(os.path.join(out, 'summary.json'), 'w') as fh:
+                    json.dump({'emulator': True, 'pass': True}, fh)
+                return subprocess.CompletedProcess(cmd, 0, 'x on the emulator: PASS (1 steps, 1 s) - %s\n' % out, '')
+            start = next((st for st in ('dirty', 'occupied', 'testslot') if out.endswith('-' + st)), 'main')
+            stop = start == 'occupied'
+            d = os.path.join(out, 'run-%d' % len(ran))
+            os.makedirs(d)
+            steps = [{'step': 'start', 'result': 'FAIL' if stop else 'ok', 'detail': 'differs'}]
+            with open(os.path.join(d, 'summary.json'), 'w') as fh:
+                json.dump({'emulator': True, 'pass': not stop, 'steps': steps}, fh)
+            ran.append((start, d))
+            return subprocess.CompletedProcess(cmd, 1 if stop else 0, 'x on the emulator: %s (1 steps, 1 s) - %s\n'
+                                               % ('FAIL' if stop else 'PASS', d), '')
+        import types
+        daemon.subprocess = types.SimpleNamespace(**dict(vars(subprocess), run=run))
+        self.addCleanup(setattr, daemon, 'subprocess', subprocess)
+        out = self.d.t_batch(self.s, {'gate': True, 'plans': [plan], 'build': build})
+        res = self.d.t_status(self.s, {'run_id': out[0].split('run_id ')[1].split()[0], 'wait_s': 30})
+        self.assertTrue(res[0].startswith('done: '), res)
+        self.assertNotIn('main', [r[0] for r in ran])                  # no run from a fresh emulator
+        self.assertIn(('build', 'testslot'), ran)
+        self.assertIn('testslot', [r[0] for r in ran])
+        ep = self.d.find_pass(self.d.plan_info(plan)['key'])
+        self.assertEqual(ep['start'], 'built-in start testslot')
+        items, body = self.d.go_request(self.s, {'plans': [plan]})
+        self.assertIn('(from built-in start testslot)', body)
+        n = len(ran)
+        out = self.d.t_batch(self.s, {'gate': True, 'plans': [plan], 'build': build})
+        self.assertTrue(out[0].startswith('ok: nothing to gate'), out)
+        self.assertEqual(len(ran), n)
 
     def test_a_flash_plan_needs_no_built_in_starts(self):
         """A plan that flashes boots the OS before its flash, often stock with no remote keys: the

@@ -37,6 +37,9 @@ reaches the hardware only with something that has already worked in the emulator
   power cycle by hand is done. A readback after it proves what it had to keep, and stops the run
   if it doesn't. A pass from an emulator that never lost power proves only "kept with nothing
   happening".
+  Batches don't power cycle yet: such a plan's contrasts belong in sections before its first
+  power cycle (a gate batch runs its start runs up to there), and its own pass comes from
+  `run_plan`, on an emulator started with `power_off` when earlier plans set up its state.
 - **A power cycle by hand outside a plan** is for units or OSes the emulator can't power off.
   It may run ungated when the go names it as such, every other step of the run has its
   emulator pass, the run pauses until the owner says it is done, and the next plan starts with a
@@ -115,7 +118,13 @@ close those gaps.
   - `dirty`: the card's own project active, another pattern and kit, an unsaved change, and
     the LFO page left open;
   - `testslot`: a test project in slot 121 active, with an unsaved change;
-  - `occupied`: every test slot 121-128 holding a throwaway test project.
+  - `occupied`: every test slot 121-128 holding a throwaway test project;
+  - `testslot-cleared`: `testslot`, then slot 121 cleared through the data store, as a run's
+    backup and clear leaves a unit (the active-project marker stays on the empty slot).
+  A start can build on another (`base = START`) and run data store steps (`data = clear PATH;
+  put PATH FILE`) before its own sections, so it can reach states the front panel cannot
+  ([starts/README.md](../starts/README.md)). A hardware plan whose own run must start from a
+  built-in start says `start = START`; its pass then comes from a gate batch run from that start.
   `fresh` (the card as shipped) is a start on every unit. The names and slots follow the
   example write policy (`examples/write-policy/`); a setup with other rules points `starts` in
   config.toml at its own folder.
@@ -249,24 +258,23 @@ their answer to the client's prompt. A session can't end it itself.
   and the +Drive sound library and samples are shared. So make a test project active before
   sending any dump, and mark anything saved to the +Drive.
 - **Write to the active project only once it is known to be a test project**, in the same run.
-  Build the test project in a known state: create a new project in the test slot and load it
-  (on the Rytm, INIT NEW then LOAD FROM; answer the "changes will be lost" prompt if it shows),
-  then confirm on screen that the new project is the one loaded. A new project saved into
-  another slot without loading it leaves the previous project active, and a write meant for the
-  test project lands in that one instead. SAVE PROJECT AS makes its copy active, but the copy
-  carries the previous project's working state (active kit, patterns, tempo), so don't use it to
-  start a test from the project that happens to be active. If the run can't confirm which
-  project is active, it writes nothing to it.
+  Build the test project in a known state from CREATE NEW, on the Rytm MKII and the Analog
+  Four MKII alike: LOAD PROJECT's last row, CREATE NEW, makes a new working project (answer NO to
+  "save before loading" and YES to "changes will be lost"); SAVE PROJECT AS then puts it into the
+  test slot and makes the saved copy active; loading the test slot proves that, because LOAD asks
+  only PROCEED for the active project's own slot. Load it from MANAGE PROJECTS (LOAD FROM), which
+  lists every slot: the LOAD PROJECT list shows only filled slots, so its positions change with
+  what the unit holds. A new project saved into another slot without
+  loading it leaves the previous project active, and a write meant for the test project lands in
+  that one instead. SAVE PROJECT AS carries the working project's state, so it starts a test only
+  right after CREATE NEW, never from someone's project. Then confirm on screen that the new
+  project is the one loaded (its home screen). If the run can't confirm which project is
+  active, it writes nothing to it.
 - **On the Analog Four MKII, INIT NEW is not new in a used slot.** INIT NEW into a slot that has
   ever held a project brings back that project's kit, sounds and pattern data (only the name and
   tempo are new), however the slot was cleared: data-store clear, DELETE, or the panel's CLEAR
-  (which leaves a project named CLEAN). So the A4's
-  test project comes from CREATE NEW (the LOAD PROJECT list's last row), which starts from
-  nothing, saved into the test slot with SAVE PROJECT AS. A copy of a project made that way
-  carries no old state. Loading the test slot then proves it is active (with unsaved changes the
-  OS asks only "proceed" for the active project) and its home screen proves it is new. The test
-  slot is loaded from MANAGE PROJECTS (its panel's LOAD FROM), which lists every slot: the LOAD
-  PROJECT list shows only full slots, so a slot's place in it follows what the other slots hold.
+  (which leaves a project named CLEAN). CREATE NEW starts from nothing, which is one reason the
+  test project comes from it.
 - **Loading another project drops unsaved changes** in the working one. Before the first load,
   know that the working project is saved or is a test project, or have the owner's go cover the
   load. Never save their project yourself.
@@ -290,6 +298,12 @@ policy, `examples/write-policy/policy.py` (tests beside it).
   items already named `~T` may be touched. Any session may empty a test slot, whichever run
   filled it, after copying it to its run folder; so no plan relies on what another run left
   there.
+- **Test slots empty at every release:** every run ends with 121-128 empty, whatever it put
+  there and however it ended: `clear_at_release = '121-128'` in each unit's section of
+  config.toml makes `release` back each project there up into the run folder, erase it and list
+  the slots empty, and keeps the claim if it can't. So a run finds them empty, and its setup's
+  start check (121 empty) only stops it when a session ended without releasing. Nobody saves
+  their own work there by hand, so the cleanup touches only test projects.
 - **The active project:** the unit doesn't say which project is active, so by convention a test
   project names its kit 1 `~T ...`, and the policy checks the active kit 1 before any kit or
   sound dump is sent. On the Digitone and Digitakt the marker is pattern A01's name instead
@@ -408,9 +422,10 @@ the plan meant, and that each check would have failed if the result were wrong.
   someone's work. A plan proves that prompt with an `expect-screen` named `save-before-load...`
   and answers NO; the checker refuses anything else after it. The box is as wide as the project's
   name, so the check compares the prompt's fixed text only, with `rows=` and `cols=`. The prompt
-  is skipped when the active project came from the slot being loaded (a previous run's project,
-  say): the load then goes straight to PROCEED. The slot's active-project marker in MANAGE
-  PROJECTS shows which case it is, so a plan proves it in its start check.
+  is skipped when the active project came from the slot being loaded: the load then goes
+  straight to PROCEED, which is how a setup plan proves its test project is active after
+  CREATE NEW and SAVE PROJECT AS. With no unsaved changes the OS loads without either prompt, so a
+  plan that checks the prompts makes a change first (a turn).
 - **A flash names what it flashes over.** A flash plan sets `os = FILE`, the OS on the unit
   before the flash: two flashes of the same file over different builds are different
   transitions, each with its own emulator pass (stock back over each build in a run, say).

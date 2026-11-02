@@ -18,6 +18,33 @@ test slots 121-128. A setup with other rules keeps its own copies.
 | `dirty` | the card's own project (slot 002) active, pattern A02, which brings kit 2 (another kit and BPM in the title row), an unsaved change on BD's SRC page, the LFO page open |
 | `testslot` | a new test project `~T START` in slot 121, loaded and active, an unsaved change on BD's SRC page, the LFO page open |
 | `occupied` | slots 121-128 holding new test projects `~T OCC1`-`~T OCC8`, the card's own project still active |
+| `testslot-cleared` | `testslot`, then slot 121 cleared through the data store, as a run's backup and clear leaves a unit: `~T START` still the working project, 121 empty with the active-project marker on it |
+
+## Building on a start, and data steps
+
+A start file may take two settings besides a plan's own:
+
+- `base = START` builds on another start of the same unit: that start runs first, on the same
+  emulator (a chain of bases is fine; a loop is refused).
+- `data = OP PATH [FILE]; ...` runs data store steps on the emulator after the base and before
+  the start's own sections: `clear PATH` empties a slot, `put PATH FILE` writes an object saved
+  with the data tool's `get` (FILE relative to the start file). They go through analogrun's
+  `data`, so the local write policy is asked, as for the data tool. They reach states the
+  front panel cannot build, such as a project loaded from a test slot that was then cleared.
+  A local starts folder can use `put` to load its own `~T` backups into the test slots, so the
+  emulator holds what the unit holds; keep such files out of shared repositories.
+
+A start still needs one section of its own (an evidence shot is enough). Its snapshot key covers
+the text of every start in its chain and the files its data steps put.
+
+A hardware plan whose own run should start from a built-in start, not from a fresh emulator,
+says so with `start = START` (a plan for a state only a start leaves, such as a setup plan
+for a unit whose active project came from 121 before 121 was cleared: `start = testslot-cleared`). Its pass then comes
+from a gate batch, which builds that start and runs the plan from it; run_plan does not record
+it. Its runs from `dirty` and `occupied` and from its contrasts' starts are as for any plan: a
+required start that the plan's start check rightly rejects is named in that check's contrast
+(`say contrast dirty, occupied, testslot: 121 is not the cleared active slot`), so its run must
+stop there rather than pass.
 
 What the emulator's card holds (analog-emu, seen 2026-11-02): two projects in slots 001 and 002,
 002 active after boot, its pattern A01 on kit 1, slots 121-128 empty. It boots with two prompts.
