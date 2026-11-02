@@ -20,6 +20,11 @@ Where the Digitone differs from the Rytm:
   asks SAVE '<name>' BEFORE LOADING? (answered NO) and then PROCEED WITH LOADING?, but only when
   the working project has unsaved changes. The setup template turns an encoder first so both
   always come; YES at PROCEED discards every unsaved change, as on the Rytm.
+- **Load from a slot other than the active project's.** LOAD FROM the active project's own slot
+  skips SAVE ... BEFORE LOADING, and the setup's check for it stops the plan. So when one plan
+  follows another, give each its own test slot (121, 123, 124...): on the list, DOWN moves the
+  cursor one slot past 121 in the bottom row, and the start check then compares cols 0-80 so the
+  slot number is part of it.
 - **A test project is marked by its pattern A01's name** in a write policy, not by a kit.
 - **Keys after a load need digirun to reopen its key session.** The load stops the unit
   answering; a digirun from digihealth branch `digirun-reopen-session` opens a new key session
