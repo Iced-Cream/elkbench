@@ -44,8 +44,12 @@ expect-screen kept-value 1 rows=8-63
 [kept after the power cycle]
 say proves set-and-kept: the value reads back the same after a power cycle
 power-cycle
-# the start-up screen first, then the same way to the page
+# the start-up screen first, then the same way to the page. The ping and the shot come before any
+# key, so the run's evidence shows the unit answering and what it showed after the power cycle
+# (on the unit the cycle itself rests on the person's "done").
 wait 3
+ping
+shot after-power-cycle.png
 tap NO
 wait 0.5
 tap NO
