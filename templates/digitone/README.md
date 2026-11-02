@@ -27,12 +27,14 @@ Where the Digitone differs from the Rytm:
   slot number is part of it.
 - **A test project is marked by its pattern A01's name** in a write policy, not by a kit.
 - **Keys after a load need digirun to reopen its key session.** The load stops the unit
-  answering; a digirun from digihealth branch `digirun-reopen-session` opens a new key session
-  for the next key (an older one stops the plan there).
+  answering; a digirun from digihealth branch `digirun-reopen-capture-ping` (or
+  `digirun-reopen-session`) opens a new key session for the next key (an older one stops the plan
+  there).
 - **Capture and listen carry the setup inside**, so each runs from a fresh emulator (digiemu has
   no setup snapshots).
-- **No `ping` or `capture`** with a digirun that lacks them (digihealth's runner-capture-ping
-  adds them), so the flash gate keeps a shot only.
+- **`ping` and `capture` need a digirun that has them.** digihealth branch
+  `digirun-reopen-capture-ping` has both and the key-session reopen; the flash gate's `ping`
+  answers on stock 1.44 too, as it uses Elektron's own RPC. An older digirun refuses both steps.
 - **No power-cycle template**: the power-cycle step is Rytm and A4 only.
 
 The Digitakt has no templates yet: no digihealth build for it has remote keys, and every template

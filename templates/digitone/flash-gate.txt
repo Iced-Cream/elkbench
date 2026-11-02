@@ -22,8 +22,9 @@ note = BUILD flashed over PREVIOUS
 
 [after the flash]
 say proves evidence: the unit answers and the home screen after the reboot
-# With a digirun that has `ping` (digihealth's runner-capture-ping) and an OS with a remote path,
-# add `ping` before the shot: it reads the product and OS version. digirun without it refuses the
-# step, and stock 1.44 has no remote path, so the template keeps the shot only.
+# ping reads the product and OS version over Elektron's own RPC, so it answers on stock 1.44 as well
+# as on a digihealth build. It needs a digirun that has it (digihealth's runner-capture-ping, with
+# the key-session reopen); an older one refuses the step. Compare the product id (0x14), not the name.
 wait 2
+ping
 shot after-flash.png
