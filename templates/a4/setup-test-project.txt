@@ -1,22 +1,27 @@
 # Template: build the run's own test project on an Analog Four MKII (OS 1.56 + analoghealth), and
 # prove it. Copy it beside your plans and change only what the comments name. Rules behind it:
-# docs/testing-practices.md, "Plan checker and templates". The route is the Rytm's: MANAGE
-# PROJECTS > INIT NEW into the cleared test slot, then LOAD FROM it.
+# docs/testing-practices.md, "Plan checker and templates".
+#
+# Not the Rytm's route: on the A4, INIT NEW into a test slot that has ever held a project brings
+# back that project's kit 1, even after a data-store clear, the panel's DELETE or its CLEAR (found
+# in the emulator, 2026-11-02). So the new project comes from CREATE NEW (the LOAD PROJECT list's
+# last row), which starts from nothing, and SAVE PROJECT AS puts it into 121 and makes the saved
+# copy active; loading 121 then proves it is active, and its home screen proves it is new.
 #
 # Before this plan, the run backs up and clears the test slots that hold a project (outside the
 # plan for now), e.g. for 121:
 #   data get /projects/121      (the backup, into the run's evidence folder)
 #   data clear /projects/121
 # List each in the go request as a write: "slot 121 (holds X at listing time: backed up and erased)".
-# The start check sees 121-128, so all eight must be empty. The LEVEL turn in the last section
-# makes the active project unsaved, and the load then discards it (answered NO to the save): list
-# that in the go request too.
+# The start check sees 121-128, so all eight must be empty: the last section finds 121 as the
+# LOAD list's last project. The LEVEL turn in the second section makes the active project unsaved,
+# and CREATE NEW then discards it (answered NO to the save): list that in the go request too.
 format = 1
 name = setup test project in 121
 unit = a4
 refs = refs/a4-setup-test-project     # this plan's own references: never share them with another plan
 out = runs
-note = ~T SETUP (slot 121, INIT NEW) active, unsaved changes none
+note = ~T SETUP (slot 121, CREATE NEW) active, unsaved changes none
 
 [start]
 # Boot prompts away, then GLOBAL > PROJECT > MANAGE PROJECTS (third row). The list holds every
@@ -51,27 +56,8 @@ wait 0.5
 tap NO
 wait 1.0
 
-[setup: INIT NEW into 121]
-say proves setup: a new project in 121, named by the plan
-# RIGHT opens the slot panel (YES on the list only ticks the slot); an empty slot's panel starts
-# with INIT NEW, which makes the project at once and asks no name. The panel then stays open as a
-# full slot's panel, cursor on CLEAR: nothing may press YES after it. The current project stays
-# active. The name is the plan's own, at most 15 characters; save-project writes it over the data
-# store. save-project does not mark kit 1 `~T` here (the kit it would mark is the active one).
-save-project 121 "~T SETUP" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,RIGHT,UP,UP,UP,UP,UP,UP,YES
-wait 2
-tap NO
-wait 0.5
-tap NO
-wait 0.5
-tap NO
-wait 0.5
-tap NO
-wait 1.0
-shot init-new.png
-
-[setup: LOAD FROM 121, and prove the load by content]
-say proves setup: the new project is the active one (its home screen, compared whole, not its name)
+[setup: CREATE NEW]
+say proves setup: a new project is the working project (the load questions it answers)
 # A LEVEL turn on T1's OSC1 page first, so the active project has unsaved changes and both load
 # questions come every time (with none, the OS loads without a word). Remote turns under about
 # 3 ticks are dropped.
@@ -81,46 +67,94 @@ tap OSC1
 wait 0.6
 turn LEVEL 8 4
 wait 0.5
-keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
+# GLOBAL > PROJECT (top row) > LOAD PROJECT (top row) > CREATE NEW (the list's last row)
+tap GLOBAL
+wait 0.5
+keys UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP
+tap YES
+wait 0.5
+keys UP,UP,UP
+tap YES
 wait 0.8
-keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
-wait 0.6
-# a full slot's panel: CLEAR, DELETE, RENAME, LOAD FROM, SAVE TO, TOGGLE
-tap RIGHT
-wait 0.6
-keys UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN)
 wait 0.4
-shot load-from.png
+shot createnew.png
 tap YES
 wait 0.8
 shot save-prompt.png
 # SAVE '<name>' BEFORE LOADING? Y/N. Always NO: YES saves the active project over its own slot,
 # outside the plan's slots (the checker refuses anything else after a save-before-load check).
-# The box is as wide as the project's name, so the check compares the prompt's fixed second line
-# only, inside the narrowest box. When the active project came from 121 itself, the OS skips this
-# question: then the check stops the run with nothing written but 121.
+# The box is as wide as the project's name, so the check compares the prompt's fixed text only.
 expect-screen save-before-loading 2 rows=34-40 cols=22-106
 tap NO
 wait 0.8
 shot proceed.png
-# ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N; YES loads 121. The box's inside only:
-# the list and panel show beside it.
+# ANY CHANGES WILL BE LOST. PROCEED WITH LOADING? Y/N; YES makes the new project. The box's
+# inside only: the LOAD list's cursor row shows beside it, at a height that follows how many
+# projects the unit holds.
 expect-screen proceed-with-loading 2 rows=21-43 cols=8-120
 tap YES
-# the load ends back on the list with the panel open: four NOs reach home (panel, list, PROJECT,
-# GLOBAL), and a spare NO on the home screen does nothing
-wait 6
+wait 4
 tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+shot new-home.png
+expect-screen new-home 3
+
+[setup: SAVE PROJECT AS 121]
+say proves setup: the new project saved into 121 (proven active in the next section)
+# GLOBAL > PROJECT > SAVE PROJECT AS (second row) > slot 121 (end of the list, up 7) > YES (the
+# naming screen) > YES (save). The name is the plan's own, at most 15 characters. On the A4,
+# save-project does not mark kit 1 `~T` after CREATE NEW (its kit has no name to mark), so
+# nothing on the home screen tells the saved copy from any new project.
+save-project 121 "~T SETUP" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,YES,YES
+wait 2
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+tap NO
+wait 0.5
+shot saved.png
+
+[setup: 121 is the active project]
+say proves setup: loading 121 asks only PROCEED, which the OS does only when 121 is the active project
+# The proof is the OS's own answer, not a name. With unsaved changes, LOAD asks SAVE ... BEFORE
+# LOADING? first when the chosen project is not the active one, and only PROCEED WITH LOADING?
+# when it is. So: a LEVEL turn, LOAD PROJECT, 121 (the list's last project, one up from CREATE
+# NEW), YES, and the PROCEED box must be the first thing on screen. YES then reloads 121 itself.
+tap T1
+wait 0.5
+tap OSC1
 wait 0.6
+turn LEVEL 8 4
+wait 0.5
+tap GLOBAL
+wait 0.5
+keys UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP
+tap YES
+wait 0.5
+keys UP,UP,UP
+tap YES
+wait 0.8
+keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP
+wait 0.4
+shot load-121.png
+tap YES
+wait 0.8
+shot load-121-asks.png
+expect-screen proceed-with-loading 2 rows=21-43 cols=8-120
+tap YES
+# a saved project loads for longer than CREATE NEW; a NO during the load is lost
+wait 5
 tap NO
-wait 0.6
+wait 0.5
 tap NO
-wait 0.6
+wait 0.5
 tap NO
-wait 0.6
-tap NO
-wait 1.5
+wait 0.5
 shot loaded.png
-# The content proof: the home screen of a new project (K001:KIT 1, BPM:120.0), compared whole. A
-# name check passes on a copy of any project.
 expect-screen new-home 3
