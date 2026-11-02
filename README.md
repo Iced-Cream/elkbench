@@ -90,11 +90,14 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   own `emulator-run` gate (testplan.py) still applies to flash plans. A pass also records the
   build the emulator booted and how the run started (a fresh emulator, a setup snapshot, or the
   session's emulator as earlier calls left it); the go request shows the start.
-- **`power-cycle`**: a plan step on a line of its own (Rytm and A4). In the emulator, the plan's
-  emulator starts with analog-emu's `--power-off`; at the step elkbench sends it `quit`, so the
-  OS runs its power-fail save and the card image is written, checks the emulator's log for the
-  save, and cold-boots it on that card and flash (without the setup snapshot it may have
-  resumed). On the unit the run waits at the step, as at a `listen` step, until the person has
+- **`power-cycle`**: a plan step on a line of its own (Rytm, A4 and Digitone). In the emulator,
+  the plan's emulator starts with analog-emu's `--power-off`; at the step elkbench sends it
+  `quit`, so the OS runs its power-fail save and the card image is written, checks the emulator's
+  log for the save, and cold-boots it on that card and flash (without the setup snapshot it may
+  have resumed). On the Digitone, digiemu's usbrun starts with `--power-off`; at the step
+  elkbench sends it `power-off`, its supply is cut and the OS runs its own power-off save to the
+  card, and digiemu boots the same OS again on that card, on the same port (about a minute);
+  elkbench waits for the save line, the boot and the OS's answer. On the unit the run waits at the step, as at a `listen` step, until the person has
   power cycled it by hand and said so (`listen_done`); the go request lists each one. elkbench
   runs the plan in parts between the power cycles, each with its own run folder, and the pass
   is keyed by the plan as written. Each power cycle needs a machine assertion after it (the
@@ -106,7 +109,7 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   When the plan reads back state that earlier plans set on the same emulator, start that
   emulator with `power_off` (emulator tool) and run the plan without `build`. The analog-emu
   build needs `--power-off` (its `--help` does not list it; elkbench looks for its power-off log
-  line in the binary).
+  line in the binary); digiemu needs a `tools/usbrun.py` with `--power-off`.
 - **`wait N audio`**: a wait that only lets the unit make sound (a recording, a tone, a pause to
   hear something). The runner waits N s on the unit; every emulator twin (run_plan, batch)
   waits 0.5 s instead, as the emulator makes no voice sound. The pass is keyed by the plan as

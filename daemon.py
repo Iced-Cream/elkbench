@@ -76,6 +76,8 @@ POWER_OFF_WAIT = 60                             # s analog-emu has to save and e
 POWER_OFF_MARK = 'power off: working state saved'    # its log line after a power-off save
 # in the binary of an analog-emu that has --power-off (the line above is put together at run time)
 POWER_OFF_BUILD_MARK = b'power off: no --card, nothing kept'
+DIGIEMU_OFF_WAIT = 60                            # s digiemu has for its power-off save
+DIGIEMU_UP_WAIT = 300                            # s its boot on that card may take (cold boot, intro, settle)
 GATE_PLANS_MAX = 16                             # plans one gate batch may take
 KNOWN_STARTS = ('a fresh emulator', 'a setup snapshot')    # pass starts a gate batch may keep
 # Built-in starts (proposal B): a hardware plan's go needs a run from each of these the unit has
@@ -885,6 +887,8 @@ class Daemon:
             return 1, 'fail: power-cycle: this session\'s %s emulator is not running\n' % unit
         if not e.get('power_off'):
             return 1, 'fail: power-cycle: the %s emulator did not start with --power-off\n' % unit
+        if UNITS[unit].get('emulator') == 'digiemu':
+            return self.digiemu_power_cycle(s, unit, e, save)
         with open(e['log'], encoding='utf-8', errors='replace') as fh:
             seen = len(fh.read())
         if save:
@@ -945,6 +949,54 @@ class Daemon:
             return 1, 'fail: power-cycle: the OS did not answer after the cold boot (%s)\n' % log_path
         return 0, 'ok power-cycle: switched off (%s), cold boot on its card: up again at %s (%s)\n' % (
             how, addr, log_path)
+
+    def digiemu_power_cycle(self, s, unit, e, save=True):
+        """A power cycle of this session's digiemu (started with power_off): `power-off` on its
+        stdin cuts the supply, the OS runs its own power-off save to the card, and digiemu boots
+        the same flash again on that card (the boot an OS upgrade's reset gets), on the same link.
+        save=False instead stops it and starts it again from its settled boot, on a fresh card
+        copy: nothing of the run is kept. -> (rc, report line)."""
+        if not save:
+            self.stop_emulator(e)
+            try:
+                self.digiemu_start(s, unit, e['build_path'], e.get('minutes') or 60, power_off=True)
+            except Refused as r:
+                return 1, 'fail: power-cycle: the emulator did not start again (%s)\n' % r
+            return 0, 'ok power-cycle: killed, no save; booted again from its settled boot on a fresh card\n'
+        with open(e['log'], encoding='utf-8', errors='replace') as fh:
+            seen = len(fh.read())
+        try:
+            e['proc'].stdin.write(b'power-off\n')
+            e['proc'].stdin.flush()
+        except (OSError, ValueError, AttributeError):
+            return 1, 'fail: power-cycle: the emulator takes no commands (%s)\n' % e['log']
+
+        def said():
+            with open(e['log'], encoding='utf-8', errors='replace') as fh:
+                return fh.read()[seen:]
+        end, text = time.time() + DIGIEMU_OFF_WAIT, ''
+        while time.time() < end and e['proc'].poll() is None:
+            text = said()
+            if '[usbrun] power off: wrote card' in text or 'not switched off' in text or 'HALTED' in text:
+                break
+            time.sleep(0.5)
+        off = [l.split('power off: ', 1)[1].strip() for l in text.splitlines() if '[usbrun] power off: ' in l]
+        saved = [o for o in off if o.startswith(('working state saved', 'the OS saved nothing'))]
+        if not saved or '[usbrun] power off: wrote card' not in text:
+            return 1, 'fail: power-cycle: the OS did not finish its power-off save (%s; %s)\n' % (
+                '; '.join(off) or 'no power-off line', e['log'])
+        end = time.time() + DIGIEMU_UP_WAIT
+        while time.time() < end and e['proc'].poll() is None and '[usbrun] up again' not in text:
+            time.sleep(1)
+            text = said()
+        if '[usbrun] up again' not in text:
+            return 1, 'fail: power-cycle: the emulator did not boot again on its card within %d s (%s)\n' % (
+                DIGIEMU_UP_WAIT, e['log'])
+        if not self.digiemu_os_answers(e['address']):
+            return 1, 'fail: power-cycle: the OS did not answer after the boot (%s)\n' % e['log']
+        e['boots'] = e.get('boots', 1) + 1
+        return 0, 'ok power-cycle: switched off (%s), boot on its card: up again at %s (%s)\n' % (
+            saved[0], e['address'], e['log'])
 
     def check_connected(self, unit, target):
         try:
@@ -1220,9 +1272,13 @@ class Daemon:
         """Refused unless this plan's `power-cycle` steps can run: on the Rytm and A4 (analog-emu's
         --power-off), alone on their line, outside (hardware) sections and the setup, in a plan
         that flashes nothing, and each followed by steps (the readback the power cycle is for)."""
-        if UNITS[unit].get('emulator') == 'digiemu' or not UNITS[unit].get('emu_exe'):
-            raise Refused('power-cycle runs on the Rytm and A4 only so far (analog-emu\'s --power-off); '
-                          'the %s emulator has no power-off save' % unit)
+        if UNITS[unit].get('emulator') == 'digiemu':
+            if not self.digiemu_has_power_off():
+                raise Refused('power-cycle on the %s needs a digiemu whose tools/usbrun.py has --power-off '
+                              '(the power-off save); tools.digiemu has none' % unit)
+        elif not UNITS[unit].get('emu_exe'):
+            raise Refused('power-cycle runs on the Rytm, A4 and Digitone (an emulator with a power-off '
+                          'save); the %s emulator has none' % unit)
         if flash:
             raise Refused('a plan with power-cycle cannot flash: flash in a plan of its own, then power cycle')
         for i, (name, lines) in enumerate(steps):
@@ -2190,10 +2246,10 @@ class Daemon:
         # power_off: started with --power-off, so that a later plan with power-cycle steps runs on
         # it as it is (after the plans that set up its state) instead of on a fresh boot
         power_off = power_off or bool(a.get('power_off'))
-        if power_off and u.get('emulator') == 'digiemu':
-            raise Refused('power_off is for the Rytm and A4 emulators (analog-emu --power-off)')
         if u.get('emulator') == 'digiemu':           # snapshot: a setup snapshot's key
-            return self.digiemu_start(s, a['unit'], a.get('build'), minutes, snapshot)
+            if power_off and not self.digiemu_has_power_off():
+                raise Refused('power_off needs a digiemu whose tools/usbrun.py has --power-off')
+            return self.digiemu_start(s, a['unit'], a.get('build'), minutes, snapshot, power_off)
         exe =os.path.join(need(ANALOG_EMU, 'analog_emu', 'the analog-emu emulators'), u['emu_exe'])
         work =os.path.join(STATE, 'emulators', '%s-%s' % (a['unit'], s.sid[:8]))
         os.makedirs(work, exist_ok=True)
@@ -2299,7 +2355,7 @@ class Daemon:
                 shlex.quote(conv(repo)), ' '.join(DIGIEMU_PY[1:]), ' '.join(shlex.quote(x) for x in args))]
         return DIGIEMU_PY + args
 
-    def digiemu_start(self, s, unit, build, minutes, setup_key=None):
+    def digiemu_start(self, s, unit, build, minutes, setup_key=None, power_off=False):
         """The Digitone or Digitakt emulator: digiemu boots `build` headless (digiemu_usb.py: set
         up once, then a work folder per session), its USB MIDI link on a TCP port of its own.
         setup_key: resume that setup snapshot if digiemu has it stored; `save` stores one."""
@@ -2315,9 +2371,10 @@ class Daemon:
         firmware = os.path.join(s.folder(unit), 'firmware')
         e, text = self.digiemu_launch(build, minutes, tag, work, firmware,
                                       lambda e: self.emulators.__setitem__((s.sid, unit), dict(e, session=s.sid)),
-                                      setup_key=setup_key)
+                                      setup_key=setup_key, power_off=power_off)
         e = self.emulators[(s.sid, unit)]
         e['resumed'] = 'resuming setup snapshot' in text
+        e.update(power_off=power_off, build_path=build, minutes=minutes)
         fresh = 'already set up' not in text
         return ['ok: %s emulator running headless on %s, USB MIDI at %s%s (%s), ends by '
                 'itself after %d min' % (unit, os.path.basename(build), e['address'],
@@ -2337,7 +2394,33 @@ class Daemon:
         """Whether this digiemu's usbrun serves Overbridge audio (--ob-audio-port)."""
         return self.digiemu_has('--ob-audio-port')
 
-    def digiemu_launch(self, build, minutes, tag, work, firmware, started=None, setup_key=None, require=False):
+    def digiemu_has_power_off(self):
+        """Whether this digiemu's usbrun can switch the Digitone off (--power-off)."""
+        try:
+            with open(os.path.join(DIGIEMU, 'tools', 'usbrun.py'), encoding='utf-8', errors='replace') as fh:
+                return "'--power-off'" in fh.read()
+        except (OSError, TypeError):
+            return False
+
+    def digiemu_os_answers(self, addr):
+        """-> whether digiemu's OS answers digirun's info within about 12 s (or there is no digirun)."""
+        if not (DIGIHEALTH and os.path.exists(DIGIHEALTH)):
+            return True
+        script = os.path.join(DIGIHEALTH, 'tools', 'digirun.py')
+        for _ in range(12):                      # the OS answers its RPC a moment after the link
+            try:
+                r = subprocess.run([sys.executable, script, '--port', addr, 'info'],
+                                   cwd=os.path.dirname(script), capture_output=True, text=True, timeout=5,
+                                   **NOWIN)
+                if r.returncode == 0:
+                    return True
+            except subprocess.TimeoutExpired:   # a first connection through WSL's forwarding can stall
+                pass
+            time.sleep(1)
+        return False
+
+    def digiemu_launch(self, build, minutes, tag, work, firmware, started=None, setup_key=None, require=False,
+                       power_off=False):
         """digiemu_usb.py booting `build` (work folder `tag` in WSL), its link on a free port,
         until its OS answers -> (emulator dict, its log text). `firmware` (WSL must see it) gets
         the OS files flashed into it; started(e) runs as soon as the process is up. Its DIN MIDI
@@ -2366,14 +2449,15 @@ class Daemon:
                                + (['--din-port', str(din)] if din else [])
                                + (['--setup-key', setup_key, '--keep', str(DIGI_SNAPSHOT_MAX),
                                    '--days', str(SNAPSHOT_DAYS)] + (['--require-setup'] if require else [])
-                                  if setup_key else []))
+                                  if setup_key else [])
+                               + (['--power-off'] if power_off else []))
         log_path = os.path.join(work, 'emulator.log')
         log = open(log_path, 'w', encoding='utf-8')
         proc = subprocess.Popen(cmd, cwd=work, stdout=log, stderr=subprocess.STDOUT,
-                                stdin=subprocess.PIPE if setup_key else None, **NOWIN)
+                                stdin=subprocess.PIPE if setup_key or power_off else None, **NOWIN)
         e = dict(proc=proc, build=os.path.basename(build), sha=sha256(build),
                  address='tcp:127.0.0.1:%d' % tcp, din='tcp:127.0.0.1:%d' % din if din else None,
-                 log=log_path, setup_key=setup_key,
+                 log=log_path, setup_key=setup_key, work=work,
                  wsl_tag=tag if cmd[0] == 'wsl' else None, firmware=firmware, ob_audio=ob)
         if started:
             started(e)
@@ -2392,18 +2476,8 @@ class Daemon:
                         time.sleep(0.5)
                 else:
                     text = ''
-        if text and DIGIHEALTH and os.path.exists(DIGIHEALTH):
-            script = os.path.join(DIGIHEALTH, 'tools', 'digirun.py')
-            for _ in range(12):                      # the OS answers its RPC a moment after the link
-                try:
-                    r = subprocess.run([sys.executable, script, '--port', e['address'], 'info'],
-                                       cwd=os.path.dirname(script), capture_output=True, text=True, timeout=5,
-                                       **NOWIN)
-                    if r.returncode == 0:
-                        break
-                except subprocess.TimeoutExpired:   # a first connection through WSL's forwarding can stall
-                    pass
-                time.sleep(1)
+        if text:
+            self.digiemu_os_answers(e['address'])
         if proc.poll() is not None or '[usbrun] USB MIDI link on' not in text:
             self.stop_emulator(e)
             last = [l for l in text.splitlines() if l.strip()][-1:] or ['no output']
@@ -2645,7 +2719,7 @@ class Daemon:
     def plan_stages(self, s, info, job, tgt, steps, record_refs=False, tag=''):
         """The stages that run `steps` (a plan's sections) in parts, a power cycle between
         each two: each part is a twin of its sections run on its own; in the emulator, the
-        power cycle switches analog-emu off with its power-off save and cold-boots it (each part
+        power cycle switches the emulator off with its power-off save and boots it on its card (each part
         then runs on the emulator's ports of that moment); on the unit, the run waits until the
         person has power cycled it by hand and said so (listen_done), as at a listen step."""
         unit, stages = info['unit'], []
@@ -2732,7 +2806,11 @@ class Daemon:
                 sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + din + ['--quiet', 'run', plan]
             started = []
         else:
-            if cycles:
+            if cycles and UNITS[unit].get('emulator') == 'digiemu':
+                if not self.digiemu_has_power_off():
+                    raise Refused('this plan has power-cycle steps, and tools.digiemu\'s usbrun has no '
+                                  '--power-off (the Digitone\'s power-off save)')
+            elif cycles:
                 need(ANALOG_EMU, 'analog_emu', 'the analog-emu emulators')
                 if not self.emu_has_power_off(unit):
                     raise Refused('this plan has power-cycle steps, and this analog-emu %s has no --power-off '
@@ -4202,7 +4280,7 @@ TOOLS = [
        card={'type': 'string', 'description': 'card image to copy (default: the configured one)'},
        keep_flash={'type': 'boolean', 'description': 'boot what an earlier flash left in this session\'s '
                                                      'emulator (no build), on its card as left'},
-       power_off={'type': 'boolean', 'description': 'Rytm / A4: start it with the power-off save, so that a '
+       power_off={'type': 'boolean', 'description': 'Rytm / A4 / Digitone: start it with the power-off save, so that a '
                                                     'plan with power-cycle steps can run on it later without '
                                                     'build (after the plans that set up its state)'})),
     ('run_plan', 'Run a test plan (analogrun run, format 1) in the background; returns a run_id. target '
