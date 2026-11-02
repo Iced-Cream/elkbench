@@ -250,10 +250,13 @@ def unit_starts(unit):
 
 def starts_needed(info):
     """-> {start: the section a run from it must stop in, or None: it must pass} for a hardware
-    plan: the required starts its unit has, and every start its contrasts name."""
+    plan: the required starts its unit has (not for a plan that flashes), and every start its
+    contrasts name."""
     have = unit_starts(info['unit'])
     stops = plancheck.expected_stops(info['steps'])
-    want = {st: stops.get(st) for st in REQUIRED_STARTS if st in have}
+    # a plan that flashes starts on the OS before its flash (often stock, with no remote keys to
+    # build a start with), and the flash itself is gated as a transition: only its own contrasts
+    want = {} if info.get('flash') else {st: stops.get(st) for st in REQUIRED_STARTS if st in have}
     want.update(stops)
     return want
 

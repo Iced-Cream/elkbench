@@ -141,7 +141,8 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   check, and plans in one go that compare the same
   reference file. `check_plan` gives the same answer before any emulator time.
 - **Messy starts and contrast runs**: a hardware plan's go also needs a run from each built-in
-  start its unit has among `dirty` and `occupied` (`starts/<unit>/`, so far the Rytm MKII), and
+  start its unit has among `dirty` and `occupied` (`starts/<unit>/`, so far the Rytm MKII; not for
+  a plan that flashes), and
   from each start its `say contrast START: why` lines name. Each run passes, or stops in the
   section whose contrast names its start (a check seen to fail). A gate batch runs them all, a
   built-in start built once per build as a snapshot. A pass on the session's emulator records what
