@@ -1509,10 +1509,83 @@ class InProcess(unittest.TestCase):
         subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
                        env=self.s.env(), capture_output=True)
         img = self.saved['stock'][0]
-        with self.assertRaisesRegex(daemon.Refused, 'emulator first'):
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        with self.assertRaisesRegex(daemon.Refused, 'give over'):
             self.d.t_flash(self.s, {'unit': 'rytm', 'image': img, 'target': 'hardware'})
         with self.assertRaisesRegex(daemon.Refused, 'emulator first'):
-            self.d.t_approve_plan(self.s, {'flashes': [{'unit': 'rytm', 'image': img}], 'purpose': 't'})
+            self.d.t_flash(self.s, {'unit': 'rytm', 'image': img, 'target': 'hardware', 'over': build})
+        with self.assertRaisesRegex(daemon.Refused, 'emulator first'):
+            self.d.t_approve_plan(self.s, {'flashes': [{'unit': 'rytm', 'image': img, 'over': build}],
+                                           'purpose': 't'})
+
+    def test_a_flash_pass_is_of_one_transition(self):
+        os.makedirs(daemon.STATE, exist_ok=True)
+        unit, img = 'rytm', self.saved['stock'][0]
+        a, b = os.path.join(TMP, 'os', 'test-build.syx'), os.path.join(TMP, 'os', 'remote-only.syx')
+        d, sa, sb = daemon.sha256(img), daemon.sha256(a), daemon.sha256(b)
+        # an emulator flash records the OS the emulator ran before it
+        self.d.emu_ready = lambda s, unit, build, snap=None: ('tcp:127.0.0.1:7399', [])
+        proc = type('P', (), {'poll': lambda self: None, 'pid': 99})()
+        self.d.emulators[(self.s.sid, unit)] = dict(proc=proc, build='test-build.syx', sha=sa,
+                                                    address='tcp:127.0.0.1:7399')
+        self.addCleanup(self.d.emulators.pop, (self.s.sid, unit), None)
+        self.d.t_flash(self.s, {'unit': unit, 'image': img, 'target': 'emulator'})
+        self.done(self.started[-1][0], 0, 'ok\n')
+        self.assertTrue(self.d.flash_pass(unit, d, sa))
+        self.assertFalse(self.d.flash_pass(unit, d, sb))           # stock over another build: not gated
+        self.assertEqual(self.d.emulators[(self.s.sid, unit)]['sha'], d)
+        # on hardware the OS flashed over is `over`, else what this session flashed last
+        self.s.os_left[unit] = ('remote-only.syx', False, sb)
+        self.assertEqual(self.d.os_on_unit(self.s, unit), sb)
+        self.assertEqual(self.d.os_on_unit(self.s, unit, a), sa)
+        self.s.os_left[unit] = ('unknown after a failed flash of x.syx', False)
+        with self.assertRaisesRegex(daemon.Refused, 'stop and check'):
+            self.d.os_on_unit(self.s, unit)
+        self.s.os_left.pop(unit)
+        # a Digitone/Digitakt firmware check flashes over no OS: it counts whatever was on the unit
+        self.d.record_pass(daemon.flash_key('digitone', d), {'image': img, 'unit': 'digitone', 'fwcheck': 'x'})
+        self.assertTrue(self.d.flash_pass('digitone', d, sb))
+        # a plan pass from before flash keys named the OS: found when its run booted that OS
+        run = os.path.join(TMP, 'emu-run-old-flash')
+        os.makedirs(run, exist_ok=True)
+        with open(os.path.join(run, 'summary.json'), 'w') as fh:
+            json.dump({'emulator': True, 'pass': True, 'flash_sha256': daemon.sha256(b)}, fh)
+        self.d.record_pass('oldplankey', {'run_dir': run, 'unit': unit, 'os': d})
+        self.assertTrue(self.d.flash_pass(unit, sb, d))
+        self.assertFalse(self.d.flash_pass(unit, sb, sa))
+
+    @needs_runner
+    def test_the_plan_key_names_the_os_it_runs_on(self):
+        plan = os.path.join(PLANS, 'stock-restore.txt')
+        other = os.path.join(PLANS, 'stock-restore-2.txt')
+        with open(other, 'w', encoding='utf-8') as fh:
+            fh.write(read(plan).replace('os = ../os/test-build.syx', 'os = ../os/remote-only.syx'))
+        self.addCleanup(os.remove, other)
+        a, b = self.d.plan_info(plan), self.d.plan_info(other)
+        self.assertEqual(a['steps'], b['steps'])
+        self.assertNotEqual(a['key'], b['key'])                    # same steps, stock back over two builds
+        self.assertEqual(a['old_key'], b['old_key'])
+        self.assertEqual(a['os_sha'], daemon.sha256(os.path.join(TMP, 'os', 'test-build.syx')))
+        # a pass recorded before the key named the OS still counts, for the OS its run booted
+        run = os.path.join(TMP, 'emu-run-old-key')
+        os.makedirs(run, exist_ok=True)
+        with open(os.path.join(run, 'summary.json'), 'w') as fh:
+            json.dump({'emulator': True, 'pass': True, 'flash_sha256': a['flash_sha']}, fh)
+        self.d.record_pass(a['old_key'], {'run_dir': run, 'unit': 'rytm', 'os': a['os_sha']})
+        self.assertTrue(self.d.plan_pass(a))
+        self.assertFalse(self.d.plan_pass(b))
+        # the twins carry the os setting with an absolute path, so they share the key
+        twin = self.d.twin(a, False, self.s.sid)
+        self.assertIn('os = %s' % a['os_file'], read(twin))
+        self.assertEqual(self.d.plan_info(twin)['key'], a['key'])
+        # on hardware, a session that left another OS on the unit is refused before the go is used
+        self.fake_pass(b)
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        self.s.os_left['rytm'] = ('test-build.syx', False, a['os_sha'])
+        self.addCleanup(self.s.os_left.pop, 'rytm', None)
+        with self.assertRaisesRegex(daemon.Refused, 'this session left test-build.syx'):
+            self.d.t_run_plan(self.s, {'plan': other, 'target': 'hardware', 'approval': 'x'})
 
     def test_no_config_means_tools_off(self):
         cfg = daemon.load_config(os.path.join(TMP, 'none.toml'))

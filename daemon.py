@@ -350,6 +350,12 @@ def reply_id(mid):
     return '' if not mid or re.search(r'\s', mid) or re.fullmatch(r'[A-Za-z]+', mid) else mid
 
 
+def flash_key(unit, digest, over=None):
+    """The emulator pass key of a flash: `digest` (sha256 of the OS file) flashed over the OS
+    `over` (sha256). Without over, the key passes had before it carried the OS flashed over."""
+    return 'flash:%s:%s' % (unit, digest) + (':over:%s' % over if over else '')
+
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, 'rb') as fh:
@@ -723,11 +729,55 @@ class Daemon:
                 return None           # testplan's own gate would refuse it on the unit
         return e
 
+    def plan_pass(self, info):
+        """-> the emulator pass that vouches for a plan, or None. A plan that names its OS
+        (`os = FILE`) is keyed with that file's sha256; a pass recorded before the key carried it
+        still counts when the build it booted was that file."""
+        ep = self.find_pass(info['key'], info['flash_sha'])
+        if ep or not info['os_sha']:
+            return ep
+        old = self.find_pass(info['old_key'], info['flash_sha'])
+        return old if old and old.get('os') == info['os_sha'] else None
+
+    def flash_pass(self, unit, digest, over):
+        """-> the emulator pass of one flash transition: `digest` flashed over the OS `over`
+        (sha256s), or None. A plan pass recorded before flash keys carried the OS flashed over
+        still counts when its run booted `over` and flashed `digest`; a Digitone/Digitakt
+        firmware check (digiemu fwcheck, which flashes over no OS) counts whatever `over` is."""
+        e = self.find_pass(flash_key(unit, digest, over))
+        if e:
+            return e
+        old = self.find_pass(flash_key(unit, digest))
+        if old and old.get('fwcheck'):
+            return old
+        for k, e in self.passes().items():
+            if (not k.startswith('flash:') and e.get('unit') == unit and e.get('os') == over
+                    and e.get('run_dir') and self.find_pass(k, digest)):
+                return e
+        return None
+
+    def os_on_unit(self, s, unit, over=None):
+        """-> sha256 of the OS on the unit now: the file `over` names, else what this session
+        flashed last. Refused when neither says (or a flash of this session failed)."""
+        if over:
+            over = os.path.abspath(over)
+            if not os.path.isfile(over):
+                raise Refused('over names no file: %s' % over)
+            return sha256(over)
+        left = s.os_left.get(unit)
+        if left and len(left) > 2:
+            return left[2]
+        if left:
+            raise Refused('the OS on %s is %s: stop and check the unit' % (unit, left[0]))
+        raise Refused('give over: the OS file on %s now (a flash\'s emulator pass is of one transition, '
+                      'this file flashed over that OS)' % unit)
+
     # -- plans --
 
     def plan_info(self, path):
-        """-> dict(settings, steps, unit, key, flash, flash_sha, refs) for a plan file. The key
-        names what an emulator pass vouches for: unit, steps, reference screens, OS file."""
+        """-> dict(settings, steps, unit, key, flash, flash_sha, os_sha, refs) for a plan file. The
+        key names what an emulator pass vouches for: unit, steps, reference screens, the OS file
+        it flashes and the OS it runs on (`os = FILE`, the build its emulator boots)."""
         runner()
         path = os.path.abspath(path)
         if not os.path.isfile(path):
@@ -766,6 +816,12 @@ class Daemon:
         if flash and not os.path.isfile(flash):
             raise Refused('the plan flashes %s, which does not exist' % flash)
         flash_sha = sha256(flash) if flash else None
+        # os = FILE: the OS on the unit when the plan starts, so the build its emulator boots. A
+        # flash plan names it (its pass is of one transition: this OS, then its flash).
+        os_file = rel(settings['os']) if settings.get('os') else None
+        if os_file and not os.path.isfile(os_file):
+            raise Refused('the plan runs on %s (os =), which does not exist' % os_file)
+        os_sha = sha256(os_file) if os_file else None
         refs = rel(settings.get('refs', 'refs'))
         ref_files = sorted(f for f in os.listdir(refs) if f.endswith('.bin')) if os.path.isdir(refs) else []
         ref_sums = [(f, sha256(os.path.join(refs, f))) for f in ref_files]
@@ -788,6 +844,9 @@ class Daemon:
         vouched = {'unit': unit, 'steps': steps, 'flash': flash_sha, 'refs': ref_sums}
         if send_sums:                 # left out otherwise, so earlier passes still count
             vouched['sends'] = send_sums
+        old_key = hashlib.sha256(json.dumps(vouched, sort_keys=True).encode()).hexdigest()
+        if os_sha:                    # left out otherwise, so earlier passes still count
+            vouched['os'] = os_sha
         key = hashlib.sha256(json.dumps(vouched, sort_keys=True).encode()).hexdigest()
         writes = [l for _, lines in steps for l in lines
                   if l.split()[0].lower() in ('save-project', 'save-kit', 'send')]
@@ -807,10 +866,10 @@ class Daemon:
             self.check_power_cycles(unit, steps, flash, setup)
         # the plan checker's rules (plancheck.py): errors refuse the go, flags go into it
         check = plancheck.check(steps, unit=unit, refs=refs, flash=flash,
-                                stock=bool(flash_sha) and self.is_stock(unit, flash_sha),
+                                stock=bool(flash_sha) and self.is_stock(unit, flash_sha), os_file=os_file,
                                 emulator=settings.get('emulator', 'no').lower() == 'yes')
         return dict(path=path, here=here, settings=settings, steps=steps, unit=unit, key=key, check=check,
-                    flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, setup=setup, din=bool(din),
+                    old_key=old_key, os_file=os_file, os_sha=os_sha, flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, setup=setup, din=bool(din),
                     audio_waits=audio_waits(steps), power_cycles=cycles,
                     name=settings.get('name') or os.path.splitext(os.path.basename(path))[0],
                     emulator=settings.get('emulator', 'no').lower() == 'yes', rel=rel)
@@ -880,7 +939,7 @@ class Daemon:
                      'record-refs = %s' % ('yes' if record_refs else 'no'),
                      'refs = %s' % info['refs'],
                      'out = %s' % os.path.join(rel(g('out', 'runs')), 'emu-%s' % sid[:8])]
-        for k in ('flash', 'audio-tools', 'elkflash'):
+        for k in ('flash', 'os', 'audio-tools', 'elkflash'):
             if g(k):
                 lines.append('%s = %s' % (k, rel(g(k))))
         if g('flash') and not g('elkflash') and ELKFLASH:       # the plan names none: config's checkout
@@ -1287,7 +1346,7 @@ class Daemon:
                 raise Refused('%s is refused by the plan checker: %s' % (
                     info['name'], '; '.join(info['check']['errors'])))
             infos.append(info)
-            ep = self.find_pass(info['key'], info['flash_sha'])
+            ep = self.plan_pass(info)
             if not ep:
                 raise Refused('%s has no passing emulator run of the same steps, refs and OS file: '
                               'run_plan target emulator first' % info['name'])
@@ -1298,7 +1357,9 @@ class Daemon:
                 '\n  FLASH %s\n    sha256 %s%s' % (os.path.basename(info['flash']), info['flash_sha'],
                                                    ' (stock)' if self.is_stock(info['unit'], info['flash_sha'])
                                                    else '') if info['flash'] else '',
-                '\n  writes: ' + '; '.join(info['writes']) if info['writes'] else '',
+                ('\n  runs on %s (sha256 %s)' % (os.path.basename(info['os_file']), info['os_sha'])
+                 if info['os_file'] else '') +
+                ('\n  writes: ' + '; '.join(info['writes']) if info['writes'] else ''),
                 ep.get('run_dir') or stamp(ep['time']),
                 ' (from %s)' % ep['start'] if ep.get('start') else '',
                 ''.join('\n' + l for l in plancheck.go_lines(info['check'])),
@@ -1317,13 +1378,18 @@ class Daemon:
                     raise Refused('no file %s' % img)
                 d = sha256(img)
                 if kind == 'flashes':
-                    if not self.find_pass('flash:%s:%s' % (f['unit'], d)):
-                        raise Refused('%s has not flashed and booted in the %s emulator: flash target '
-                                      'emulator first' % (os.path.basename(img), f['unit']))
+                    over = self.os_on_unit(s, f['unit'], f.get('over'))
+                    if not self.flash_pass(f['unit'], d, over):
+                        raise Refused('%s has not flashed over %s and booted in the %s emulator: flash target '
+                                      'emulator first, on an emulator booted on that OS' % (
+                                          os.path.basename(img), os.path.basename(f['over']) if f.get('over')
+                                          else 'the OS this session flashed last', f['unit']))
                     items.append(dict(item=('flash', f['unit'], d), used=False,
                                       label='flash %s on %s' % (os.path.basename(img), f['unit'])))
-                    text.append('FLASH %s on %s\n  sha256 %s%s' % (
-                        os.path.basename(img), f['unit'], d, ' (stock)' if self.is_stock(f['unit'], d) else ''))
+                    text.append('FLASH %s on %s\n  sha256 %s%s\n  over %s (sha256 %s)' % (
+                        os.path.basename(img), f['unit'], d, ' (stock)' if self.is_stock(f['unit'], d) else '',
+                        os.path.basename(f['over']) if f.get('over') else 'the OS this session flashed last',
+                        over))
                 else:
                     items.append(dict(item=('restore', f['unit'], d), used=False,
                                       label='recall restore %s on %s' % (os.path.basename(img), f['unit'])))
@@ -1376,7 +1442,7 @@ class Daemon:
             gate = []
             if info['emulator']:
                 gate.append('an emulator plan: check the hardware plan')
-            elif not self.find_pass(info['key'], info['flash_sha']):
+            elif not self.plan_pass(info):
                 gate.append('no emulator pass of these steps, refs and OS file yet')
             infos.append(info)
             head = 'refused' if c['errors'] or info['emulator'] else 'ok'
@@ -2143,10 +2209,14 @@ class Daemon:
             if a.get('record_refs'):
                 raise Refused('references are recorded in the emulator only')
             self.check_hardware(s, [unit])
-            ep = self.find_pass(info['key'], info['flash_sha'])
+            ep = self.plan_pass(info)
             if not ep:
                 raise Refused('no passing emulator run of these steps, refs and OS file: run_plan '
                               'target emulator first')
+            left = s.os_left.get(unit)
+            if info['os_sha'] and left and (len(left) < 3 or left[2] != info['os_sha']):
+                raise Refused('this plan runs on %s (os =), and this session left %s on %s: stop and check '
+                              'the run\'s order' % (os.path.basename(info['os_file']), left[0], unit))
             self.check_connected(unit, tgt)
             din = self.din_args(s, unit, tgt, [l for _, ls in info['steps'] for l in ls])
             item = ('plan', info['key'])
@@ -2173,6 +2243,10 @@ class Daemon:
             snap = self.setup_snapshot(s, info, a)
             addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'], bool(cycles))
             booted = (self.emulators.get((s.sid, unit)) or {}).get('sha')
+            if info['os_sha'] and booted != info['os_sha']:
+                raise Refused('this plan runs on %s (os =), and the emulator runs %s: start it on that file '
+                              '(build)' % (os.path.basename(info['os_file']),
+                                           (self.emulators.get((s.sid, unit)) or {}).get('build') or 'an unknown OS'))
             din = self.din_args(s, unit, tgt, [l for _, ls in info['steps'] for l in ls])
             port = self.busy_port('%s@%s' % (unit, addr), tgt)
             emu = self.emulators.get((s.sid, unit)) or {}
@@ -2233,6 +2307,13 @@ class Daemon:
                 job.lines += ['short here (%g s in the emulator, in full on the unit): %s' % (AUDIO_WAIT_EMULATOR, w)
                               for w in info['audio_waits']]
             verdict = '%s %s (%s)' % (info['name'], 'PASS' if ok else 'FAIL', run_dir or job.log)
+            if tgt == 'emulator' and any(x.get('flash_sha256') for x in summs):
+                e = self.emulators.get((s.sid, unit)) or {}      # it runs the plan's flash now
+                if e.get('flashed'):
+                    write_json(e['flashed'], {'image': os.path.basename(info['flash']), 'sha': info['flash_sha']})
+                    e['build'] = os.path.basename(info['flash'])
+                if e:
+                    e['sha'] = info['flash_sha']
             if tgt == 'hardware':
                 s.done.setdefault(unit, []).append('plan ' + verdict)
                 if summ.get('flash_sha256'):
@@ -2243,9 +2324,9 @@ class Daemon:
                                                     'start': began, 'os': booted},
                                                    **({'run_dirs': run_dirs, 'power_cycles': len(cycles)}
                                                       if cycles else {})))
-                if info['flash_sha']:
-                    self.record_pass('flash:%s:%s' % (unit, info['flash_sha']),
-                                     {'image': info['flash'], 'unit': unit, 'run_dir': run_dir})
+                if info['flash_sha'] and booted:
+                    self.record_pass(flash_key(unit, info['flash_sha'], booted),
+                                     {'image': info['flash'], 'unit': unit, 'run_dir': run_dir, 'over': booted})
                 job.lines.append('recorded as the emulator pass for this plan')
             elif ok:
                 job.lines.append('references recorded; run again without record_refs for the pass')
@@ -2259,6 +2340,7 @@ class Daemon:
         if not os.path.isfile(img) or not img.lower().endswith('.syx'):
             raise Refused('no OS .syx file %s' % img)
         d = sha256(img)
+        over = None
         folder = s.folder(a['unit'])
         stamp = time.strftime('%H%M%S')
         tail = ['--yes', '--no-confirm', '--wait', '--quiet', '--log', os.path.join(folder, 'elkflash.log'),
@@ -2266,9 +2348,9 @@ class Daemon:
         base = [sys.executable, '-m', 'elkflash', 'upgrade', img] + chunk_args(a['unit'])
         if tgt == 'hardware':
             self.check_hardware(s, [a['unit']])
-            if not self.find_pass('flash:%s:%s' % (a['unit'], d)):
-                raise Refused('this file has not flashed and booted in the %s emulator: flash target '
-                              'emulator first' % a['unit'])
+            if not self.flash_pass(a['unit'], d, self.os_on_unit(s, a['unit'], a.get('over'))):
+                raise Refused('this file has not flashed over the OS on the unit and booted in the %s emulator: '
+                              'flash target emulator first, on an emulator booted on that OS' % a['unit'])
             self.check_connected(a['unit'], tgt)
             item = ('flash', a['unit'], d)
             self.use_approval(s, a.get('approval'), item, 'flash %s' % os.path.basename(img))
@@ -2285,6 +2367,7 @@ class Daemon:
             addr, started = self.emu_ready(s, a['unit'], a.get('build'))
             port = self.busy_port('%s@%s' % (a['unit'], addr), tgt)
             emu = self.emulators[(s.sid, a['unit'])]
+            over = emu.get('sha')                   # what this flash goes over: its pass is of that transition
             if emu.get('firmware'):                 # digiemu reboots from the file the flash was written from
                 shutil.copyfile(img, os.path.join(emu['firmware'], os.path.basename(img)))
                 tail = tail + ['--wait-timeout', '400']       # a reboot is a cold boot and a settle
@@ -2315,15 +2398,18 @@ class Daemon:
                 else:
                     s.os_left[a['unit']] = ('unknown after a failed flash of %s' % os.path.basename(img), False)
                 s.done.setdefault(a['unit'], []).append('flash %s %s' % (os.path.basename(img), job.state.upper()))
+            elif rc == 0 and over:
+                self.record_pass(flash_key(a['unit'], d, over), {'image': img, 'unit': a['unit'], 'over': over})
+                job.lines.append('recorded as the emulator pass for this file over the OS the emulator ran')
             elif rc == 0:
-                self.record_pass('flash:%s:%s' % (a['unit'], d), {'image': img, 'unit': a['unit']})
-                job.lines.append('recorded as the emulator pass for this file')
+                job.lines.append('not recorded as an emulator pass: which OS the emulator ran before is unknown')
+            if tgt == 'emulator' and rc == 0:
                 e = self.emulators.get((s.sid, a['unit'])) or {}
                 if e.get('flashed'):                  # a restart with keep_flash boots this
                     write_json(e['flashed'], {'image': os.path.basename(img), 'sha': d})
                     e['build'] = os.path.basename(img)
                 e['sha'] = d
-            else:
+            elif tgt == 'emulator':
                 # the next emulator start overwrites its log: keep this one with the evidence
                 e = self.emulators.get((s.sid, a['unit'])) or {}
                 src = os.path.join(os.path.dirname(e['flashed']), 'emulator.log') if e.get('flashed') else None
@@ -2827,6 +2913,10 @@ class Daemon:
                         x['name'] += '+'
                 x['gate'] = True
                 x['os'] = sha256(build)
+                if info['os_sha'] and x['os'] != info['os_sha']:
+                    raise Refused('%s runs on %s (os =), and its gate run would boot %s: give that file as '
+                                  'its build' % (info['name'], os.path.basename(info['os_file']),
+                                                 os.path.basename(build)))
             variants.append(x)
         if len({v['name'] for v in variants}) < len(variants):
             raise Refused('variant names must differ')
@@ -2859,7 +2949,7 @@ class Daemon:
             # it flashes, the same build booted, from a known start: a fresh emulator or a setup
             # snapshot) keeps it and is not run again.
             for v in list(variants):
-                ep = self.find_pass(v['info']['key'], v['info']['flash_sha'])
+                ep = self.plan_pass(v['info'])
                 if ep and ep.get('os') == v['os'] and ep.get('start') in KNOWN_STARTS:
                     kept.append('kept: %s, unchanged since its pass (%s)' % (
                         v['name'], ep.get('run_dir') or stamp(ep['time'])))
@@ -3078,7 +3168,7 @@ class Daemon:
         lines = ['# written by elkbench for %s of %s' % (title, info['path']),
                  'include = %s' % info['path'], 'emulator = yes', 'din =', 'record-refs = no',
                  'refs = %s' % info['refs'], 'out = %s' % (out or work)]
-        lines += ['%s = %s' % (k, info['rel'](g(k))) for k in ('flash', 'audio-tools', 'elkflash') if g(k)]
+        lines += ['%s = %s' % (k, info['rel'](g(k))) for k in ('flash', 'os', 'audio-tools', 'elkflash') if g(k)]
         if g('flash') and not g('elkflash') and ELKFLASH:
             lines.append('elkflash = %s' % ELKFLASH)
         if sections is None and info.get('audio_waits'):
@@ -3238,8 +3328,8 @@ class Daemon:
                                            'start': 'a setup snapshot' if snap else 'a fresh emulator',
                                            'via': 'gate batch %s' % os.path.basename(folder)})
             if info['flash_sha']:
-                self.record_pass('flash:%s:%s' % (unit, info['flash_sha']),
-                                 {'image': info['flash'], 'unit': unit, 'run_dir': run_dir})
+                self.record_pass(flash_key(unit, info['flash_sha'], v['os']),
+                                 {'image': info['flash'], 'unit': unit, 'run_dir': run_dir, 'over': v['os']})
         if ok:
             shutil.rmtree(work, ignore_errors=True)
             return dict(outcome='pass', line=line, run_dir=run_dir)
@@ -3279,6 +3369,9 @@ S = lambda **p: {'type': 'object', 'properties': p, 'required': [k for k, v in p
 UNIT = lambda: {'type': 'string', 'enum': list(UNITS), 'req': True}
 TARGET = lambda: {'type': 'string', 'enum': ['emulator', 'hardware'], 'req': True,
                   'description': 'emulator (this session\'s headless emulator, no claim) or hardware (needs your claim)'}
+OVER = lambda: {'type': 'string', 'description': 'hardware: the OS .syx on the unit when it is flashed '
+                                            '(the flash\'s emulator pass is of that transition); left out, the '
+                                            'file this session flashed last'}
 EMU_BUILD = lambda: {'type': 'string', 'description': 'emulator only: boot a fresh emulator of this OS '
                                                      '.syx first (replaces yours), instead of an emulator call'}
 TOOLS = [
@@ -3301,7 +3394,7 @@ TOOLS = [
                      'fallback a run_id whose status gives it.',
      S(plans={'type': 'array', 'items': {'type': 'string'}}, purpose={'type': 'string', 'req': True},
        flashes={'type': 'array', 'items': {'type': 'object', 'properties': {
-           'unit': {'type': 'string'}, 'image': {'type': 'string'}}}},
+           'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
        recall_restores={'type': 'array', 'items': {'type': 'object', 'properties': {
            'unit': {'type': 'string'}, 'image': {'type': 'string'}}}},
        text_id={'type': 'string', 'description': 'from approval_text: refuse if the request changed since'})),
@@ -3310,7 +3403,7 @@ TOOLS = [
                       'in your thread, and after %s\'s typed yes call approve_plan with the text_id.' % PERSON,
      S(plans={'type': 'array', 'items': {'type': 'string'}}, purpose={'type': 'string', 'req': True},
        flashes={'type': 'array', 'items': {'type': 'object', 'properties': {
-           'unit': {'type': 'string'}, 'image': {'type': 'string'}}}},
+           'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
        recall_restores={'type': 'array', 'items': {'type': 'object', 'properties': {
            'unit': {'type': 'string'}, 'image': {'type': 'string'}}}})),
     ('check_plan', 'The plan checker, in seconds and without an emulator: a start check, what each section '
@@ -3362,9 +3455,9 @@ TOOLS = [
        target=TARGET(), approval={'type': 'string'}, build=EMU_BUILD(),
        record_refs={'type': 'boolean', 'description': 'emulator only: save the reference screens'})),
     ('flash', 'Flash an OS .syx with elkflash (--no-confirm --wait) in the background; returns a run_id. '
-              'Hardware: claim, a passing emulator flash of the same file, and an approval token.',
+              'Hardware: claim, a passing emulator flash of the same file over the same OS, and an approval token.',
      S(unit=UNIT(), image={'type': 'string', 'req': True}, target=TARGET(), approval={'type': 'string'},
-       build=EMU_BUILD())),
+       over=OVER(), build=EMU_BUILD())),
     ('batch', 'Emulator only (Rytm, A4; Digitone, Digitakt at most 3 at a time): run a plan or a flash many times across variants, each run on a '
               'fresh emulator of its own, a few at a time, round by round in shuffled order; returns a '
               'run_id. status gives progress, then a line per variant (pass count, 95% range), Fisher p '

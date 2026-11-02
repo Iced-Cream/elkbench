@@ -4,6 +4,7 @@ name = stock restore
 unit = rytm
 out = runs
 flash = ../os/stock.syx
+os = ../os/test-build.syx
 note = stock OS restored
 
 [home screen]

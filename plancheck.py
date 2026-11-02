@@ -18,6 +18,9 @@ What a plan must carry (see docs/testing-practices.md, "Plan checker and templat
   proves the precondition on screen.
 - **NO to "save before loading".** An `expect-screen` whose reference name contains
   `save-before-load` must be followed by a NO press.
+- **A flash names what it flashes over.** A plan that flashes names the OS on the unit before
+  it (`os = FILE`): its emulator pass is of that one transition, run on an emulator booted on
+  that file.
 """
 import os
 import shlex
@@ -108,9 +111,9 @@ def rows_of(w):
     return span_of(w, 'rows')
 
 
-def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False):
+def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False, os_file=None):
     """steps: [(section name, [step lines])]. flash: the OS file the plan flashes, or None;
-    stock: whether that file is the unit's stock OS. -> dict(errors=[...], flags=[...],
+    stock: whether that file is the unit's stock OS; os_file: the OS the plan runs on (`os =`). -> dict(errors=[...], flags=[...],
     proves=[(section, kind)])."""
     errors, flags, proves = [], [], []
     if emulator:
@@ -195,7 +198,11 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
                                  'screen that is blank there' % (name, w[1], ' '.join(
                                      x for x in w[2:] if x.startswith(('rows=', 'cols=')))))
 
-    # 5. the build: remote keys need a remote-key path; Rytm hits
+    # 5. the build: a flash names the OS it goes over; remote keys need a remote-key path; Rytm hits
+    if flash and not os_file:
+        errors.append('the plan flashes %s and names no OS it flashes over: add os = FILE (the OS on the unit '
+                      'before the flash; its emulator pass is of that transition, booted on that file)'
+                      % os.path.basename(flash))
     if flash and stock:
         bad = sorted({w[0].lower() for _, w in all_words if w and w[0].lower() in KEY_OPS + ('dump', 'stats')})
         if bad:

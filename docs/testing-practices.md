@@ -98,7 +98,10 @@ emulator gives the unit back (section 4).
 *elkbench enforces*: a gate batch records a pass only for a hardware plan that passed on its own
 fresh emulator (or its setup snapshot), with the saved-project check above, and keeps its
 evidence with the plan's other runs. A pass records the build it booted and how it started,
-and the go request shows that start and lists every `wait N audio` that was shortened.
+and the go request shows that start and lists every `wait N audio` that was shortened. A plan
+that names its OS (`os = FILE`) runs only on an emulator booted on that file, its pass is keyed
+with it, and a flash's pass is keyed with the OS it flashed over: stock back over build A does
+not vouch for stock back over build B.
 
 ## 2. One go per run
 
@@ -349,13 +352,18 @@ the plan meant, and that each check would have failed if the result were wrong.
   project is modified. YES there writes the working project over its own slot, which may hold
   someone's work. A plan proves that prompt with an `expect-screen` named `save-before-load...`
   and answers NO; the checker refuses anything else after it. The box is as wide as the project's
-  name, so the check compares the prompt's fixed text only, with `rows=` and `cols=`.
+  name, so the check compares the prompt's fixed text only, with `rows=` and `cols=`. The prompt
+  is skipped when the active project came from the slot being loaded (an INIT NEW into that
+  slot, say): the load then goes straight to PROCEED, and a plan for that case does not expect it.
+- **A flash names what it flashes over.** A flash plan sets `os = FILE`, the OS on the unit
+  before the flash: two flashes of the same file over different builds are different
+  transitions, each with its own emulator pass (stock back over each build in a run, say).
 
 *elkbench enforces*: `approve_plan` refuses a hardware plan that has no start check, a section
 that doesn't say what it proves (`say proves KIND: how`), a `set-and-kept` or `works` section
 without a machine assertion, a `listen` step without its three parts or a screen check before it,
-key or read steps after a stock flash, anything but NO after a `save-before-load` check, and
-plans that compare the same reference file. It shows
+key or read steps after a stock flash, anything but NO after a `save-before-load` check, a flash
+plan without `os =`, and plans that compare the same reference file. It shows
 the rest in the go request: the sections judged by eye, checks right after the plan's own save,
 blank compared rows, Rytm notes outside 0-11. `check_plan` gives the same answer in seconds,
 before any emulator time. `templates/` holds plans that already follow these rules: a test

@@ -79,9 +79,15 @@ class Rules(unittest.TestCase):
         self.assertTrue(check(base + 'capture got.syx 2\n')['errors'])
 
     def test_a_flash_plan_needs_no_start_check(self):
-        r = check('[home screen]\nwait 2\nshot home.png\n', flash='/os/stock.syx', stock=True)
+        r = check('[home screen]\nwait 2\nshot home.png\n', flash='/os/stock.syx', stock=True,
+                  os_file='/os/build.syx')
         self.assertEqual(r['errors'], [])
         self.assertTrue(any('flash only' in f for f in r['flags']))
+
+    def test_a_flash_plan_names_the_os_it_flashes_over(self):
+        r = check('[home screen]\nwait 2\nshot home.png\n', flash='/os/stock.syx', stock=True)
+        self.assertTrue(any('names no OS it flashes over' in e for e in r['errors']), r['errors'])
+        self.assertFalse(any('flashes over' in e for e in check(GOOD)['errors']))
 
     def test_keys_after_a_stock_flash_are_refused(self):
         r = check(GOOD, flash='/os/stock.syx', stock=True)
@@ -171,7 +177,8 @@ class Templates(unittest.TestCase):
             with open(os.path.join(folder, n), encoding='utf-8') as fh:
                 text = fh.read()
             flash = re.search(r'^flash\s*=\s*(\S+)', text, re.M)
-            r = plancheck.check(parse(text), flash=flash and flash.group(1))
+            over = re.search(r'^os\s*=\s*(\S+)', text, re.M)
+            r = plancheck.check(parse(text), flash=flash and flash.group(1), os_file=over and over.group(1))
             self.assertEqual(r['errors'], [], n)
             ref = re.search(r'^refs\s*=\s*(\S+)', text, re.M)
             if ref:
