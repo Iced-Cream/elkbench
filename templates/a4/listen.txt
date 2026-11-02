@@ -27,7 +27,9 @@ expect-screen test-project-title 2 rows=0-7
 
 [setup: reload the test project from 121]
 # The contrast: from the built-in testslot-cleared start, a new project is active but 121 is
-# empty, so its panel has no LOAD FROM and the PROCEED check stops the run.
+# empty, so its panel has no LOAD FROM and the PROCEED check stops the run. That panel holds only
+# INIT NEW, SAVE TO and TOGGLE: the keys land on TOGGLE, and its YES on an empty slot changes
+# nothing (seen in the emulator, 2026-11-02: the slot stays empty and saves into it afterwards).
 say contrast testslot-cleared: 121 is empty, so the reload finds no project to load
 say proves setup: 121 is the active project and loads as a new one, so the pattern has no trig yet
 # Earlier plans in the run may have toggled trigs in the working copy (grid recording toggles a

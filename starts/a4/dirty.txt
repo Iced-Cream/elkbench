@@ -7,10 +7,11 @@ unit = a4
 emulator = yes
 name = start dirty
 out = runs
-note = the card's own project active, pattern A02, T1 OSC1 LEVEL changed unsaved, LFO page open
+note = the card's own project (slot 002) active, pattern A02 with kit 2, T1 OSC1 LEV changed unsaved, LFO page open
 
 [start]
-# Boot prompts away (the third NO lands on the home screen and does nothing)
+# A fresh A4 emulator card boots to the home screen with no prompt (seen 2026-11-02); the NOs
+# answer any start-up prompt a card may show, and do nothing on the home screen
 wait 3
 tap NO
 wait 0.5
@@ -20,20 +21,24 @@ tap NO
 wait 1.0
 shot start-home.png
 
-[pattern A02]
-say proves setup: pattern A02 is active (the title row names another pattern than a fresh card has)
-# PTN shows the pattern menu, and a trig key picks the pattern in the bank shown
-tap PTN
+[pattern A02, which brings kit 2]
+say proves setup: pattern A02 is active; on the project of the card it links kit 2 (the title row changes kit and BPM)
+# BANK_A shows BANK A : CHOOSE PTN, and a trig key picks the pattern (PTN alone opens the PATTERN
+# menu: RELOAD and SAVE PATTERN). On the card A01 has K001 at 80.0 BPM, A02 K002 at 98.0.
+tap BANK_A
 wait 0.3
-shot ptn.png
+shot bank-a.png
 tap 2
 wait 1.5
 shot a02-home.png
 
 [active project still the card's own]
-say proves evidence: MANAGE PROJECTS marks the project of the card as the active one, 121-128 empty
+say proves evidence: MANAGE PROJECTS marks the project of the card (002) as the active one, 121-128 empty
 keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
 wait 0.8
+keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP)
+wait 0.6
+shot manage-top.png
 keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
 wait 0.6
 shot manage-121-128.png
@@ -47,8 +52,10 @@ tap NO
 wait 1.0
 
 [an unsaved change: T1 OSC1 LEVEL]
-say proves setup: an unsaved change in the working kit (T1 OSC1 LEVEL moved, nothing saved)
-# OSC1 is entered from FLTR, so its first press opens P 1/2. Remote turns under about 3 ticks are dropped.
+say proves setup: an unsaved change in the working kit (T1 OSC1 LEV moved, nothing saved)
+# OSC1 is entered from FLTR, so its first press opens P 1/2. LEV is knob E; while it turns, its
+# value replaces the dial for a moment, so the shot right after the turn shows the new value
+# (99 after 12 ticks down, on the card's kits and a new one). Remote turns under about 3 ticks are dropped.
 tap T1
 wait 0.5
 tap FLTR
@@ -56,7 +63,9 @@ wait 0.6
 tap OSC1
 wait 0.6
 shot change-osc1-before.png
-turn LEVEL 8 4
+turn E -12 4
+wait 0.3
+shot change-osc1-value.png
 wait 1.5
 shot change-osc1-after.png
 

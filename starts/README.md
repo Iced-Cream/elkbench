@@ -21,6 +21,19 @@ test slots 121-128. A setup with other rules keeps its own copies.
 | `occupied` | slots 121-128 holding new test projects `~T OCC1`-`~T OCC8`, the card's own project still active |
 | `testslot-cleared` | `testslot`, then slot 121 cleared through the data store, as a run's backup and clear leaves a unit: `~T START` still the working project, 121 empty with the active-project marker on it |
 
+## Analog Four MKII (OS 1.56 with analoghealth)
+
+| start | leaves |
+|---|---|
+| `dirty` | the card's own project (slot 002) active, pattern A02, which brings kit 2 (another kit and BPM in the title row), an unsaved change on T1's OSC1 LEV, the LFO page open |
+| `testslot` | a new test project `~T START` (CREATE NEW, then SAVE PROJECT AS into 121), active, an unsaved change on T1's OSC1 LEV, the LFO page open |
+| `occupied` | slots 121-128 holding `~T OCC1`-`~T OCC8` (SAVE PROJECT AS copies of the card's project), the card's own project loaded back and active |
+| `testslot-cleared` | `testslot`, then slot 121 cleared through the data store, as a run's backup and clear leaves a unit: `~T START` still the working project, 121 empty with the active-project marker on it |
+
+The A4 builds its test projects from CREATE NEW, not INIT NEW: INIT NEW into a slot that once held
+a project brings back that project's kit 1 (see `templates/a4/setup-test-project.txt`). SAVE
+PROJECT AS makes the saved copy active, so `occupied` loads the card's project back last.
+
 ## Building on a start, and data steps
 
 A start file may take two settings besides a plan's own:
@@ -47,14 +60,21 @@ required start that the plan's start check rightly rejects is named in that chec
 (`say contrast dirty, occupied, testslot: 121 is not the cleared active slot`), so its run must
 stop there rather than pass.
 
-What the emulator's card holds (analog-emu, seen 2026-11-02): two projects in slots 001 and 002,
-002 active after boot, its pattern A01 on kit 1, slots 121-128 empty. It boots with two prompts.
+What the emulator's card holds (analog-emu, seen 2026-11-02):
+- Analog Rytm MKII: two projects in slots 001 and 002, 002 active after boot, its pattern A01 on
+  kit 1, slots 121-128 empty. It boots with two prompts.
+- Analog Four MKII: two projects in slots 001 (write-protected) and 002, both with the same name,
+  002 active after boot, its pattern A01 on kit 1 (80 BPM; A02 brings kit 2 at 98 BPM), slots
+  121-128 empty. It boots to the home screen with no prompt; the starts' NOs at boot do nothing
+  there.
 
 Known limits:
-- A freshly booted project already counts as modified (a LOAD asks to save it before any
-  change), so the unsaved change is shown by the SRC page shots before and after the turn,
-  not by a check.
+- On the Rytm a freshly booted project already counts as modified (a LOAD asks to save it before
+  any change), so the unsaved change is shown by the SRC page shots before and after the turn,
+  not by a check. On the A4 a project with no change loads without a question, so its starts
+  turn T1's LEVEL before every load, and the unsaved change is shown by the OSC1 page shots (LEV
+  shows its new value for a moment after the turn).
 - The start plans end in shots, not reference checks: no reference screens ship. Each start's
   build run keeps its shots with its snapshot (`run_dir` in the snapshot's `.json`).
-- There are no starts for the Analog Four MKII, Digitone or Digitakt yet: those units are gated
-  from `fresh` and from the starts a plan's contrasts name (none but `fresh` there).
+- There are no starts for the Digitone or Digitakt yet: those units are gated from `fresh` and
+  from the starts a plan's contrasts name (none but `fresh` there).

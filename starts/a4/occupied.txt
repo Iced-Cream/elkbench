@@ -10,7 +10,8 @@ out = runs
 note = slots 121-128 hold ~T OCC1-~T OCC8 (copies saved with SAVE PROJECT AS), the card's own project active again
 
 [start]
-# Boot prompts away (the third NO lands on the home screen and does nothing)
+# A fresh A4 emulator card boots to the home screen with no prompt (seen 2026-11-02); the NOs
+# answer any start-up prompt a card may show, and do nothing on the home screen
 wait 3
 tap NO
 wait 0.5
@@ -118,10 +119,18 @@ wait 0.5
 
 [setup: the card's own project active again]
 say proves setup: the project of the card loaded back (SAVE ... BEFORE LOADING? answered NO)
-# CARD_SLOT: the slot of the card's own project, from the dirty start's MANAGE shot
+# The card's own project is in 002: the list entered from its top (page ups first, the cursor on
+# 001), one row down. A LEVEL turn first, so the load always asks both questions (SAVE ... BEFORE
+# LOADING? answered NO: it would save the working ~T OCC8 over 128; PROCEED WITH LOADING? YES).
+tap T1
+wait 0.5
+tap OSC1
+wait 0.6
+turn LEVEL 8 4
+wait 0.5
 keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
 wait 0.8
-keys CARD_SLOT_PATH
+keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),DOWN
 wait 0.6
 keys RIGHT,UP,UP,UP,UP,UP,UP,DOWN,DOWN,DOWN
 wait 0.4
@@ -145,12 +154,15 @@ wait 1.0
 shot loaded.png
 
 [the slots and the active project]
-say proves evidence: 121-128 hold ~T OCC1-8 and the project of the card is the active one
+say proves evidence: 121-128 hold ~T OCC1-8 and the project of the card (002) is the active one
 keys GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,DOWN,YES
 wait 0.8
 keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
 wait 0.6
 shot manage-121-128.png
+keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP)
+wait 0.6
+shot manage-top.png
 tap NO
 wait 0.5
 tap NO

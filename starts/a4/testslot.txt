@@ -7,10 +7,11 @@ unit = a4
 emulator = yes
 name = start testslot
 out = runs
-note = ~T START (slot 121, CREATE NEW + SAVE PROJECT AS) active, T1 OSC1 LEVEL changed unsaved, LFO page open
+note = ~T START (slot 121, CREATE NEW + SAVE PROJECT AS) active, T1 OSC1 LEV changed unsaved, LFO page open
 
 [start]
-# Boot prompts away (the third NO lands on the home screen and does nothing)
+# A fresh A4 emulator card boots to the home screen with no prompt (seen 2026-11-02); the NOs
+# answer any start-up prompt a card may show, and do nothing on the home screen
 wait 3
 tap NO
 wait 0.5
@@ -23,7 +24,15 @@ shot start-home.png
 [setup: CREATE NEW]
 say proves setup: a new project is the working project
 # The A4 route (templates/a4/setup-test-project.txt): CREATE NEW, the LOAD PROJECT list's last row.
-# SAVE ... BEFORE LOADING? is answered NO, PROCEED WITH LOADING? YES.
+# SAVE ... BEFORE LOADING? is answered NO, PROCEED WITH LOADING? YES. A LEVEL turn first, so the
+# active project has unsaved changes and both questions come every time (with none, the OS loads
+# without a word and the NO and YES would land elsewhere).
+tap T1
+wait 0.5
+tap OSC1
+wait 0.6
+turn LEVEL 8 4
+wait 0.5
 tap GLOBAL
 wait 0.5
 keys UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP
@@ -80,8 +89,10 @@ tap NO
 wait 1.0
 
 [an unsaved change: T1 OSC1 LEVEL]
-say proves setup: an unsaved change in the working kit (T1 OSC1 LEVEL moved, nothing saved)
-# OSC1 is entered from FLTR, so its first press opens P 1/2. Remote turns under about 3 ticks are dropped.
+say proves setup: an unsaved change in the working kit (T1 OSC1 LEV moved, nothing saved)
+# OSC1 is entered from FLTR, so its first press opens P 1/2. LEV is knob E; while it turns, its
+# value replaces the dial for a moment, so the shot right after the turn shows the new value
+# (99 after 12 ticks down, on the card's kits and a new one). Remote turns under about 3 ticks are dropped.
 tap T1
 wait 0.5
 tap FLTR
@@ -89,7 +100,9 @@ wait 0.6
 tap OSC1
 wait 0.6
 shot change-osc1-before.png
-turn LEVEL 8 4
+turn E -12 4
+wait 0.3
+shot change-osc1-value.png
 wait 1.5
 shot change-osc1-after.png
 
