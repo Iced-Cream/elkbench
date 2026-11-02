@@ -12,6 +12,8 @@ unit = digitone
 refs = refs/digitone-listen
 out = runs
 audio-tools = C:/path/to/elkbench/audio
+audio-driver = Elektron Digitone        # the ASIO driver name, for audio-record on the unit
+audio-python = py -3.14                  # a Python with numpy and scipy, for the audio checks
 note = ~T SETUP (slot 121, INIT NEW) active, T1 trig on step 1; stopped at the end
 #
 # The test project setup runs inside the plan (the same sections as setup-test-project.txt), so
@@ -36,10 +38,10 @@ wait 1.0
 keys FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(UP),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN)
 wait 0.6
 shot start-manage-121.png
-# The start check: 121's name field in the bottom row (rows 56-63, cols 32-80) is the dashed line of
+# The start check: 121's row in the list's bottom row (rows 56-63, cols 0-80: its number and name) shows the dashed line of
 # an empty slot, which only the run's own clear produced. Record it in the emulator after an
 # emulator-only step has filled and cleared 121, so the clearing path is tested too.
-expect-screen manage-121-cleared 2 rows=56-63 cols=32-80
+expect-screen manage-121-cleared 2 rows=56-63 cols=0-80
 
 [setup: INIT NEW into 121]
 say proves setup: a new project in 121, named by the plan
