@@ -1790,10 +1790,10 @@ class InProcess(unittest.TestCase):
         self.assertIsNone(self.d.find_pass(self.d.plan_info(plans[0])['key']))
 
     def with_starts(self):
-        """Stand-in built-in Rytm starts (dirty, occupied, testslot) for one test."""
+        """Stand-in built-in Rytm starts (dirty, occupied, testslot, testslot-cleared) for one test."""
         folder = os.path.join(TMP, 'starts-%d' % len(os.listdir(TMP)))
         os.makedirs(os.path.join(folder, 'rytm'))
-        for name in ('dirty', 'occupied', 'testslot'):
+        for name in ('dirty', 'occupied', 'testslot', 'testslot-cleared'):
             with open(os.path.join(folder, 'rytm', name + '.txt'), 'w', encoding='utf-8') as fh:
                 fh.write('format = 1\nname = start %s\nunit = rytm\nemulator = yes\n\n[%s]\nwait 0.1\n' % (name, name))
         saved = daemon.STARTS
@@ -2085,6 +2085,33 @@ class InProcess(unittest.TestCase):
                          'shot x.png\n' % setting)
             with self.assertRaisesRegex(daemon.Refused, re.escape(why)):
                 daemon.start_chain('rytm', 'cleared')
+
+    @needs_runner
+    def test_required_starts_where_release_empties_the_test_slots(self):
+        """A unit whose release empties its test slots (clear_at_release) is never found with them
+        full: its plans run from testslot-cleared, the state every release leaves, not occupied."""
+        self.with_starts()
+        text = read(os.path.join(PLANS, 'menus.txt')).replace('name = menus', 'name = cleared').replace(
+            'out = runs', 'out = runs-cleared').replace(
+            'tap GLOBAL\n', 'say contrast testslot: the global menu differs\ntap GLOBAL\n', 1)
+        plan = os.path.join(PLANS, 'cleared.txt')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(text)
+        saved = daemon.UNITS['rytm'].get('clear_at_release')
+        self.addCleanup(daemon.UNITS['rytm'].__setitem__, 'clear_at_release', saved or [])
+        daemon.UNITS['rytm']['clear_at_release'] = []
+        self.assertEqual(daemon.required_starts('rytm'), ('dirty', 'occupied'))
+        self.assertEqual(daemon.starts_needed(self.d.plan_info(plan)),
+                         {'dirty': None, 'occupied': None, 'testslot': 'start'})
+        daemon.UNITS['rytm']['clear_at_release'] = list(range(121, 129))
+        self.assertEqual(daemon.required_starts('rytm'), ('dirty', 'testslot-cleared'))
+        self.assertEqual(daemon.starts_needed(self.d.plan_info(plan)),
+                         {'dirty': None, 'testslot-cleared': None, 'testslot': 'start'})
+        # a contrast may still name occupied: then its run is needed, and must stop
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('say contrast testslot:', 'say contrast occupied, testslot:'))
+        self.assertEqual(daemon.starts_needed(self.d.plan_info(plan)),
+                         {'dirty': None, 'testslot-cleared': None, 'occupied': 'start', 'testslot': 'start'})
 
     @needs_runner
     def test_a_plan_can_start_from_a_built_in_start(self):

@@ -8,12 +8,13 @@
 # last row), which starts from nothing, and SAVE PROJECT AS puts it into 121 and makes the saved
 # copy active; loading 121 then proves it is active, and its home screen proves it is new.
 #
-# Before this plan, the run backs up and clears the test slots that hold a project (outside the
-# plan for now), e.g. for 121:
+# The test slot must be empty when this plan starts. With `clear_at_release` covering it in
+# config.toml (as in the example setup: 121-128), every release leaves it so, and the go request
+# says so. Without it, the run backs up and clears the test slot before this plan (hand steps):
 #   data get /projects/121      (the backup, into the run's evidence folder)
 #   data clear /projects/121
-# List each in the go request as a write: "slot 121 (backed up and erased)". The start check sees
-# only 121's row. 121 is always reached in MANAGE PROJECTS, which lists every slot, never by its
+# List both in the go request as writes: "slot 121, whatever it holds: backed up and erased". The
+# start check sees only 121's row. 121 is always reached in MANAGE PROJECTS, which lists every slot, never by its
 # place in the LOAD PROJECT list (that list shows only full slots, so 121's place in it follows
 # what 122-128 hold). The LEVEL turn in the second section makes the active project unsaved,
 # and CREATE NEW then discards it (answered NO to the save): list that in the go request too.
@@ -40,8 +41,8 @@ wait 0.8
 keys FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP
 wait 0.6
 shot start-manage-121.png
-# The start check: 121 empty, which only the run's own clear produced. Record it in the emulator
-# after emulator-only steps have filled 121 and cleared it. The active project's row carries a
+# The start check: 121 empty, as a clear leaves it (the last release's, or the run's own). Record it
+# in the emulator after emulator-only steps have filled 121 and cleared it, as on the unit. The active project's row carries a
 # small marker at the left of its name field, even when its slot has been cleared, so the check is
 # in two parts that leave that column out: the slot number and the name field. The scrollbar
 # (cols 122-127) is left out too.

@@ -1,8 +1,9 @@
 # Built-in emulator starts
 
 Emulator-only plans that leave a fresh emulator the way a unit is usually found. A gate batch
-runs each hardware plan from them too (`dirty` and `occupied` always, where the unit has them,
-and every start a plan's `say contrast START: why` lines name), and the go needs each of those
+runs each hardware plan from them too (`dirty` and `occupied` always, where the unit has them;
+`testslot-cleared` instead of `occupied` where the unit sets `clear_at_release`, as every
+release then leaves the unit that way and never with its test slots full; and every start a plan's `say contrast START: why` lines name), and the go needs each of those
 runs to pass or to stop where the plan's contrast says. See
 [docs/testing-practices.md](../docs/testing-practices.md), "Messy starts and contrast runs".
 
@@ -41,7 +42,7 @@ A hardware plan whose own run should start from a built-in start, not from a fre
 says so with `start = START` (a plan for a state only a start leaves, such as a setup plan
 for a unit whose active project came from 121 before 121 was cleared: `start = testslot-cleared`). Its pass then comes
 from a gate batch, which builds that start and runs the plan from it; run_plan does not record
-it. Its runs from `dirty` and `occupied` and from its contrasts' starts are as for any plan: a
+it. Its runs from the required starts and from its contrasts' starts are as for any plan: a
 required start that the plan's start check rightly rejects is named in that check's contrast
 (`say contrast dirty, occupied, testslot: 121 is not the cleared active slot`), so its run must
 stop there rather than pass.
