@@ -188,7 +188,9 @@ with no contrast; it flags `set-and-kept` and `works` sections that no contrast 
   again on the unit after claiming.
 
 *elkbench enforces*: hardware plans, flashes and Total Recall restores need an approval token.
-A token is bound to the session, covers each item once, and expires after 2 h. `approve_plan`
+A token is bound to the session, covers each item once, and expires after 2 h. A restore of an
+image the same run takes is listed by the take's name; the go then covers only the file that a
+`recall_take` under it writes in the session's run folder, unchanged since. `approve_plan`
 refuses while the session holds a unit it isn't using. Every hardware call needs the session's
 own claim (elklock).
 
@@ -333,7 +335,7 @@ while no policy is installed.
 - Never drive Transfer's or Overbridge's own windows unattended; those steps are the person's.
   Close Transfer's use of a port before MIDI work.
 
-*elkbench enforces*: Total Recall needs claims on all three units; the elklock hook does the
+*elkbench enforces*: Total Recall needs claims on every configured unit; the elklock hook does the
 same for commands that drive or stop the Engine.
 
 ## 8. Remote control on stock firmware

@@ -62,7 +62,7 @@ See `config.example.toml`.
 | (Digitakt) | **Untested on hardware.** The Digitone's path, through digirun and digiemu: steps, shot, expect_screen, data, plans, `flash` and flash or plan batches, on the unit or in digiemu (OS 1.54; it needs a digiemu that resolves the Digitakt mk1 USB symbols, as the `elkbench-support` branch does). Every Digitakt flash sends 4 KB chunks (`--chunk-size 4096`): in digiemu an upgrade in elkflash's default 30 KB chunks stalls before the OS commits it, and 4 KB ones go through. So a Digitakt plan cannot `flash` (testplan sends the default chunks): flash with the `flash` tool, then run the plan. digihealth turns encoders on the Digitone only, so `turn` is refused; no `audio_record` (no Overbridge channel order known, and digiemu's stream was silent) and no Total Recall (obtr knows no Digitakt state types). digirun calls every session `digitone`, so a write policy marks a Digitakt test project by pattern A01 as well | hardware: claim |
 | data | the data store: `ls PATH` (`/` gives the roots) and `get PATH` (one object as Transfer stores it), through analogrun or digirun `data`, into the evidence folder; `put FILE` into PATH, `clear PATH` and `roundtrip PATH [to]` through analogrun `data` on every unit (the data store RPC is the same on the Digitone, where `ls`, `get` and `clear` have run on the unit and `put` only in the emulator so far; on the Digitakt untried), so the local write policy is asked first, and a copy of what is replaced goes to the evidence folder | hardware: claim |
 | audio_record / audio_check | asio_tone / asio_rec into the evidence folder / audiocheck verdict | record: claim; check: offline |
-| recall_take / recall_restore | obtr.py through the running Overbridge Engine | claims on all three units (the Engine is shared); restore also a token. Never starts or restarts Overbridge |
+| recall_take / recall_restore | obtr.py through the running Overbridge Engine | claims on every configured unit (the Engine is shared); restore also a token: for the image (sha256), or, in the same go as the take, `{"unit": ..., "take": NAME}` for the session folder's NAME.bin that a `recall_take` under that go writes (bound at take time; a second take under that name is refused). Never starts or restarts Overbridge |
 
 ## Practices
 How to run hardware tests safely, what elkbench enforces and what is left to the session:
@@ -238,7 +238,7 @@ touched. The plan tests need an analoghealth checkout (`ELKBENCH_TEST_ANALOGHEAL
 `tools.analoghealth` in your config) and are skipped without one. They cover MCP over stdio,
 two sessions and a busy claim, the token's one use and session binding, a dialog No, emulator
 twins sharing the key, release asking for stock and writing the handoff and log, steps rules,
-the emulator-flash gate and the Engine needing all three claims.
+the emulator-flash gate and the Engine needing every claim.
 `python test_plancheck.py`: the plan checker's rules and the templates in `templates/`, with no
 analoghealth checkout needed.
 `audio\`: `python -m unittest test_audiocheck` there.
