@@ -59,6 +59,9 @@ DEVICES = {
     'digitone': (r'digitone|digiusb', 'Digitone'),   # digiusb (digihealth) talks to the Digitone
     'digitakt': (r'digitakt', 'Digitakt'),           # digiusb with a Digitakt: name it, or claim both
 }
+# device -> regex for a MIDI host's port name that reaches it (in a --port or ELKBENCH_<DEV>_PORT
+# value only: the host's name in a path names no unit). The Rytm is cabled to the Sidecar Pi.
+HOST_PORTS = {'rytm': r'sidecar'}
 
 
 def load_config():
@@ -937,7 +940,13 @@ def hook():
     # unit (a folder such as rytmhealth names no unit)
     ports = re.findall(r'--port[ =]("[^"]*"|\'[^\']*\'|\S+)', run_part, re.I)
     where = ' '.join(ports) if ports else re.sub(r'rytmhealth', '', run_part, flags=re.I)
-    named = [d for d, (rx, _) in DEVICES.items() if re.search(rx, where, re.I)]
+    # ELKBENCH_<DEV>_PORT set anywhere on the line ($env:/export are cut from run_part) names <dev>;
+    # a host's port name (HOST_PORTS, or the unit's configured port) in a --port names its unit
+    env = [m.group(1).lower() for m in re.finditer(r'ELKBENCH_(\w+?)_PORT\b', cmd, re.I)]
+    hosted = ' '.join(ports).lower()
+    named = [d for d, (rx, _) in DEVICES.items() if re.search(rx, where, re.I) or d in env
+             or hosted and (re.search(HOST_PORTS.get(d, r'(?!)'), hosted)
+                            or port_of(d) != DEVICES[d][1] and port_of(d).lower() in hosted)]
     holders = {d: holder(d) for d in DEVICES}
     ours = [d for d in DEVICES if mine(holders[d], session=session)]
     missing = [d for d in named if d not in ours] if named else \

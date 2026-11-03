@@ -154,6 +154,24 @@ class Lock(unittest.TestCase):
         self.assertIn('rytm', self.hook('test-a', 'cd D:/Repos/rytmhealth/tools; python analogrun.py --port "Elektron Analog Rytm MKII" info'))
         run('test-a', 'release', 'a4', '--no-snapshot')
 
+    def test_hook_names_the_rytm_behind_sidecar(self):
+        side = 'python analogrun.py --port "Sidecar | Expander (Pi)" info'
+        envs = ["$env:ELKBENCH_RYTM_PORT = 'Sidecar | Expander (Pi)'; python analogrun.py info",
+                "export ELKBENCH_RYTM_PORT='Sidecar | Expander (Pi)'; python -m elkflash info --port x",
+                "ELKBENCH_RYTM_PORT='Sidecar | Expander (Pi)' python analogrun.py --port \"Sidecar | Expander (Pi)\" info"]
+        self.assertIn('rytm', self.hook('test-a', side))
+        # another unit's claim does not cover the Rytm behind the host
+        self.assertEqual(run('test-a', 'claim', 'a4', '--for', 'sidecar test').returncode, 0)
+        for cmd in [side] + envs:
+            self.assertIn('rytm', self.hook('test-a', cmd), cmd)
+        # the host's name in a path names no unit
+        self.assertEqual(self.hook('test-a', 'cd D:/Projects/Sidecar/port-174; python analogrun.py --port "Analog Four" info'), '')
+        run('test-a', 'release', 'a4', '--no-snapshot')
+        self.assertEqual(run('test-a', 'claim', 'rytm', '--for', 'sidecar test').returncode, 0)
+        for cmd in [side] + envs:
+            self.assertEqual(self.hook('test-a', cmd), '', cmd)
+        run('test-a', 'release', 'rytm', '--no-snapshot')
+
     def test_pid_alive(self):
         self.assertTrue(elklock.pid_alive(os.getpid()))
         p = subprocess.Popen([sys.executable, '-c', 'pass'])
