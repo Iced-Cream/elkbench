@@ -465,7 +465,7 @@ class InProcess(unittest.TestCase):
         r = subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
                            env=self.s.env(), capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        other = daemon.Session('test-session-d', os.getpid(), TMP)
+        other = daemon.Session('other-session', os.getpid(), TMP)     # its own run folder
         with self.assertRaisesRegex(daemon.Refused, 'claim rytm first'):
             self.d.t_run_plan(other, a)
         self.d.t_run_plan(self.s, a)
@@ -2086,6 +2086,120 @@ class InProcess(unittest.TestCase):
                        env=self.s.env(), capture_output=True)
         with self.assertRaisesRegex(daemon.Refused, 'claim a4 first' if daemon.WINDOWS else 'Overbridge Engine'):
             self.d.t_recall_take(self.s, {'unit': 'rytm'})
+
+    def engine_stubs(self):
+        """Total Recall without the Engine: obtr never runs (self.d.start is stubbed), claims are
+        taken as held, and the platform check passes on Linux too."""
+        saved = daemon.WINDOWS, daemon.OBTR
+        daemon.WINDOWS, daemon.OBTR = True, os.path.abspath(__file__)
+        self.d.check_hardware = lambda s, units: None
+        self.addCleanup(lambda: setattr(daemon, 'WINDOWS', saved[0]) or setattr(daemon, 'OBTR', saved[1]))
+
+    def take(self, s, unit, name, data=b'image'):
+        """recall_take as obtr would end it: the image, its .json from save_meta, exit 0."""
+        self.d.t_recall_take(s, {'unit': unit, 'name': name})
+        job, cmd = self.started[-1]
+        out = cmd[cmd.index('take') + 1]
+        with open(out, 'wb') as fh:
+            fh.write(data)
+        with open(os.path.splitext(out)[0] + '.json', 'w') as fh:
+            json.dump({'session': 12345, 'total': len(data), 'name': name}, fh)
+        self.done(job, 0, 'ok: took %d bytes' % len(data))
+        return out, job
+
+    def restore(self, s, unit, img, token):
+        return self.d.t_recall_restore(s, {'unit': unit, 'image': img, 'approval': token})
+
+    def test_restore_of_this_runs_take(self):
+        self.engine_stubs()
+        args = dict(purpose='test', recall_restores=[{'unit': 'rytm', 'take': 'tr09'}])
+        out = self.d.t_approval_text(self.s, args)
+        body = '\n'.join(out)
+        self.assertIn("of the image recall_take 'tr09' writes in this run: tr09.bin", body)
+        self.assertIn("ungated: Total Recall can't run in the emulator", body)
+        with self.assertRaisesRegex(daemon.Refused, 'bare file name'):
+            self.d.t_approval_text(self.s, dict(args, recall_restores=[{'unit': 'rytm', 'take': 'a/b'}]))
+        with self.assertRaisesRegex(daemon.Refused, 'image or a take, not both'):
+            self.d.t_approval_text(self.s, dict(args, recall_restores=[
+                {'unit': 'rytm', 'take': 'tr09', 'image': __file__}]))
+        token = self.approve(recall_restores=[{'unit': 'rytm', 'take': 'tr09.bin'}])
+        self.assertTrue(token.startswith('ap-'), token)
+        img = os.path.join(self.s.folder('rytm'), 'tr09.bin')
+
+        # before the take: no file, then a file nobody's take under the go wrote
+        with self.assertRaisesRegex(daemon.Refused, 'no image'):
+            self.restore(self.s, 'rytm', img, token)
+        with open(img, 'wb') as fh:
+            fh.write(b'planted')
+        with open(img[:-4] + '.json', 'w') as fh:
+            fh.write('{}')
+        with self.assertRaisesRegex(daemon.Refused, 'not that one'):
+            self.restore(self.s, 'rytm', img, token)
+        # a take refuses to overwrite a file already there
+        with self.assertRaisesRegex(daemon.Refused, 'already in this session'):
+            self.d.t_recall_take(self.s, {'unit': 'rytm', 'name': 'tr09'})
+        os.remove(img)
+        os.remove(img[:-4] + '.json')
+
+        out, job = self.take(self.s, 'rytm', 'tr09')
+        self.assertEqual(os.path.normcase(out), os.path.normcase(img))
+        self.assertTrue(any('now covers this file' in l for l in job.lines), job.lines)
+        # a second take under the bound name is refused before obtr runs
+        n = len(self.started)
+        os.rename(img, img + '.away')       # even with the file gone, the binding refuses
+        with self.assertRaisesRegex(daemon.Refused, 'already bound its restore'):
+            self.d.t_recall_take(self.s, {'unit': 'rytm', 'name': 'tr09.bin'})
+        self.assertEqual(len(self.started), n)
+        os.rename(img + '.away', img)
+
+        # altered after the take, then another unit
+        with open(img, 'ab') as fh:
+            fh.write(b'!')
+        with self.assertRaisesRegex(daemon.Refused, 'not that one'):
+            self.restore(self.s, 'rytm', img, token)
+        with open(img, 'wb') as fh:
+            fh.write(b'image')
+        with self.assertRaisesRegex(daemon.Refused, 'does not cover'):
+            self.restore(self.s, 'a4', img, token)
+        # a copy elsewhere, same bytes: not the bound path
+        other = os.path.join(TMP, 'tr09.bin')
+        shutil.copy(img, other)
+        shutil.copy(img[:-4] + '.json', other[:-4] + '.json')
+        with self.assertRaisesRegex(daemon.Refused, 'does not cover'):
+            self.restore(self.s, 'rytm', other, token)
+
+        self.assertEqual(self.restore(self.s, 'rytm', img, token), ['running'])
+        cmd = self.started[-1][1]
+        self.assertEqual(cmd[cmd.index('restore') + 1], img)
+        with self.assertRaisesRegex(daemon.Refused, 'has run; a new run needs a new go'):
+            self.restore(self.s, 'rytm', img, token)
+
+    def test_restore_take_is_this_sessions(self):
+        self.engine_stubs()
+        token = self.approve(recall_restores=[{'unit': 'rytm', 'take': 'mine'}])
+        other = daemon.Session('other-session', os.getpid(), TMP)     # its own run folder
+        theirs, job = self.take(other, 'rytm', 'mine')
+        self.assertFalse(any('now covers' in l for l in job.lines), job.lines)   # their take binds no go of ours
+        with self.assertRaisesRegex(daemon.Refused, 'does not cover'):
+            self.restore(self.s, 'rytm', theirs, token)
+        with self.assertRaisesRegex(daemon.Refused, 'another session'):
+            self.restore(other, 'rytm', theirs, token)
+        # a take made before the go does not bind it either
+        self.d.approvals.clear()
+        early, _ = self.take(self.s, 'rytm', 'early')
+        token = self.approve(recall_restores=[{'unit': 'rytm', 'take': 'early'}])
+        with self.assertRaisesRegex(daemon.Refused, 'not that one'):
+            self.restore(self.s, 'rytm', early, token)
+
+    def test_restore_by_sha_still_works(self):
+        self.engine_stubs()
+        img, _ = self.take(self.s, 'rytm', 'plain')
+        self.assertIn('TOTAL RECALL RESTORE plain.bin on rytm', '\n'.join(self.d.t_approval_text(
+            self.s, dict(purpose='test', recall_restores=[{'unit': 'rytm', 'image': img}]))))
+        token = self.approve(recall_restores=[{'unit': 'rytm', 'image': img}])
+        self.assertEqual(self.restore(self.s, 'rytm', img, token), ['running'])
+        with self.assertRaisesRegex(daemon.Refused, 'has run'):
+            self.restore(self.s, 'rytm', img, token)
 
     def test_batch_rules(self):
         img = self.saved['stock'][0]

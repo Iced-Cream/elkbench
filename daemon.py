@@ -543,6 +543,13 @@ def flash_key(unit, digest, over=None):
     return 'flash:%s:%s' % (unit, digest) + (':over:%s' % over if over else '')
 
 
+def take_name(name):
+    """A recall_take name as its file is called: a bare file name, .bin added."""
+    if not name or re.search(r'[\\/:]', name):
+        raise Refused('name is a bare file name')
+    return name if name.endswith('.bin') else name + '.bin'
+
+
 def sha256(path):
     h = hashlib.sha256()
     with open(path, 'rb') as fh:
@@ -1371,7 +1378,7 @@ class Daemon:
                 del self.approvals[t]
             write_json(self.approvals_path, self.approvals)
 
-    def use_approval(self, s, token, item, label):
+    def use_approval(self, s, token, item, label, check=None):
         with self.lock:
             a = self.approvals.get(token or '')
             if not a and token:
@@ -1388,8 +1395,11 @@ class Daemon:
             # A go may list the same item more than once (one build flashed again): each
             # listing runs once, so take the first one not yet used.
             same = [it for it in a['items'] if tuple(it['item']) == item]   # lists once through the file
+            if check and any(not it['used'] for it in same) and not any(check(it) for it in same):
+                raise Refused('%s: the go covers the image recall_take writes under it, and this file is not '
+                              'that one (no take under the go has passed yet, or the file changed since)' % label)
             for it in same:
-                if not it['used']:
+                if not it['used'] and (check is None or check(it)):
                     it['used'] = True
                     self.save_approvals()
                     return
@@ -1866,6 +1876,19 @@ class Daemon:
         for kind in ('flashes', 'recall_restores'):
             for f in a.get(kind) or []:
                 self.unit(f.get('unit'))
+                if kind == 'recall_restores' and f.get('take') is not None:
+                    # The image this go's own recall_take writes: it has no bytes yet, so the item
+                    # names the take, and the take binds its sha256 to it (note_take).
+                    if f.get('image'):
+                        raise Refused('a recall restore names an image or a take, not both')
+                    name = take_name(f['take'])
+                    items.append(dict(item=('restore-take', f['unit'], name), used=False,
+                                      label='recall restore of take %s on %s' % (name, f['unit'])))
+                    text.append('TOTAL RECALL RESTORE on %s (replaces the active project) of the image '
+                                'recall_take %r writes in this run: %s in this session\'s run folder, as that '
+                                'take wrote it (ungated: Total Recall can\'t run in the emulator)'
+                                % (f['unit'], name[:-4], name))
+                    continue
                 img = os.path.abspath(f.get('image', ''))
                 if not os.path.isfile(img):
                     raise Refused('no file %s' % img)
@@ -3397,7 +3420,7 @@ class Daemon:
         verdict = lines[-1] if lines else 'exit %d' % r.returncode
         return ['%s: %s' % ('pass' if r.returncode == 0 else 'fail', verdict)]
 
-    def engine_job(self, s, a, verb, extra, label, approval_item=None):
+    def engine_job(self, s, a, verb, extra, label, approval_item=None, check=None, after=None):
         if not WINDOWS and sys.platform != 'darwin':
             raise Refused('Total Recall needs the Overbridge Engine, which Elektron makes for Windows '
                           'and macOS only')
@@ -3407,7 +3430,7 @@ class Daemon:
             raise Refused('no Total Recall for %s (obtr.py does not know its state types)' % a['unit'])
         self.check_hardware(s, list(UNITS))       # the Engine is shared by every unit
         if approval_item:
-            self.use_approval(s, a.get('approval'), approval_item, label)
+            self.use_approval(s, a.get('approval'), approval_item, label, check)
         try:
             port = self.busy_port('engine', 'hardware')
         except Refused:
@@ -3424,26 +3447,71 @@ class Daemon:
             if any('refused' in l.lower() or '10061' in l for l in lines):
                 lines.append('the Overbridge Engine is not answering; restarting it needs %s\'s OK' % PERSON)
             job.lines = lines[-4:]
+            if after:
+                job.lines += after(job, rc)
             s.done.setdefault(a['unit'], []).append('%s %s' % (label, job.state.upper()))
 
         return self.start(job, cmd, os.path.dirname(OBTR), done, port)
 
+    def note_take(self, s, unit, out, began):
+        """A take that passed binds the restore items naming it in this session's gos made before
+        it began: the item then covers that file as it is now (its sha256), and nothing else."""
+        d, name, bound = sha256(out), os.path.basename(out), []
+        with self.lock:
+            for t, g in self.approvals.items():
+                if g['session'] != s.sid or g.get('ended') or time.time() > g['expires'] or g['created'] > began:
+                    continue
+                for it in g['items']:
+                    if tuple(it['item']) == ('restore-take', unit, name) and not it['used'] and not it.get('taken'):
+                        it['taken'], it['taken_path'], it['taken_at'] = d, out, time.time()
+                        bound.append(t)
+            if bound:
+                self.save_approvals()
+        return ['go %s: its restore of the take %s now covers this file (sha256 %s)' % (t, name, d)
+                for t in bound]
+
+    def bound_takes(self, s, unit, name):
+        """This session's gos whose restore of the take `name` on `unit` a take already bound."""
+        with self.lock:
+            return sorted(t for t, g in self.approvals.items() if g['session'] == s.sid and any(
+                tuple(it['item']) == ('restore-take', unit, name) and it.get('taken') for it in g['items']))
+
     def t_recall_take(self, s, a):
-        name = a.get('name') or 'recall-%s.bin' % time.strftime('%H%M%S')
-        if re.search(r'[\\/:]', name):
-            raise Refused('name is a bare file name')
+        name = take_name(a.get('name') or 'recall-%s.bin' % time.strftime('%H%M%S'))
         self.unit(a.get('unit'))
-        out = os.path.join(s.folder(a['unit']), name if name.endswith('.bin') else name + '.bin')
-        return self.engine_job(s, a, 'take', [out], 'recall take ' + os.path.basename(out))
+        out = os.path.join(s.folder(a['unit']), name)
+        # obtr opens the image 'wb': a second take under a name would destroy the one a go's
+        # restore is bound to, so refuse before obtr runs.
+        bound = self.bound_takes(s, a['unit'], name)
+        if bound:
+            raise Refused('go %s already bound its restore to the take %s: a second take under that name '
+                          'would overwrite it; take under another name' % (', '.join(bound), name))
+        if os.path.exists(out):
+            raise Refused('%s is already in this session\'s run folder: take under another name' % name)
+        began = time.time()
+
+        def after(job, rc):
+            ok = rc == 0 and os.path.isfile(out) and os.path.isfile(os.path.splitext(out)[0] + '.json')
+            return self.note_take(s, a['unit'], out, began) if ok else []
+        return self.engine_job(s, a, 'take', [out], 'recall take ' + name, after=after)
 
     def t_recall_restore(self, s, a):
         self.unit(a.get('unit'))
         img = os.path.abspath(a.get('image', ''))
         if not os.path.isfile(img) or not os.path.isfile(os.path.splitext(img)[0] + '.json'):
             raise Refused('no image %s with its session .json beside it (from recall_take)' % img)
+        d = sha256(img)
+        item, check = ('restore', a['unit'], d), None
+        # A go may name the image a take in the same go writes (it has no sha256 when the go is
+        # asked for): that item covers only the file note_take bound to it, unchanged since.
+        take = ('restore-take', a['unit'], os.path.basename(img))
+        g = self.approvals.get(a.get('approval') or '') or {}
+        if os.path.normcase(os.path.dirname(img)) == os.path.normcase(os.path.abspath(s.folder(a['unit']))) \
+                and any(tuple(it['item']) == take for it in g.get('items', [])):
+            item, check = take, (lambda it: it.get('taken') == d and
+                                 os.path.normcase(it.get('taken_path') or '') == os.path.normcase(img))
         return self.engine_job(s, a, 'restore', [img, '--answer-timeout', '120'],
-                               'recall restore ' + os.path.basename(img),
-                               ('restore', a['unit'], sha256(img)))
+                               'recall restore ' + os.path.basename(img), item, check)
 
     # -- batches: one plan or flash run many times in the emulator, across variants --
 
@@ -4204,6 +4272,10 @@ TARGET = lambda: {'type': 'string', 'enum': ['emulator', 'hardware'], 'req': Tru
 OVER = lambda: {'type': 'string', 'description': 'hardware: the OS .syx on the unit when it is flashed '
                                             '(the flash\'s emulator pass is of that transition); left out, the '
                                             'file this session flashed last'}
+RESTORES = lambda: {'type': 'array', 'items': {'type': 'object', 'properties': {
+    'unit': {'type': 'string'}, 'image': {'type': 'string', 'description': 'an image that exists now'},
+    'take': {'type': 'string', 'description': 'instead of image: the name a recall_take under this go '
+                                              'writes (the session run folder\'s {take}.bin)'}}}}
 EMU_BUILD = lambda: {'type': 'string', 'description': 'emulator only: boot a fresh emulator of this OS '
                                                      '.syx first (replaces yours), instead of an emulator call'}
 TOOLS = [
@@ -4230,8 +4302,7 @@ TOOLS = [
      S(plans={'type': 'array', 'items': {'type': 'string'}}, purpose={'type': 'string', 'req': True},
        flashes={'type': 'array', 'items': {'type': 'object', 'properties': {
            'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
-       recall_restores={'type': 'array', 'items': {'type': 'object', 'properties': {
-           'unit': {'type': 'string'}, 'image': {'type': 'string'}}}},
+       recall_restores=RESTORES(),
        text_id={'type': 'string', 'description': 'from approval_text: refuse if the request changed since'})),
     ('approval_text', 'The go request approve_plan would make for the same arguments, word for word, and '
                       'its text_id, without asking anyone: refuses now if approve_plan would. Post the text '
@@ -4239,8 +4310,7 @@ TOOLS = [
      S(plans={'type': 'array', 'items': {'type': 'string'}}, purpose={'type': 'string', 'req': True},
        flashes={'type': 'array', 'items': {'type': 'object', 'properties': {
            'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
-       recall_restores={'type': 'array', 'items': {'type': 'object', 'properties': {
-           'unit': {'type': 'string'}, 'image': {'type': 'string'}}}})),
+       recall_restores=RESTORES())),
     ('check_plan', 'The plan checker, in seconds and without an emulator: a start check, what each section '
                    'proves (`say proves KIND`), listen format, build and reference rules; and whether a go '
                    'would be accepted now (emulator pass, shared references). approve_plan refuses what it refuses.',
@@ -4362,10 +4432,13 @@ TOOLS = [
        ref={'type': 'string'}, channels={'type': 'string', 'description': 'e.g. 1,2'},
        folder={'type': 'string', 'description': 'where relative names are'})),
     ('recall_take', 'Overbridge Total Recall: take the unit\'s project image (obtr.py) into the evidence '
-                    'folder. Needs claims on all three units; never restarts Overbridge.',
+                    'folder of this session (name: a bare file name, .bin added; refused if that file is '
+                    'already there). Needs claims on every configured unit; never restarts Overbridge.',
      S(unit=UNIT(), name={'type': 'string'})),
     ('recall_restore', 'Overbridge Total Recall restore of an image from recall_take (replaces the active '
-                       'project). Needs all three claims and an approval token.',
+                       'project). Needs claims on every configured unit and an approval token: a go for '
+                       'the image (its sha256), or for the take of that name in this session\'s run folder '
+                       'that a recall_take under the go wrote.',
      S(unit=UNIT(), image={'type': 'string', 'req': True}, approval={'type': 'string'})),
 ]
 
