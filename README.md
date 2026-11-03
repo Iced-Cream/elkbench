@@ -41,6 +41,16 @@ stock, and the person named in the approval dialog. Every key is optional: a too
 off and its MCP tools say which key to set; evidence defaults to `Documents\elkbench\<unit>\runs`.
 See `config.example.toml`.
 
+A unit reached through a MIDI host (Sidecar, for example) has the host's port name, not its own.
+Direct USB is the default; a run through the host says so explicitly with `ELKBENCH_<UNIT>_PORT`
+in the environment (`ELKBENCH_RYTM_PORT=Sidecar | Expander (Pi)`). The daemon reads it when it
+starts, so start the daemon with it for those runs, and without it again for direct ones (check
+`status` first: never restart it under someone's run). `port` in `[units.<unit>]` sets the same
+thing permanently and is meant for a unit that is always behind a host. Hardware flashes (elkflash `--port`), steps, data, plans (analogrun
+`--port`), the connected check and the release's test-slot clear and handoff snapshot all use it;
+elklock reads the same setting and its `release` takes `--port NAME` for one device. Unset, every
+command is as before.
+
 ## Tools (each answers in a few lines: `ok:`, `pass:`, `fail:`, `refused:`, `running:`, `waiting:`)
 | tool | what | needs |
 |---|---|---|

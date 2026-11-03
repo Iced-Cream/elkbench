@@ -142,6 +142,14 @@ def chunk_args(unit):
     return ['--chunk-size', str(int(n))] if n else []
 
 
+def port_args(unit):
+    """['--port', NAME] for analogrun/testplan on hardware when the unit's port is set (config or
+    ELKBENCH_<UNIT>_PORT) to other than its built-in name; else [], so a plan's own `port =` and the
+    runner's default stay as they were."""
+    port = (UNITS.get(unit) or {}).get('port')
+    return ['--port', port] if port and port != UNIT_FACTS[unit]['port'] else []
+
+
 def no_steps(unit):
     """The steps `unit`'s runner lacks: digirun's gaps, and any the unit's facts add."""
     u = UNITS.get(unit) or {}
@@ -453,6 +461,9 @@ def load_config(path=CONFIG):
     units = {}
     for name, facts in UNIT_FACTS.items():
         u = dict(facts, **c.get('units', {}).get(name, {}))
+        # the unit's MIDI port on hardware: ELKBENCH_<UNIT>_PORT, else units.<unit>.port (a unit
+        # reached through a MIDI host such as Sidecar has that host's port name)
+        u['port'] = os.environ.get('ELKBENCH_%s_PORT' % name.upper()) or u['port']
         u.setdefault('evidence', os.path.join(root, name, 'runs'))
         u.setdefault('refs', os.path.join(root, name, 'refs'))
         # test slots the release empties (backed up first), so every run finds them empty
@@ -1020,7 +1031,7 @@ class Daemon:
             if not any(want in p.lower() for p in ports):
                 raise Refused('the %s emulator is not running (no %r MIDI port): start the analog-emu '
                               'window first' % (unit, want))
-        elif not elklock.connected(unit, ports):
+        elif not elklock.connected(unit, ports, UNITS[unit]['port']):
             raise Refused('%s is not on USB (no %r MIDI port)' % (unit, UNITS[unit]['port']))
 
     def target(self, t):
@@ -1707,7 +1718,7 @@ class Daemon:
                        if u in s.os_left else 'not flashed by this session')
             full = '%s; runs: %s; OS: %s' % (note_u, '; '.join(done) or 'none', os_text)
             # a scratch ELKLOCK_DIR is a test: no device reads for the snapshot then
-            snap = ['--no-snapshot'] if os.environ.get('ELKLOCK_DIR') else []
+            snap = ['--no-snapshot'] if os.environ.get('ELKLOCK_DIR') else port_args(u)
             r = subprocess.run([sys.executable, ELKLOCK, 'release', u, '--note', full[:900]] + snap, env=s.env(),
                                capture_output=True, text=True, timeout=180, **NOWIN)
             if r.returncode:
@@ -2756,7 +2767,7 @@ class Daemon:
                              tag='%s part %d of %d' % (tag, i + 1, len(parts)), hardware=tgt == 'hardware')
             lines = [l for _, ls in part for l in ls]
             if tgt == 'hardware':
-                stages.append([sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] +
+                stages.append([sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + port_args(unit) +
                               self.din_args(s, unit, tgt, lines) + ['--quiet', 'run', plan])
             else:
                 stages.append(self.emulator_part(s, unit, plan, lines, i + 1))
@@ -2826,7 +2837,8 @@ class Daemon:
             plan = self.twin(info, False, s.sid, emulator_run=ep['run_dir']) \
                 if info['flash'] and ep.get('run_dir') else info['path']
             cmd = self.plan_stages(s, info, job, tgt, info['steps']) if cycles else [
-                sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + din + ['--quiet', 'run', plan]
+                sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + port_args(unit) + din + [
+                '--quiet', 'run', plan]
             started = []
         else:
             if cycles and UNITS[unit].get('emulator') == 'digiemu':

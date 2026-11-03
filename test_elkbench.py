@@ -460,6 +460,9 @@ class InProcess(unittest.TestCase):
         token = self.approve(plans=[plan])
         self.assertTrue(token.startswith('ap-'), token)
         a = {'plan': plan, 'target': 'hardware', 'approval': token}
+        saved = daemon.elklock.midi_inputs                  # this PC's ports are not the test's
+        daemon.elklock.midi_inputs = lambda: ['Analog Rytm MKII']
+        self.addCleanup(setattr, daemon.elklock, 'midi_inputs', saved)
         with self.assertRaisesRegex(daemon.Refused, 'claim rytm first'):
             self.d.t_run_plan(self.s, a)
         r = subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
@@ -1779,6 +1782,44 @@ class InProcess(unittest.TestCase):
         self.assertIn(daemon.ELKLOCK, cmd)                           # still under the claim
         self.d.t_steps(self.s, {'unit': 'rytm', 'target': 'hardware', 'steps': 'send %s' % self.kit_request()})
         self.assertNotIn('--din', ran[-1])                           # only when a step uses it
+
+    def test_unit_port_through_a_midi_host(self):
+        # units.<unit>.port (or ELKBENCH_<UNIT>_PORT): a Rytm behind Sidecar has its host's port name
+        saved = daemon.elklock.midi_inputs, daemon.UNITS['rytm']['port']
+        self.addCleanup(lambda: setattr(daemon.elklock, 'midi_inputs', saved[0]) or
+                        daemon.UNITS['rytm'].update(port=saved[1]))
+        daemon.elklock.midi_inputs = lambda: ['Sidecar | Expander (Pi)', 'USB MIDI Interface']
+        self.assertEqual(daemon.port_args('rytm'), [])                    # built-in name: runner defaults
+        with self.assertRaisesRegex(daemon.Refused, "rytm is not on USB \\(no 'Analog Rytm' MIDI port\\)"):
+            self.d.check_connected('rytm', 'hardware')
+        daemon.UNITS['rytm']['port'] = 'Sidecar | Expander (Pi)'
+        self.assertEqual(daemon.port_args('rytm'), ['--port', 'Sidecar | Expander (Pi)'])
+        self.d.check_connected('rytm', 'hardware')                         # found under the host's name
+        daemon.elklock.midi_inputs = lambda: ['Analog Rytm MKII']
+        with self.assertRaisesRegex(daemon.Refused, "no 'Sidecar \\| Expander \\(Pi\\)' MIDI port"):
+            self.d.check_connected('rytm', 'hardware')                     # the setting, not the old name
+        old = os.environ.get('ELKBENCH_RYTM_PORT')
+        os.environ['ELKBENCH_RYTM_PORT'] = 'From Env'
+        self.addCleanup(lambda: os.environ.pop('ELKBENCH_RYTM_PORT') if old is None else
+                        os.environ.update(ELKBENCH_RYTM_PORT=old))
+        cfg = daemon.load_config(os.path.join(TMP, 'no-such-config.toml'))
+        self.assertEqual(cfg['units']['rytm']['port'], 'From Env')
+        self.assertEqual(cfg['units']['a4']['port'], 'Analog Four')
+
+    @needs_runner
+    def test_hardware_runs_use_the_units_port(self):
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        saved = daemon.elklock.midi_inputs, daemon.UNITS['rytm']['port']
+        self.addCleanup(lambda: setattr(daemon.elklock, 'midi_inputs', saved[0]) or
+                        daemon.UNITS['rytm'].update(port=saved[1]))
+        daemon.elklock.midi_inputs = lambda: ['Sidecar | Expander (Pi)']
+        daemon.UNITS['rytm']['port'] = 'Sidecar | Expander (Pi)'
+        ran = self.capture_runs()
+        self.d.t_steps(self.s, {'unit': 'rytm', 'target': 'hardware', 'steps': 'tap PLAY'})
+        cmd = ran[-1]
+        self.assertEqual(cmd[cmd.index('--port') + 1], 'Sidecar | Expander (Pi)')
+        self.assertIn(daemon.ELKLOCK, cmd)                                 # still under the claim
 
     @needs_runner
     def test_din_in_the_emulator(self):

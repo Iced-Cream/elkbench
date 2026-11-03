@@ -75,6 +75,13 @@ person = "the person at this PC"
 # no_stats = ['C:\os\remote-only.syx']     # builds whose runner channel has no stats command:
 #                                          # plans and steps with a stats step are refused on them
 # emu_card = 'C:\tests\rytm\card.img'      # the emulator tool boots a fresh copy of it
+# port = 'Sidecar | Expander (Pi)'         # its MIDI port on hardware (a part of the name; default the
+#                                          # built-in 'Analog Rytm', direct USB): only for a unit always
+#                                          # behind a MIDI host; for single runs through one, set
+#                                          # ELKBENCH_RYTM_PORT (_A4_, ...) for the daemon instead, which
+#                                          # overrides it. Flashes, steps, data, plans, the connected
+#                                          # check and the release's slot clear and snapshot use it;
+#                                          # elklock reads it too (and has release --port)
 # din = 'USB MIDI Interface'               # the MIDI interface cabled to its DIN ports (both ways, a
 #                                          # name or 'IN,OUT'): hardware steps and plans with
 #                                          # send/capture ... din use it (Rytm, A4; Digitone and
