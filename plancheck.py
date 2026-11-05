@@ -53,8 +53,9 @@ def is_assert(w):
     if not w:
         return False
     op = w[0].lower()
-    if op == 'capture':                      # capture FILE S any|none [din]
-        return len(w) > 3 and w[3].lower() in ('any', 'none')
+    if op == 'capture':                      # capture FILE S [any|none] [short] [nrpn=..] [cc=..] [din]
+        return (len(w) > 3 and w[3].lower() in ('any', 'none')
+                or any(x.lower().startswith(('nrpn=', 'cc=')) for x in w[3:]))
     return op in ASSERT_OPS
 
 
