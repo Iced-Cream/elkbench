@@ -161,17 +161,22 @@ def din_refusal(unit):
     return 'DIN steps (send/capture ... din) have no runner on the %s' % unit
 
 
-STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'wait', 'stats',
+STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'bend', 'at', 'wait', 'stats',
             'dump', 'send', 'capture', 'ping', 'save-project', 'save-kit', 'say'}
 
 
+SHORT_SEND_OPS = ('cc', 'nrpn', 'note', 'bend', 'at')     # analogrun's short-message steps
+
+
 def din_steps(lines):
-    """The send/capture steps among `lines` that use the unit's DIN MIDI (a trailing din)."""
+    """The steps among `lines` that use the unit's DIN MIDI (a trailing din): send, capture, and
+    analogrun's cc/nrpn/note/bend/at."""
     out = []
     for l in lines:
         w = shlex.split(l, comments=True)
         if w and w[-1].lower() == 'din' and (w[0].lower() == 'send' and len(w) > 2 or
-                                             w[0].lower() == 'capture' and len(w) > 3):
+                                             w[0].lower() == 'capture' and len(w) > 3 or
+                                             w[0].lower() in SHORT_SEND_OPS and len(w) > 3):
             out.append(l)
     return out
 
