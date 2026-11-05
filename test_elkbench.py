@@ -288,6 +288,98 @@ class ApprovalInClaude(unittest.TestCase):
         self.assertTrue(self.L.read()['result']['content'][0]['text'].startswith('refused:'))
 
 
+class MidiGuard(unittest.TestCase):
+    """The stale-MIDI-port guards (2026-11-05): other MIDI programs warned about, midisrv's pid
+    and start time logged, a hung job killed with the processes it started."""
+
+    def test_parse_one_row_many_rows_none(self):
+        one = '{"name":"midisrv.exe","pid":4321,"start":"2026-11-05T18:52:29"}'
+        self.assertEqual(daemon.parse_midi_processes(one),
+                         ([{'name': 'midisrv.exe', 'pid': 4321, 'start': '2026-11-05T18:52:29'}], []))
+        many = json.dumps([{'name': 'MIDISRV.EXE', 'pid': 1, 'start': 'a'},
+                           {'name': 'Transfer.exe', 'pid': 2, 'start': 'b'}])
+        srv, others = daemon.parse_midi_processes(many)
+        self.assertEqual(([r['pid'] for r in srv], [r['name'] for r in others]), ([1], ['Transfer.exe']))
+        self.assertEqual(daemon.parse_midi_processes(''), ([], []))
+
+    def test_lines(self):
+        srv = [{'name': 'midisrv.exe', 'pid': 7, 'start': '2026-11-05T18:52:29'}]
+        transfer = [{'name': 'Transfer.exe', 'pid': 9, 'start': '2026-11-05T15:06:00'}]
+        warn, line = daemon.midi_lines(srv, transfer, None, flash=True)
+        self.assertEqual(line, 'midisrv: pid 7, started 2026-11-05T18:52:29')
+        self.assertEqual(len(warn), 1)
+        self.assertIn('Transfer.exe (pid 9, running since 2026-11-05T15:06:00)', warn[0])
+        self.assertIn('close it before flashing', warn[0])
+        self.assertEqual(daemon.midi_lines(srv, [], None, last_srv=[7])[0], [])
+        self.assertIn('restarted since the last hardware run: was pid 5',
+                      daemon.midi_lines(srv, [], None, last_srv=[5])[1])
+        self.assertEqual(daemon.midi_lines([], [], None)[1], 'midisrv: not running')
+        self.assertEqual(daemon.midi_lines([], [], 'not Windows')[1], 'midisrv: unknown (not Windows)')
+
+    def test_query_goes_encoded_and_lists_the_clients(self):
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append(cmd)
+            return types.SimpleNamespace(returncode=0, stdout='[]', stderr='')
+        self.assertEqual(daemon.midi_processes(['Transfer.exe', 'Overbridge%'], run=run), ([], [], None))
+        cmd = seen[0]
+        self.assertEqual(cmd[:4], ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand'])
+        import base64
+        query = base64.b64decode(cmd[4]).decode('utf-16-le')
+        self.assertIn("Name='midisrv.exe' OR Name LIKE 'Transfer.exe' OR Name LIKE 'Overbridge%'", query)
+        with self.assertRaises(SystemExit):
+            daemon.midi_query(["x' OR 1=1"])
+
+    def test_a_failed_query_is_reported_not_raised(self):
+        def run(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, 20)
+        srv, others, error = daemon.midi_processes([], run=run)
+        self.assertEqual((srv, others), ([], []))
+        self.assertIn('TimeoutExpired', error)
+
+    @unittest.skipIf(os.name == 'nt', 'the process-group kill is the POSIX path; Windows uses taskkill /T')
+    def test_run_limited_kills_the_tree(self):
+        marker = os.path.join(TMP, 'grandchild.pid')
+        code = ('import subprocess, sys, time; p = subprocess.Popen([sys.executable, "-c", '
+                '"import time; time.sleep(60)"]); open(%r, "w").write(str(p.pid)); print("started", '
+                'flush=True); time.sleep(60)' % marker)
+        t0 = time.monotonic()
+        rc, out, killed = daemon.run_limited([sys.executable, '-c', code], TMP, dict(os.environ), 1.5)
+        self.assertTrue(killed)
+        self.assertLess(time.monotonic() - t0, 20)
+        self.assertIn('started', out)
+        with open(marker) as fh:
+            gpid = int(fh.read())
+        for _ in range(50):                      # the grandchild (elkflash under elklock run) too
+            try:
+                os.kill(gpid, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail('the grandchild was not killed')
+        self.assertEqual(daemon.run_limited([sys.executable, '-c', 'print(1)'], TMP, dict(os.environ), 30),
+                         (0, '1\n', False))
+
+    def test_a_job_over_its_limit_fails_and_says_why(self):
+        d = daemon.Daemon()
+        s = daemon.Session('test-session-midi', os.getpid(), TMP)
+        job = daemon.Job(s, 'flash', 'rytm', 'emulator', 'flash X.syx')
+        job.limit = 1
+        got = []
+        d.start(job, [sys.executable, '-c', 'import time; time.sleep(60)'], TMP,
+                lambda job, rc, out: got.append((rc, out)))
+        for _ in range(200):
+            if job.ended:
+                break
+            time.sleep(0.05)
+        self.assertTrue(got, 'done was not called')
+        rc, out = got[0]
+        self.assertNotEqual(rc, 0)
+        self.assertIn('killed after 1 s', out)
+
+
 class InProcess(unittest.TestCase):
     def setUp(self):
         forget_passes()

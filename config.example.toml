@@ -33,6 +33,12 @@ person = "the person at this PC"
 # remote client session.
 # keep_awake = true
 
+# Programs that open MIDI ports beside elkbench's tools: a hardware run or flash starts with a
+# warning for each one running (WQL LIKE patterns on the process image name, % = any text). The
+# job log also records the pid and start time of midisrv (Windows MIDI Services), and says when
+# it restarted since the last hardware run.
+# midi_clients = ['Transfer.exe', 'Overbridge%']
+
 [tools]
 # elklock.py; default: elklock\elklock.py in this folder.
 # elklock = 'C:\tools\elklock\elklock.py'

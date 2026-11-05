@@ -71,6 +71,12 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
 `examples/write-policy/`.
 
 ## Rules it enforces
+- **Stuck MIDI**: a hardware run or flash starts with a warning for each other MIDI program
+  running (Transfer and the Overbridge Engine by default; `midi_clients` in config.toml), and
+  its log records midisrv's pid and start time, noting a restart since the last hardware run.
+  A flash job that has not ended after 600 s (900 s on an emulator) is killed with the
+  processes it started, so its port lock frees. elkflash and analogrun put their own time
+  limit on every winmm call; this is the backstop.
 - **Claim**: every hardware call checks elklock (`mine` for this session) first; it never breaks
   a claim. Emulator and offline calls need none.
 - **Write policy**: writes on a unit go through analogrun, so a local write policy installed
