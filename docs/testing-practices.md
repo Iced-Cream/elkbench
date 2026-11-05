@@ -403,8 +403,8 @@ the plan meant, and that each check would have failed if the result were wrong.
 - **Say what each section proves**: `setup` (state for later checks), `set-and-kept` (a setting is
   made and read back), `works` (the feature's effect is measured) or `evidence` (shots for a person
   to judge). A `set-and-kept` or `works` section needs a machine assertion (`expect-screen`,
-  `capture ... any|none`, `audio-compare`, `audio-dropouts`, `stats`, `ping`). A shot is judged by
-  eye, and the go request says so.
+  `capture ... any|none`, `capture ... short` with an `nrpn=` or `cc=` matcher, `audio-compare`,
+  `audio-dropouts`, `stats`, `ping`). A shot is judged by eye, and the go request says so.
 - **Compare rows that can differ.** A reference compares the rows that show the value under test,
   not the rows that show which page is open, and never rows that are blank in the reference.
 - **Known navigation.** Every page is entered from a known page, every menu from its top, and a
