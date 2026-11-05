@@ -28,6 +28,7 @@ Stdlib only. Windows and Linux (no Overbridge Total Recall on Linux: there is no
     python daemon.py              (started by launcher.py; one per PC)
     python daemon.py --check      (exit 0: this code imports and reads the config)
 """
+import base64
 import ctypes as C
 import hashlib
 import json
@@ -87,6 +88,15 @@ KNOWN_STARTS = ('a fresh emulator', 'a setup snapshot')    # pass starts a gate 
 REQUIRED_STARTS = ('dirty', 'occupied')
 REQUIRED_STARTS_CLEARED = ('dirty', 'testslot-cleared')
 STATUS_WAIT, STATUS_WAIT_MAX = 300, 600     # s that status run_id waits for a run to end
+# s a flash job may take before elkbench kills it (and its elklock run): a backstop for a tool
+# stuck in a MIDI call. A unit flashes in 22-70 s, digiemu's reboot wait is 400 s.
+FLASH_JOB_LIMIT = {'hardware': 600, 'emulator': 900}
+# Programs that open MIDI ports beside elkbench's tools (WQL LIKE patterns on the process image
+# name); config.toml `midi_clients` replaces them. On 2026-11-05 a flash through the Sidecar Pi
+# with Transfer open (and the Overbridge Engine running) left Windows MIDI stuck: every later
+# open of the port hung until the Pi-to-PC cable was replugged.
+MIDI_CLIENTS = ('Transfer.exe', 'Overbridge%')
+MIDISRV = 'midisrv.exe'                     # the Windows MIDI Services service
 IDLE_EXIT = 30 * 60
 # What the units are; config.toml can override any key, and adds where evidence goes.
 UNIT_FACTS = {
@@ -474,6 +484,7 @@ def load_config(path=CONFIG):
         write_policy=(policy or '(ANALOGHEALTH_POLICY is empty)') if c.get('require_write_policy') else None,
         starts=c.get('starts') or os.path.join(HERE, 'starts'),
         keep_awake=c.get('keep_awake', True) is not False,
+        midi_clients=tuple(c['midi_clients']) if 'midi_clients' in c else MIDI_CLIENTS,
         units=units)
 
 
@@ -498,6 +509,7 @@ USB_AUDIO = CFG['usb_audio']
 OBTR = CFG['obtr']
 AUDIO_PY = CFG['audio_python']            # a Python with numpy + scipy
 WRITE_POLICY = CFG['write_policy']      # must exist before hardware calls, or None
+MIDI_CLIENT_NAMES = CFG['midi_clients']
 STARTS = CFG['starts']                    # <folder>/<unit>/<start>.txt: the built-in emulator starts
 batch.set_slots(CFG['batch_slots'])      # emulators all batches on this PC may run at once
 
@@ -699,6 +711,98 @@ def flash_start_line(job, port, now=None):
                                                    time.strftime('%H:%M:%S', time.localtime(now)), quiet)
 
 
+def midi_query(clients):
+    """The PowerShell command that lists midisrv and the processes named by `clients` (WQL LIKE
+    patterns) as JSON: name, pid, start (local time, ISO)."""
+    for c in clients:
+        if "'" in c or '"' in c:
+            raise SystemExit('config.toml: midi_clients entries cannot hold quotes: %r' % c)
+    where = ' OR '.join(["Name='%s'" % MIDISRV] + ["Name LIKE '%s'" % c for c in clients])
+    return ('@(Get-CimInstance Win32_Process -Filter "%s" | ForEach-Object { [pscustomobject]@{'
+            'name=$_.Name; pid=$_.ProcessId; start=$_.CreationDate.ToString(\'s\')} }) | '
+            'ConvertTo-Json -Compress' % where)
+
+
+def parse_midi_processes(text):
+    """PowerShell's JSON (midi_query) -> (midisrv entries, other clients), each a list of
+    {'name', 'pid', 'start'}."""
+    text = (text or '').strip()
+    rows = json.loads(text) if text else []
+    if isinstance(rows, dict):                 # ConvertTo-Json gives one object for one row
+        rows = [rows]
+    rows = [{'name': r.get('name'), 'pid': r.get('pid'), 'start': r.get('start')} for r in rows
+            if isinstance(r, dict)]
+    srv = [r for r in rows if (r['name'] or '').lower() == MIDISRV]
+    return srv, [r for r in rows if (r['name'] or '').lower() != MIDISRV]
+
+
+def midi_processes(clients=None, run=None):
+    """-> (midisrv entries, other MIDI clients, error or None); on Windows only."""
+    if not WINDOWS and run is None:
+        return [], [], 'not Windows'
+    run = run or subprocess.run
+    try:
+        query = midi_query(MIDI_CLIENT_NAMES if clients is None else clients)
+        # -EncodedCommand (UTF-16LE base64): the query's quotes reach PowerShell untouched
+        r = run(['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+                 base64.b64encode(query.encode('utf-16-le')).decode('ascii')],
+                capture_output=True, text=True, timeout=20, **NOWIN)
+        if r.returncode:
+            return [], [], 'PowerShell exit %d: %s' % (r.returncode, (r.stderr or '').strip()[:200])
+        srv, others = parse_midi_processes(r.stdout)
+        return srv, others, None
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        return [], [], '%s: %s' % (type(e).__name__, e)
+
+
+def midi_lines(srv, others, error, last_srv=None, flash=False):
+    """-> (warnings for the caller, the midisrv line for the logs)."""
+    warn = []
+    for c in others:
+        warn.append('warning: %s (pid %s, running since %s) may hold MIDI ports: close it before %s. '
+                    'A flash with Transfer open on 2026-11-05 left Windows MIDI stuck until a USB '
+                    'replug.' % (c['name'], c['pid'], c['start'] or '?',
+                                 'flashing' if flash else 'MIDI work'))
+    if error:
+        line = 'midisrv: unknown (%s)' % error
+    elif not srv:
+        line = 'midisrv: not running'
+    else:
+        line = 'midisrv: ' + ', '.join('pid %s, started %s' % (r['pid'], r['start']) for r in srv)
+        pids = sorted(r['pid'] for r in srv)
+        if last_srv is not None and last_srv != pids:
+            line += ' (restarted since the last hardware run: was pid %s)' % (
+                ', '.join(map(str, last_srv)) or 'none')
+    return warn, line
+
+
+def run_limited(cmd, cwd, env, limit):
+    """-> (rc, output, killed): cmd run to its end, or killed with every process it started
+    (an elklock run and the tool under it) after `limit` s."""
+    p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, encoding='utf-8', errors='replace',
+                         **(NOWIN if WINDOWS else {'start_new_session': True}))
+    try:
+        out, _ = p.communicate(timeout=limit)
+        return p.returncode, out, False
+    except subprocess.TimeoutExpired:
+        if WINDOWS:
+            subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)], capture_output=True,
+                           timeout=30, **NOWIN)
+        else:
+            import signal
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        try:
+            out, _ = p.communicate(timeout=30)
+        except subprocess.TimeoutExpired:      # a process that cannot be killed keeps the pipe
+            p.kill()
+            out = ''
+        return (p.returncode if p.returncode is not None else -9), out or '', True
+
+
 class Held:
     """Port locks taken together, released together (the unit's port and its DIN interface)."""
 
@@ -722,6 +826,8 @@ class Job:
         self.listening = None             # what the person listens for while the plan waits
         self.power_cycle = False          # ... and whether it waits for a power cycle by hand
         self.batch = None                 # a batch's batch.Batch: its progress while it runs
+        self.limit = None                 # s before the job's commands are killed, or None
+        self.midisrv = None               # the midisrv line logged when it started (hardware)
 
     def summary(self):
         took = (self.ended or time.time()) - self.started
@@ -739,6 +845,7 @@ class Daemon:
         self.approvals_path = os.path.join(STATE, 'approvals.json')
         self.approvals = read_json(self.approvals_path, {})
         self.ports = {}                   # (unit, target) -> PortLock: one user per port
+        self.last_midisrv = None          # midisrv's pids at the last hardware job (midi_lines)
         self.emulators = {}               # (session, unit) -> dict(proc, session, build, address)
         self.dialog = threading.Lock()
         self.passes_path = os.path.join(STATE, 'emulator-passes.json')
@@ -1489,9 +1596,22 @@ class Daemon:
 
     # -- jobs --
 
+    def midi_check(self, job):
+        """Before a hardware job: warnings for other MIDI programs that are running, and
+        midisrv's pid and start time in the daemon log (a restart between runs shows)."""
+        srv, others, error = midi_processes()
+        warn, line = midi_lines(srv, others, error, self.last_midisrv, flash=job.kind == 'flash')
+        if not error:
+            self.last_midisrv = sorted(r['pid'] for r in srv)
+        job.midisrv = line
+        self.log_line({'session': job.sess.sid, 'job': job.id, 'midisrv': srv, 'midi_clients': others,
+                       **({'midi_error': error} if error else {})})
+        return warn
+
     def start(self, job, cmd, cwd, done, port=None):
         """Run cmd in the background; done(job, rc, output) sets the verdict lines."""
         os.makedirs(os.path.dirname(job.log), exist_ok=True)
+        warn = self.midi_check(job) if job.target == 'hardware' else []
         with self.lock:
             self.jobs[job.id] = job
 
@@ -1501,6 +1621,8 @@ class Daemon:
                     log.write('$ %s\n(cwd %s)\n' % ('; '.join(
                         getattr(c, '__name__', None) or subprocess.list2cmdline(c)
                         for c in (cmd if isinstance(cmd[0], (list, tuple)) or callable(cmd[0]) else [cmd])), cwd))
+                    for line in ([job.midisrv] if job.midisrv else []) + warn:
+                        log.write('elkbench: %s\n' % line)
                     log.flush()
                     # A plan's `listen` step writes ANALOGRUN_LISTEN_FILE and waits until it is
                     # gone: listen_done removes it once the person has said they have finished.
@@ -1516,6 +1638,14 @@ class Daemon:
                                   else [cmd]):
                         if callable(stage):
                             rc, more = stage(rc, out)
+                        elif job.limit:
+                            rc, more, killed = run_limited(stage, cwd, env, job.limit)
+                            if killed:
+                                rc = rc or -9
+                                more += ('\nelkbench: killed after %d s with the processes it started: '
+                                         'it did not end (a call stuck in Windows MIDI does this; before '
+                                         'calling the unit dead, read the Sidecar Pi /log `midi from` '
+                                         'around one request)\n' % job.limit)
                         else:
                             p = subprocess.run(stage, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                                stderr=subprocess.STDOUT, text=True, encoding='utf-8',
@@ -1536,9 +1666,11 @@ class Daemon:
                     port.release()
                 self.log_line({'session': job.sess.sid, 'job': job.id, 'end': job.state,
                                'lines': job.lines[:3]})
+                if job.target == 'hardware' and job.state == 'fail':
+                    self.midi_check(job)          # did midisrv restart, or a client appear, meanwhile?
 
         threading.Thread(target=work, daemon=True).start()
-        return ['running: %s %s; status with run_id %s waits for its end' % (job.id, job.desc, job.id)]
+        return warn + ['running: %s %s; status with run_id %s waits for its end' % (job.id, job.desc, job.id)]
 
     def watch_listen(self, job):
         """While a hardware run goes on: when it stops at a `listen` step, mark the unit as
@@ -2997,6 +3129,7 @@ class Daemon:
                 i, o = addr.split(',')
                 cmd = base + ['--in-port', i, '--out-port', o] + tail
         job = Job(s, 'flash', a['unit'], tgt, 'flash ' + os.path.basename(img))
+        job.limit = FLASH_JOB_LIMIT.get(tgt)
         flog = os.path.join(folder, 'elkflash.log')
         quiet = flash_start_line(job, port)
         self.log_line({'session': s.sid, 'job': job.id, 'flash_starts': quiet})
@@ -3016,8 +3149,8 @@ class Daemon:
                             if re.match(r'\s*(sent \d|Committed|back after|note:|Press YES|SUCCESS|no reply to PING)', l)]
             except OSError:
                 said = []
-            job.lines = [quiet] + [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + \
-                ['log: %s' % flog]
+            job.lines = [quiet] + ([job.midisrv] if job.midisrv else []) + \
+                [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + ['log: %s' % flog]
             if tgt == 'hardware':
                 if rc == 0:
                     s.os_left[a['unit']] = (os.path.basename(img), self.is_stock(a['unit'], d), d)
