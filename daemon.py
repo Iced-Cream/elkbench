@@ -250,6 +250,22 @@ def power_cycles(steps):
     return ['[%s] power-cycle' % name for name, lines in steps for l in lines if is_power_cycle(l)]
 
 
+def boot_from_flash(e):
+    """After a flash into an analog-emu: its command line drops the OS file it was started with.
+    analog-emu boots a FIRMWARE it is given and the OS in --flash only when given none, so a
+    power cycle on the start's command line cold-booted the old OS again, while the flash (and
+    ping's version) said the new one: a DLA1 -> DLB2 flash, then a power cycle, ran DLA1's image
+    (2026-11-06, drive-loader-run). -> True when the command line changed."""
+    fw = e.get('firmware')
+    e['firmware'] = None
+    cmd = e.get('cmd')
+    if not fw or not cmd or fw not in cmd[1:]:
+        return False
+    i = cmd.index(fw, 1)
+    e['cmd'] = cmd[:i] + cmd[i + 1:]
+    return True
+
+
 def power_cycle_parts(steps):
     """A plan's sections -> its parts between `power-cycle` steps (a list of section lists, one
     more than there are power cycles; the first may be empty). A section a power cycle splits
@@ -2480,7 +2496,8 @@ class Daemon:
                                                  address='tcp:127.0.0.1:%d' % tcp, flashed=flashed,
                                                  snapshot=snapshot, log=log_path,
                                                  din='tcp:127.0.0.1:%d' % din if din else None,
-                                                 cmd=cmd, work=work, power_off=power_off, boots=1)
+                                                 cmd=cmd, work=work, power_off=power_off, boots=1,
+                                                 firmware=build)
         for _ in range(30):                           # until it listens (an older build never does)
             time.sleep(0.2)
             with open(log_path, encoding='utf-8', errors='replace') as fh:
@@ -3092,6 +3109,7 @@ class Daemon:
                 if e.get('flashed'):
                     write_json(e['flashed'], {'image': os.path.basename(info['flash']), 'sha': info['flash_sha']})
                     e['build'] = os.path.basename(info['flash'])
+                    boot_from_flash(e)
                 if e:
                     e['sha'] = info['flash_sha']
             if tgt == 'hardware':
@@ -3212,6 +3230,7 @@ class Daemon:
                 if e.get('flashed'):                  # a restart with keep_flash boots this
                     write_json(e['flashed'], {'image': os.path.basename(img), 'sha': d})
                     e['build'] = os.path.basename(img)
+                    boot_from_flash(e)                # and so does its next power cycle
                 e['sha'] = d
             elif tgt == 'emulator':
                 # the next emulator start overwrites its log: keep this one with the evidence

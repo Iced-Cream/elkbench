@@ -1214,6 +1214,36 @@ class InProcess(unittest.TestCase):
         self.assertEqual(self.d.emu_ready(self.s, unit, None, power_off=True)[1], [])
         self.d.stop_emulator(self.d.emulators[(self.s.sid, unit)])
 
+    def test_power_cycle_after_flash_boots_the_flash(self, unit='rytm'):
+        """A flash into the emulator drops the start's OS file from its command line, so the next
+        power cycle cold-boots what the flash holds (analog-emu boots a FIRMWARE it is given over
+        --flash): before, it booted the old OS again while ping read the new version."""
+        self.fake_power_off_emulator(unit)
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': unit, 'build': build}, power_off=True)
+        e = self.d.emulators[(self.s.sid, unit)]
+        self.assertIn(os.path.abspath(build), e['cmd'])
+        rc, line = self.d.power_cycle(self.s, unit)            # no flash yet: the start's OS again
+        self.assertEqual(rc, 0, line)
+        self.assertIn(os.path.abspath(build), e['cmd'])
+        self.assertTrue(daemon.boot_from_flash(e))            # what a passing flash calls
+        self.assertNotIn(os.path.abspath(build), e['cmd'])
+        self.assertIn('--flash', e['cmd'])
+        self.assertFalse(daemon.boot_from_flash(e))           # once
+        rc, line = self.d.power_cycle(self.s, unit)
+        self.assertEqual(rc, 0, line)
+        self.assertNotIn(os.path.abspath(build), e['cmd'])
+        self.assertIn('--flash', e['cmd'])
+        self.d.stop_emulator(e)
+        with open(os.path.join(e['work'], 'flash.img'), 'wb') as fh:   # what the fake's flash left
+            fh.write(b'\0' * 16)
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': unit, 'keep_flash': True}, power_off=True)
+        e = self.d.emulators[(self.s.sid, unit)]
+        self.assertIsNone(e['firmware'])                      # keep_flash boots the flash already
+        self.assertFalse(daemon.boot_from_flash(e))
+        self.d.stop_emulator(e)
+
     def test_digiemu_power_cycle(self):
         """digiemu's power cycle: `power-off` on its stdin, its save line, its boot on that card
         on the same link, then the OS's answer; a save that did not finish fails it."""
