@@ -34,6 +34,28 @@ def free(dev, within=5.0):
     return False
 
 
+class Port(unittest.TestCase):
+    def test_port_of_and_connected(self):
+        # built-in name; ELKBENCH_<DEV>_PORT (or units.<dev>.port) for a unit behind a MIDI host
+        self.assertEqual(elklock.port_of('rytm'), 'Analog Rytm')
+        sidecar = ['Sidecar | Expander (Pi)']
+        self.assertFalse(elklock.connected('rytm', sidecar))
+        self.assertTrue(elklock.connected('rytm', sidecar, 'Sidecar | Expander (Pi)'))
+        os.environ['ELKBENCH_RYTM_PORT'] = 'Sidecar | Expander (Pi)'
+        try:
+            self.assertEqual(elklock.port_of('rytm'), 'Sidecar | Expander (Pi)')
+            self.assertTrue(elklock.connected('rytm', sidecar))
+            self.assertFalse(elklock.connected('rytm', ['Analog Rytm MKII']))
+            self.assertEqual(elklock.port_of('a4'), 'Analog Four')
+        finally:
+            del os.environ['ELKBENCH_RYTM_PORT']
+
+    def test_release_port_is_for_one_device(self):
+        r = run('test-a', 'release', 'rytm', 'a4', '--port', 'Sidecar', '--no-snapshot')
+        self.assertEqual(r.returncode, 2)
+        self.assertIn('one device', r.stdout)
+
+
 class Lock(unittest.TestCase):
     def tearDown(self):
         for s in ('test-a', 'test-b'):
@@ -131,6 +153,24 @@ class Lock(unittest.TestCase):
         self.assertEqual(self.hook('test-a', 'cd D:/Repos/rytmhealth/tools; python analogrun.py --port "Analog Four" data ls /projects'), '')
         self.assertIn('rytm', self.hook('test-a', 'cd D:/Repos/rytmhealth/tools; python analogrun.py --port "Elektron Analog Rytm MKII" info'))
         run('test-a', 'release', 'a4', '--no-snapshot')
+
+    def test_hook_names_the_rytm_behind_sidecar(self):
+        side = 'python analogrun.py --port "Sidecar | Expander (Pi)" info'
+        envs = ["$env:ELKBENCH_RYTM_PORT = 'Sidecar | Expander (Pi)'; python analogrun.py info",
+                "export ELKBENCH_RYTM_PORT='Sidecar | Expander (Pi)'; python -m elkflash info --port x",
+                "ELKBENCH_RYTM_PORT='Sidecar | Expander (Pi)' python analogrun.py --port \"Sidecar | Expander (Pi)\" info"]
+        self.assertIn('rytm', self.hook('test-a', side))
+        # another unit's claim does not cover the Rytm behind the host
+        self.assertEqual(run('test-a', 'claim', 'a4', '--for', 'sidecar test').returncode, 0)
+        for cmd in [side] + envs:
+            self.assertIn('rytm', self.hook('test-a', cmd), cmd)
+        # the host's name in a path names no unit
+        self.assertEqual(self.hook('test-a', 'cd D:/Projects/Sidecar/port-174; python analogrun.py --port "Analog Four" info'), '')
+        run('test-a', 'release', 'a4', '--no-snapshot')
+        self.assertEqual(run('test-a', 'claim', 'rytm', '--for', 'sidecar test').returncode, 0)
+        for cmd in [side] + envs:
+            self.assertEqual(self.hook('test-a', cmd), '', cmd)
+        run('test-a', 'release', 'rytm', '--no-snapshot')
 
     def test_pid_alive(self):
         self.assertTrue(elklock.pid_alive(os.getpid()))

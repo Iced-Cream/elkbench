@@ -98,29 +98,47 @@ shot proceed.png
 # inside only: the LOAD list's cursor row shows beside it.
 expect-screen proceed-with-loading 2 rows=21-44 cols=8-120
 tap YES
-wait 5
+# No blind wait after a load YES: a key sent while the OS is still loading is completed by the
+# firmware and then has no effect (Rytm T99, through Sidecar, where the load outlasted a 5 s wait).
+# The SUCCESS box leaves by itself within about 1 s onto the PROJECT menu. So: 3 s, then poll up to
+# 12 s for the PROJECT menu with no box, 1 s more, and a screen check after each NO (PROJECT -> GLOBAL
+# -> home), so a NO the OS does not take is named. A `wait` straight before `expect-screen` is folded
+# into the check (and a record_refs run records at once), so a plain wait is followed by `wait 0.1`
+# (record_refs then records the settled screen). Name the references as you like; they are recorded
+# with record_refs and checked by eye like the others.
+wait 3
+wait 0.1
+expect-screen cn-loaded 12 settle
+wait 1
 tap NO
-wait 0.5
+wait 0.6
+wait 0.1
+expect-screen cn-no-1 3 settle
 tap NO
-wait 0.5
-tap NO
-wait 1.0
+wait 0.6
+wait 0.1
+expect-screen new-home 3 settle
 shot new-home.png
-# the whole home screen of a new project (K001:KIT 1, BPM:120.0, the dials, the track row)
-expect-screen new-home 3
 
 [setup: SAVE PROJECT AS 121]
 say proves setup: the new project saved into 121 (proven active in the next section)
 # GLOBAL > PROJECT > SAVE PROJECT AS (second row) > slot 121 (end of the list by page downs, then up 7)
 # > YES (the naming screen) > YES (save). The name is the plan's own, at most 15 characters.
 save-project 121 "~T SETUP" GLOBAL,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,UP,YES,UP,UP,UP,DOWN,YES,FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),FUNC(DOWN),UP,UP,UP,UP,UP,UP,UP,YES,YES
+# the SAVE OK box leaves by itself: poll for the PROJECT menu without it, then a check after each NO
+# (PROJECT -> GLOBAL -> home)
 wait 2
+wait 0.1
+expect-screen sv-saved 12 settle
+wait 1
 tap NO
-wait 0.5
+wait 0.6
+wait 0.1
+expect-screen sv-no-1 3 settle
 tap NO
-wait 0.5
-tap NO
-wait 1.0
+wait 0.6
+wait 0.1
+expect-screen new-home 3 settle
 shot saved.png
 
 [setup: 121 is the active project]
@@ -156,15 +174,28 @@ wait 0.8
 shot load-121-asks.png
 expect-screen proceed-with-loading 2 rows=21-44 cols=8-120
 tap YES
-# a saved project loads for longer than CREATE NEW; a NO during the load is lost
-wait 5
+# a saved project loads for longer than CREATE NEW; a NO during the load is lost. 3 s, then poll up to
+# 12 s for the slot panel without the LOAD OK box, 1 s more, and a check after each NO (panel -> list
+# -> PROJECT -> GLOBAL -> home)
+wait 3
+wait 0.1
+expect-screen ld-loaded 12 settle
+wait 1
 tap NO
-wait 0.5
+wait 0.6
+wait 0.1
+expect-screen ld-no-1 3 settle
 tap NO
-wait 0.5
+wait 0.6
+wait 0.1
+expect-screen ld-no-2 3 settle
 tap NO
-wait 0.5
+wait 0.6
+wait 0.1
+expect-screen ld-no-3 3 settle
 tap NO
-wait 1.0
+wait 0.6
+wait 0.1
+expect-screen new-home 3 settle
 shot loaded.png
-expect-screen new-home 3
+

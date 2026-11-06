@@ -10,12 +10,16 @@
     elklock.py listen DEVICE... --for "what"       the person listens now: the claim cannot
                                                    time out, nothing may drive the unit
     elklock.py heard DEVICE... --by "where"        the person said they have finished
-    elklock.py release DEVICE... | --all  [--note "state left"] [--no-snapshot]
+    elklock.py release DEVICE... | --all  [--note "state left"] [--no-snapshot] [--port NAME]
     elklock.py check DEVICE                        exit 0 if this session holds it
     elklock.py break DEVICE --yes                  the person frees a stuck claim
     elklock.py hook                                PreToolUse hook (reads JSON on stdin)
 
 DEVICE: rytm, a4, digitone, digitakt (see DEVICES), or "all".
+A device's MIDI port (the handoff snapshot reads it there, and `status` looks for it):
+release --port NAME (one device), else ELKBENCH_<DEVICE>_PORT, else units.<device>.port in
+elkbench's config.toml, else the built-in name (DEVICES); for a unit behind a MIDI host
+such as Sidecar, the host's port name.
 
 The lock is Windows' own: a small background holder process opens DEVICE.lock with no
 sharing and keeps it open. While it does, nobody else can open that file, so a second claim
@@ -55,6 +59,9 @@ DEVICES = {
     'digitone': (r'digitone|digiusb', 'Digitone'),   # digiusb (digihealth) talks to the Digitone
     'digitakt': (r'digitakt', 'Digitakt'),           # digiusb with a Digitakt: name it, or claim both
 }
+# device -> regex for a MIDI host's port name that reaches it (in a --port or ELKBENCH_<DEV>_PORT
+# value only: the host's name in a path names no unit). The Rytm is cabled to the Sidecar Pi.
+HOST_PORTS = {'rytm': r'sidecar'}
 
 
 def load_config():
@@ -78,6 +85,14 @@ CFG = load_config()
 ELKFLASH_REPO = CFG.get('tools', {}).get('elkflash')          # None: an installed elkflash
 ANALOGHEALTH = CFG.get('tools', {}).get('analoghealth')
 RUNNER_DIR = os.path.join(ANALOGHEALTH, 'tools') if ANALOGHEALTH else None
+
+
+def port_of(dev):
+    """The device's MIDI port name (a part of it): ELKBENCH_<DEV>_PORT, else units.<dev>.port in
+    elkbench's config, else the built-in name. A unit behind a MIDI host such as Sidecar has the
+    host's port name. The hook still names units by the command's words (DEVICES), not by this."""
+    return (os.environ.get('ELKBENCH_%s_PORT' % dev.upper())
+            or CFG.get('units', {}).get(dev, {}).get('port') or DEVICES[dev][1])
 # commands that talk to a unit: the hook requires a claim before they run
 GUARD = ['analogusb', 'analogrun', 'digiusb', 'digirun', 'elkflash', 'obtr',
          'asio_rec', 'asio_tone', 'asio_loop', 'wavein_rec', 'loopback.py'] + list(CFG.get('elklock', {}).get('guard', []))
@@ -641,12 +656,13 @@ def release(dev, reason):
     return False
 
 
-def snapshot(dev, note, skip):
-    """The handoff record: OS version, a screenshot and the note. Best-effort, read-only."""
+def snapshot(dev, note, skip, port=None):
+    """The handoff record: OS version, a screenshot and the note. Best-effort, read-only.
+    `port`: the MIDI port to read them on (default: port_of)."""
     rec = {'time': now(), 'note': note, 'ended': 'released'}
     if skip:
         return rec
-    port = DEVICES[dev][1]
+    port = port or port_of(dev)
     hdir = os.path.join(DIR, 'handoff', dev)
     os.makedirs(hdir, exist_ok=True)
     # One elkflash call reads the OS version and saves the screen (RPC Screenshot).
@@ -679,8 +695,12 @@ def cmd_release(args):
     manual = opt(args, '--manual')
     note = opt(args, '--note', '')
     skip = flag(args, '--no-snapshot')
+    port = opt(args, '--port')
     if flag(args, '--all'):
         args = [d for d in DEVICES if mine(holder(d), manual)] or list(DEVICES)
+    if port and len(devices(list(args))) != 1:
+        print('--port is one device\'s port: release that device alone with it')
+        return 2
     rc = 0
     for d in devices(args):
         cur = holder(d)
@@ -699,7 +719,7 @@ def cmd_release(args):
                   'finished (`heard`)' % (d, cur['listening'].get('what', '')))
             rc = 3
             continue
-        rec = snapshot(d, note, skip)
+        rec = snapshot(d, note, skip, port)
         rec.update(holder=who_of(cur), purpose=cur.get('purpose'), nonce=cur.get('nonce'))
         write_json(path(d, '.handoff.json'), rec)
         if release(d, 'released'):
@@ -840,12 +860,13 @@ def midi_inputs():
     return names
 
 
-def connected(dev, ports):
+def connected(dev, ports, port=None):
     """True if a MIDI port of the unit is listed (it is on USB and running its OS); also
-    True when the system cannot list its ports (ports None)."""
+    True when the system cannot list its ports (ports None). `port`: the name to look for
+    (default: port_of)."""
     if ports is None:
         return True
-    want = DEVICES[dev][1].lower()
+    want = (port or port_of(dev)).split(',')[0].strip().lower()
     return any(want in p.lower() and 'emu' not in p.lower() for p in ports)
 
 
@@ -919,7 +940,13 @@ def hook():
     # unit (a folder such as rytmhealth names no unit)
     ports = re.findall(r'--port[ =]("[^"]*"|\'[^\']*\'|\S+)', run_part, re.I)
     where = ' '.join(ports) if ports else re.sub(r'rytmhealth', '', run_part, flags=re.I)
-    named = [d for d, (rx, _) in DEVICES.items() if re.search(rx, where, re.I)]
+    # ELKBENCH_<DEV>_PORT set anywhere on the line ($env:/export are cut from run_part) names <dev>;
+    # a host's port name (HOST_PORTS, or the unit's configured port) in a --port names its unit
+    env = [m.group(1).lower() for m in re.finditer(r'ELKBENCH_(\w+?)_PORT\b', cmd, re.I)]
+    hosted = ' '.join(ports).lower()
+    named = [d for d, (rx, _) in DEVICES.items() if re.search(rx, where, re.I) or d in env
+             or hosted and (re.search(HOST_PORTS.get(d, r'(?!)'), hosted)
+                            or port_of(d) != DEVICES[d][1] and port_of(d).lower() in hosted)]
     holders = {d: holder(d) for d in DEVICES}
     ours = [d for d in DEVICES if mine(holders[d], session=session)]
     missing = [d for d in named if d not in ours] if named else \
