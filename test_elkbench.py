@@ -1154,6 +1154,29 @@ class InProcess(unittest.TestCase):
         with self.assertRaisesRegex(daemon.Refused, r'stop in \[kept\]\).* would reach'):
             self.d.t_batch(self.s, {'gate': True, 'plans': [late], 'build': build})
 
+    def test_emulator_usb_midi_real(self):
+        """units.rytm.emu_usb_midi_real: the emulator starts with --usb-midi-real (the firmware's own
+        USB MIDI sender, so mod SysEx replies come back); refused by an analog-emu without it."""
+        self.fake_power_off_emulator('rytm')
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build})
+        e = self.d.emulators[(self.s.sid, 'rytm')]
+        self.assertNotIn('--usb-midi-real', e['cmd'])          # off unless config.toml sets it
+        self.d.stop_emulator(e)
+        daemon.UNITS['rytm']['emu_usb_midi_real'] = True
+        self.addCleanup(lambda: daemon.UNITS['rytm'].pop('emu_usb_midi_real', None))
+        saved = self.d.emu_help
+        self.addCleanup(lambda: setattr(self.d, 'emu_help', saved))
+        self.d.emu_help = lambda unit: 'usage: rytm [--usb-midi-tcp ADDR]'
+        with self.assertRaisesRegex(daemon.Refused, 'has no --usb-midi-real'):
+            self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build})
+        self.assertEqual(self.d.batch_emulator('rytm', build, TMP, 1)[2][:4], 'unit')
+        self.d.emu_help = lambda unit: 'usage: rytm [--usb-midi-tcp ADDR] [--usb-midi-real]'
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build})
+        e = self.d.emulators[(self.s.sid, 'rytm')]
+        self.assertIn('--usb-midi-real', e['cmd'])
+
     def test_power_cycle_emulator(self, unit='rytm'):
         self.fake_power_off_emulator(unit)
         os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
