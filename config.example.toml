@@ -84,6 +84,8 @@ person = "the person at this PC"
 # emu_usb_midi_real = true                # its emulators run the firmware's own USB MIDI sender
 #                                        # (analog-emu --usb-midi-real), so mods that check the
 #                                        # sender first (sidecar-check record reads) answer
+# emu_cv_in = "1=A"                     # A4: its emulators see CV OUT A patched into CONTROL IN 1
+#                                        # (analog-emu --cv-in; "2=2500" holds CONTROL IN 2 at 2.5 V)
 # port = 'Sidecar | Expander (Pi)'         # its MIDI port on hardware (a part of the name; default the
 #                                          # built-in 'Analog Rytm', direct USB): only for a unit always
 #                                          # behind a MIDI host; for single runs through one, set
