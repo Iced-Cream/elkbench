@@ -2455,7 +2455,7 @@ class Daemon:
             tcp = probe.getsockname()[1]
         cmd = [exe] + ([build] if build else []) + [
             '--flash', flash, '--no-audio', '--headless', '--no-midi',
-            '--usb-midi-tcp', '127.0.0.1:%d' % tcp, '--after', str(minutes * 60)]
+            '--usb-midi-tcp', '127.0.0.1:%d' % tcp, '--after', str(minutes * 60)] + self.emu_usb_args(a['unit'])
         din = None
         if self.emu_has_din(a['unit']):              # and its DIN MIDI, for send/capture ... din
             with socket.socket() as probe:
@@ -2749,6 +2749,19 @@ class Daemon:
             except OSError:
                 self.emu_help_text[stamp] = False
         return self.emu_help_text[stamp]
+
+    def emu_usb_args(self, unit):
+        """['--usb-midi-real'] when config.toml sets units.<unit>.emu_usb_midi_real (Rytm, A4):
+        analog-emu runs the firmware's own USB MIDI sender, read by its simulated USB host, so a
+        mod that checks the sender's state before sending (core-ar2's core_midi_try_send, the
+        sidecar-check record reads) is answered over the USB MIDI TCP port. Without it analog-emu
+        takes the sender's calls and such a mod sends nothing. Refused when this analog-emu lacks it."""
+        if not UNITS[unit].get('emu_usb_midi_real'):
+            return []
+        if '--usb-midi-real' not in self.emu_help(unit):
+            raise Refused('units.%s.emu_usb_midi_real is set, but this analog-emu (%s) has no --usb-midi-real: '
+                          'build one that has it, or leave the key out' % (unit, ANALOG_EMU))
+        return ['--usb-midi-real']
 
     def emu_has_din(self, unit):
         """Whether this unit's emulator serves its DIN MIDI over TCP: analog-emu's --din-midi-tcp,
@@ -3352,7 +3365,8 @@ class Daemon:
         if not os.path.isfile(path):
             raise Refused('no file %s' % path)
         msgs = analogrun.load_syx(path)
-        if not msgs or not all(analogrun.is_dump(m) for m in msgs):
+        # sidecar-check's own commands (F0 7D 53 43 ...) are not dumps either; the 0.11 unit run sends them
+        if not msgs or not all(analogrun.is_dump(m) or bytes(m).startswith(b'\xf0\x7d\x53\x43') for m in msgs):
             raise Refused('%s holds messages other than Elektron dumps; send refuses it' % path)
 
     def t_shot(self, s, a):
@@ -4033,7 +4047,10 @@ class Daemon:
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
             tcp = probe.getsockname()[1]
-        cmd += ['--usb-midi-tcp', '127.0.0.1:%d' % tcp]
+        try:
+            cmd += ['--usb-midi-tcp', '127.0.0.1:%d' % tcp] + self.emu_usb_args(unit)
+        except Refused as why:
+            return None, None, str(why), None
         addr = 'tcp:127.0.0.1:%d' % tcp
         din_addr = None
         if din:

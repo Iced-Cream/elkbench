@@ -81,6 +81,9 @@ person = "the person at this PC"
 # no_stats = ['C:\os\remote-only.syx']     # builds whose runner channel has no stats command:
 #                                          # plans and steps with a stats step are refused on them
 # emu_card = 'C:\tests\rytm\card.img'      # the emulator tool boots a fresh copy of it
+# emu_usb_midi_real = true                # its emulators run the firmware's own USB MIDI sender
+#                                        # (analog-emu --usb-midi-real), so mods that check the
+#                                        # sender first (sidecar-check record reads) answer
 # port = 'Sidecar | Expander (Pi)'         # its MIDI port on hardware (a part of the name; default the
 #                                          # built-in 'Analog Rytm', direct USB): only for a unit always
 #                                          # behind a MIDI host; for single runs through one, set
