@@ -2756,26 +2756,12 @@ class Daemon:
         mod that checks the sender's state before sending (core-ar2's core_midi_try_send, the
         sidecar-check record reads) is answered over the USB MIDI TCP port. Without it analog-emu
         takes the sender's calls and such a mod sends nothing. Refused when this analog-emu lacks it."""
-        args = self.emu_cv_args(unit)
         if not UNITS[unit].get('emu_usb_midi_real'):
-            return args
+            return []
         if '--usb-midi-real' not in self.emu_help(unit):
             raise Refused('units.%s.emu_usb_midi_real is set, but this analog-emu (%s) has no --usb-midi-real: '
                           'build one that has it, or leave the key out' % (unit, ANALOG_EMU))
-        return ['--usb-midi-real'] + args
-
-    def emu_cv_args(self, unit):
-        """['--cv-in', SPEC] when config.toml sets units.<unit>.emu_cv_in (A4): what the emulator's
-        CONTROL IN 1/2 see, e.g. "1=A" for a cable from CV OUT A into CONTROL IN 1 (the bench patch a
-        CONTROL IN plan asks for), "2=2500" for a steady 2.5 V. An input whose CONTROL INPUT mode is OFF
-        (the default) ignores it. Refused when this analog-emu lacks --cv-in."""
-        spec = UNITS[unit].get('emu_cv_in')
-        if not spec:
-            return []
-        if '--cv-in' not in self.emu_help(unit):
-            raise Refused('units.%s.emu_cv_in is set, but this analog-emu (%s) has no --cv-in: '
-                          'build one that has it, or leave the key out' % (unit, ANALOG_EMU))
-        return ['--cv-in', str(spec)]
+        return ['--usb-midi-real']
 
     def emu_has_din(self, unit):
         """Whether this unit's emulator serves its DIN MIDI over TCP: analog-emu's --din-midi-tcp,
