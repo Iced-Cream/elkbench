@@ -1240,7 +1240,7 @@ class InProcess(unittest.TestCase):
             fh.write(b'\0' * 16)
         self.d.t_emulator(self.s, {'action': 'start', 'unit': unit, 'keep_flash': True}, power_off=True)
         e = self.d.emulators[(self.s.sid, unit)]
-        self.assertIsNone(e['firmware'])                      # keep_flash boots the flash already
+        self.assertIsNone(e['boot_os'])                       # keep_flash boots the flash already
         self.assertFalse(daemon.boot_from_flash(e))
         self.d.stop_emulator(e)
 
