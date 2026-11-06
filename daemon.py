@@ -256,8 +256,10 @@ def boot_from_flash(e):
     power cycle on the start's command line cold-booted the old OS again, while the flash (and
     ping's version) said the new one: a DLA1 -> DLB2 flash, then a power cycle, ran DLA1's image
     (2026-11-06, drive-loader-run). -> True when the command line changed."""
-    fw = e.get('firmware')
-    e['firmware'] = None
+    # 'boot_os', not 'firmware': a digiemu entry's 'firmware' is the folder its reboots read, and the
+    # flash paths copy the flashed file into any entry that has one
+    fw = e.get('boot_os')
+    e['boot_os'] = None
     cmd = e.get('cmd')
     if not fw or not cmd or fw not in cmd[1:]:
         return False
@@ -2497,7 +2499,7 @@ class Daemon:
                                                  snapshot=snapshot, log=log_path,
                                                  din='tcp:127.0.0.1:%d' % din if din else None,
                                                  cmd=cmd, work=work, power_off=power_off, boots=1,
-                                                 firmware=build)
+                                                 boot_os=build)
         for _ in range(30):                           # until it listens (an older build never does)
             time.sleep(0.2)
             with open(log_path, encoding='utf-8', errors='replace') as fh:
