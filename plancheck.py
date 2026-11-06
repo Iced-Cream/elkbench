@@ -35,7 +35,7 @@ PROVES = ('setup', 'set-and-kept', 'works', 'evidence')
 # steps whose failure stops the run: machine assertions
 ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping')
 # steps that change what the unit holds or a value on it (keys only move through the UI)
-WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'turn', 'pad', 'padplay')
+WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', 'at', 'turn', 'pad', 'padplay')
 # steps that need a remote-key path in the OS (analoghealth, or a remote-only build)
 KEY_OPS = ('tap', 'hold', 'release', 'keys', 'turn', 'pad', 'padplay')
 # steps that only move through menus or look: nothing between a save and a check but these
@@ -53,8 +53,9 @@ def is_assert(w):
     if not w:
         return False
     op = w[0].lower()
-    if op == 'capture':                      # capture FILE S any|none [din]
-        return len(w) > 3 and w[3].lower() in ('any', 'none')
+    if op == 'capture':                      # capture FILE S [any|none] [short] [nrpn=..] [cc=..] [din]
+        return (len(w) > 3 and w[3].lower() in ('any', 'none')
+                or any(x.lower().startswith(('nrpn=', 'cc=')) for x in w[3:]))
     return op in ASSERT_OPS
 
 

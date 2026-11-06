@@ -78,6 +78,13 @@ class Rules(unittest.TestCase):
         self.assertEqual(check(base + 'capture got.syx 2 any\n')['errors'], [])
         self.assertTrue(check(base + 'capture got.syx 2\n')['errors'])
 
+    def test_short_capture_counts_with_a_matcher(self):
+        base = '[start]\nexpect-screen home\n[c]\nsay proves works: knob out\nturn A 4\n'
+        self.assertEqual(check(base + 'capture k.txt 2 nrpn=1:0:112 din\n')['errors'], [])
+        self.assertEqual(check(base + 'capture k.txt 2 short cc=1:20\n')['errors'], [])
+        self.assertEqual(check(base + 'capture k.txt 2 any short\n')['errors'], [])
+        self.assertTrue(check(base + 'capture k.txt 2 short\n')['errors'])
+
     def test_a_flash_plan_needs_no_start_check(self):
         r = check('[home screen]\nwait 2\nshot home.png\n', flash='/os/stock.syx', stock=True,
                   os_file='/os/build.syx')

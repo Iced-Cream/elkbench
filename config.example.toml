@@ -33,6 +33,12 @@ person = "the person at this PC"
 # remote client session.
 # keep_awake = true
 
+# Programs that open MIDI ports beside elkbench's tools: a hardware run or flash starts with a
+# warning for each one running (WQL LIKE patterns on the process image name, % = any text). The
+# job log also records the pid and start time of midisrv (Windows MIDI Services), and says when
+# it restarted since the last hardware run.
+# midi_clients = ['Transfer.exe', 'Overbridge%']
+
 [tools]
 # elklock.py; default: elklock\elklock.py in this folder.
 # elklock = 'C:\tools\elklock\elklock.py'
@@ -75,6 +81,18 @@ person = "the person at this PC"
 # no_stats = ['C:\os\remote-only.syx']     # builds whose runner channel has no stats command:
 #                                          # plans and steps with a stats step are refused on them
 # emu_card = 'C:\tests\rytm\card.img'      # the emulator tool boots a fresh copy of it
+# emu_usb_midi_real = true                # its emulators run the firmware's own USB MIDI sender
+#                                        # (analog-emu --usb-midi-real), so mods that check the
+#                                        # sender first (sidecar-check record reads) answer
+# emu_cv_in = "1=A"                     # A4: its emulators see CV OUT A patched into CONTROL IN 1
+#                                        # (analog-emu --cv-in; "2=2500" holds CONTROL IN 2 at 2.5 V)
+# port = 'Sidecar | Expander (Pi)'         # its MIDI port on hardware (a part of the name; default the
+#                                          # built-in 'Analog Rytm', direct USB): only for a unit always
+#                                          # behind a MIDI host; for single runs through one, set
+#                                          # ELKBENCH_RYTM_PORT (_A4_, ...) for the daemon instead, which
+#                                          # overrides it. Flashes, steps, data, plans, the connected
+#                                          # check and the release's slot clear and snapshot use it;
+#                                          # elklock reads it too (and has release --port)
 # din = 'USB MIDI Interface'               # the MIDI interface cabled to its DIN ports (both ways, a
 #                                          # name or 'IN,OUT'): hardware steps and plans with
 #                                          # send/capture ... din use it (Rytm, A4; Digitone and

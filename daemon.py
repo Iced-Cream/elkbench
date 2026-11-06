@@ -28,6 +28,7 @@ Stdlib only. Windows and Linux (no Overbridge Total Recall on Linux: there is no
     python daemon.py              (started by launcher.py; one per PC)
     python daemon.py --check      (exit 0: this code imports and reads the config)
 """
+import base64
 import ctypes as C
 import hashlib
 import json
@@ -87,6 +88,15 @@ KNOWN_STARTS = ('a fresh emulator', 'a setup snapshot')    # pass starts a gate 
 REQUIRED_STARTS = ('dirty', 'occupied')
 REQUIRED_STARTS_CLEARED = ('dirty', 'testslot-cleared')
 STATUS_WAIT, STATUS_WAIT_MAX = 300, 600     # s that status run_id waits for a run to end
+# s a flash job may take before elkbench kills it (and its elklock run): a backstop for a tool
+# stuck in a MIDI call. A unit flashes in 22-70 s, digiemu's reboot wait is 400 s.
+FLASH_JOB_LIMIT = {'hardware': 600, 'emulator': 900}
+# Programs that open MIDI ports beside elkbench's tools (WQL LIKE patterns on the process image
+# name); config.toml `midi_clients` replaces them. On 2026-11-05 a flash through the Sidecar Pi
+# with Transfer open (and the Overbridge Engine running) left Windows MIDI stuck: every later
+# open of the port hung until the Pi-to-PC cable was replugged.
+MIDI_CLIENTS = ('Transfer.exe', 'Overbridge%')
+MIDISRV = 'midisrv.exe'                     # the Windows MIDI Services service
 IDLE_EXIT = 30 * 60
 # What the units are; config.toml can override any key, and adds where evidence goes.
 UNIT_FACTS = {
@@ -142,6 +152,14 @@ def chunk_args(unit):
     return ['--chunk-size', str(int(n))] if n else []
 
 
+def port_args(unit):
+    """['--port', NAME] for analogrun/testplan on hardware when the unit's port is set (config or
+    ELKBENCH_<UNIT>_PORT) to other than its built-in name; else [], so a plan's own `port =` and the
+    runner's default stay as they were."""
+    port = (UNITS.get(unit) or {}).get('port')
+    return ['--port', port] if port and port != UNIT_FACTS[unit]['port'] else []
+
+
 def no_steps(unit):
     """The steps `unit`'s runner lacks: digirun's gaps, and any the unit's facts add."""
     u = UNITS.get(unit) or {}
@@ -161,17 +179,22 @@ def din_refusal(unit):
     return 'DIN steps (send/capture ... din) have no runner on the %s' % unit
 
 
-STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'wait', 'stats',
+STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'bend', 'at', 'wait', 'stats',
             'dump', 'send', 'capture', 'ping', 'save-project', 'save-kit', 'say'}
 
 
+SHORT_SEND_OPS = ('cc', 'nrpn', 'note', 'bend', 'at')     # analogrun's short-message steps
+
+
 def din_steps(lines):
-    """The send/capture steps among `lines` that use the unit's DIN MIDI (a trailing din)."""
+    """The steps among `lines` that use the unit's DIN MIDI (a trailing din): send, capture, and
+    analogrun's cc/nrpn/note/bend/at."""
     out = []
     for l in lines:
         w = shlex.split(l, comments=True)
         if w and w[-1].lower() == 'din' and (w[0].lower() == 'send' and len(w) > 2 or
-                                             w[0].lower() == 'capture' and len(w) > 3):
+                                             w[0].lower() == 'capture' and len(w) > 3 or
+                                             w[0].lower() in SHORT_SEND_OPS and len(w) > 3):
             out.append(l)
     return out
 
@@ -453,6 +476,9 @@ def load_config(path=CONFIG):
     units = {}
     for name, facts in UNIT_FACTS.items():
         u = dict(facts, **c.get('units', {}).get(name, {}))
+        # the unit's MIDI port on hardware: ELKBENCH_<UNIT>_PORT, else units.<unit>.port (a unit
+        # reached through a MIDI host such as Sidecar has that host's port name)
+        u['port'] = os.environ.get('ELKBENCH_%s_PORT' % name.upper()) or u['port']
         u.setdefault('evidence', os.path.join(root, name, 'runs'))
         u.setdefault('refs', os.path.join(root, name, 'refs'))
         # test slots the release empties (backed up first), so every run finds them empty
@@ -474,6 +500,7 @@ def load_config(path=CONFIG):
         write_policy=(policy or '(ANALOGHEALTH_POLICY is empty)') if c.get('require_write_policy') else None,
         starts=c.get('starts') or os.path.join(HERE, 'starts'),
         keep_awake=c.get('keep_awake', True) is not False,
+        midi_clients=tuple(c['midi_clients']) if 'midi_clients' in c else MIDI_CLIENTS,
         units=units)
 
 
@@ -498,6 +525,7 @@ USB_AUDIO = CFG['usb_audio']
 OBTR = CFG['obtr']
 AUDIO_PY = CFG['audio_python']            # a Python with numpy + scipy
 WRITE_POLICY = CFG['write_policy']      # must exist before hardware calls, or None
+MIDI_CLIENT_NAMES = CFG['midi_clients']
 STARTS = CFG['starts']                    # <folder>/<unit>/<start>.txt: the built-in emulator starts
 batch.set_slots(CFG['batch_slots'])      # emulators all batches on this PC may run at once
 
@@ -541,6 +569,13 @@ def flash_key(unit, digest, over=None):
     """The emulator pass key of a flash: `digest` (sha256 of the OS file) flashed over the OS
     `over` (sha256). Without over, the key passes had before it carried the OS flashed over."""
     return 'flash:%s:%s' % (unit, digest) + (':over:%s' % over if over else '')
+
+
+def take_name(name):
+    """A recall_take name as its file is called: a bare file name, .bin added."""
+    if not name or re.search(r'[\\/:]', name):
+        raise Refused('name is a bare file name')
+    return name if name.endswith('.bin') else name + '.bin'
 
 
 def sha256(path):
@@ -692,6 +727,98 @@ def flash_start_line(job, port, now=None):
                                                    time.strftime('%H:%M:%S', time.localtime(now)), quiet)
 
 
+def midi_query(clients):
+    """The PowerShell command that lists midisrv and the processes named by `clients` (WQL LIKE
+    patterns) as JSON: name, pid, start (local time, ISO)."""
+    for c in clients:
+        if "'" in c or '"' in c:
+            raise SystemExit('config.toml: midi_clients entries cannot hold quotes: %r' % c)
+    where = ' OR '.join(["Name='%s'" % MIDISRV] + ["Name LIKE '%s'" % c for c in clients])
+    return ('@(Get-CimInstance Win32_Process -Filter "%s" | ForEach-Object { [pscustomobject]@{'
+            'name=$_.Name; pid=$_.ProcessId; start=$_.CreationDate.ToString(\'s\')} }) | '
+            'ConvertTo-Json -Compress' % where)
+
+
+def parse_midi_processes(text):
+    """PowerShell's JSON (midi_query) -> (midisrv entries, other clients), each a list of
+    {'name', 'pid', 'start'}."""
+    text = (text or '').strip()
+    rows = json.loads(text) if text else []
+    if isinstance(rows, dict):                 # ConvertTo-Json gives one object for one row
+        rows = [rows]
+    rows = [{'name': r.get('name'), 'pid': r.get('pid'), 'start': r.get('start')} for r in rows
+            if isinstance(r, dict)]
+    srv = [r for r in rows if (r['name'] or '').lower() == MIDISRV]
+    return srv, [r for r in rows if (r['name'] or '').lower() != MIDISRV]
+
+
+def midi_processes(clients=None, run=None):
+    """-> (midisrv entries, other MIDI clients, error or None); on Windows only."""
+    if not WINDOWS and run is None:
+        return [], [], 'not Windows'
+    run = run or subprocess.run
+    try:
+        query = midi_query(MIDI_CLIENT_NAMES if clients is None else clients)
+        # -EncodedCommand (UTF-16LE base64): the query's quotes reach PowerShell untouched
+        r = run(['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand',
+                 base64.b64encode(query.encode('utf-16-le')).decode('ascii')],
+                capture_output=True, text=True, timeout=20, **NOWIN)
+        if r.returncode:
+            return [], [], 'PowerShell exit %d: %s' % (r.returncode, (r.stderr or '').strip()[:200])
+        srv, others = parse_midi_processes(r.stdout)
+        return srv, others, None
+    except (OSError, subprocess.SubprocessError, ValueError) as e:
+        return [], [], '%s: %s' % (type(e).__name__, e)
+
+
+def midi_lines(srv, others, error, last_srv=None, flash=False):
+    """-> (warnings for the caller, the midisrv line for the logs)."""
+    warn = []
+    for c in others:
+        warn.append('warning: %s (pid %s, running since %s) may hold MIDI ports: close it before %s. '
+                    'A flash with Transfer open on 2026-11-05 left Windows MIDI stuck until a USB '
+                    'replug.' % (c['name'], c['pid'], c['start'] or '?',
+                                 'flashing' if flash else 'MIDI work'))
+    if error:
+        line = 'midisrv: unknown (%s)' % error
+    elif not srv:
+        line = 'midisrv: not running'
+    else:
+        line = 'midisrv: ' + ', '.join('pid %s, started %s' % (r['pid'], r['start']) for r in srv)
+        pids = sorted(r['pid'] for r in srv)
+        if last_srv is not None and last_srv != pids:
+            line += ' (restarted since the last hardware run: was pid %s)' % (
+                ', '.join(map(str, last_srv)) or 'none')
+    return warn, line
+
+
+def run_limited(cmd, cwd, env, limit):
+    """-> (rc, output, killed): cmd run to its end, or killed with every process it started
+    (an elklock run and the tool under it) after `limit` s."""
+    p = subprocess.Popen(cmd, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                         text=True, encoding='utf-8', errors='replace',
+                         **(NOWIN if WINDOWS else {'start_new_session': True}))
+    try:
+        out, _ = p.communicate(timeout=limit)
+        return p.returncode, out, False
+    except subprocess.TimeoutExpired:
+        if WINDOWS:
+            subprocess.run(['taskkill', '/F', '/T', '/PID', str(p.pid)], capture_output=True,
+                           timeout=30, **NOWIN)
+        else:
+            import signal
+            try:
+                os.killpg(p.pid, signal.SIGKILL)
+            except OSError:
+                pass
+        try:
+            out, _ = p.communicate(timeout=30)
+        except subprocess.TimeoutExpired:      # a process that cannot be killed keeps the pipe
+            p.kill()
+            out = ''
+        return (p.returncode if p.returncode is not None else -9), out or '', True
+
+
 class Held:
     """Port locks taken together, released together (the unit's port and its DIN interface)."""
 
@@ -715,6 +842,8 @@ class Job:
         self.listening = None             # what the person listens for while the plan waits
         self.power_cycle = False          # ... and whether it waits for a power cycle by hand
         self.batch = None                 # a batch's batch.Batch: its progress while it runs
+        self.limit = None                 # s before the job's commands are killed, or None
+        self.midisrv = None               # the midisrv line logged when it started (hardware)
 
     def summary(self):
         took = (self.ended or time.time()) - self.started
@@ -732,6 +861,7 @@ class Daemon:
         self.approvals_path = os.path.join(STATE, 'approvals.json')
         self.approvals = read_json(self.approvals_path, {})
         self.ports = {}                   # (unit, target) -> PortLock: one user per port
+        self.last_midisrv = None          # midisrv's pids at the last hardware job (midi_lines)
         self.emulators = {}               # (session, unit) -> dict(proc, session, build, address)
         self.dialog = threading.Lock()
         self.passes_path = os.path.join(STATE, 'emulator-passes.json')
@@ -1013,7 +1143,7 @@ class Daemon:
             if not any(want in p.lower() for p in ports):
                 raise Refused('the %s emulator is not running (no %r MIDI port): start the analog-emu '
                               'window first' % (unit, want))
-        elif not elklock.connected(unit, ports):
+        elif not elklock.connected(unit, ports, UNITS[unit]['port']):
             raise Refused('%s is not on USB (no %r MIDI port)' % (unit, UNITS[unit]['port']))
 
     def target(self, t):
@@ -1371,7 +1501,7 @@ class Daemon:
                 del self.approvals[t]
             write_json(self.approvals_path, self.approvals)
 
-    def use_approval(self, s, token, item, label):
+    def use_approval(self, s, token, item, label, check=None):
         with self.lock:
             a = self.approvals.get(token or '')
             if not a and token:
@@ -1388,8 +1518,11 @@ class Daemon:
             # A go may list the same item more than once (one build flashed again): each
             # listing runs once, so take the first one not yet used.
             same = [it for it in a['items'] if tuple(it['item']) == item]   # lists once through the file
+            if check and any(not it['used'] for it in same) and not any(check(it) for it in same):
+                raise Refused('%s: the go covers the image recall_take writes under it, and this file is not '
+                              'that one (no take under the go has passed yet, or the file changed since)' % label)
             for it in same:
-                if not it['used']:
+                if not it['used'] and (check is None or check(it)):
                     it['used'] = True
                     self.save_approvals()
                     return
@@ -1479,9 +1612,22 @@ class Daemon:
 
     # -- jobs --
 
+    def midi_check(self, job):
+        """Before a hardware job: warnings for other MIDI programs that are running, and
+        midisrv's pid and start time in the daemon log (a restart between runs shows)."""
+        srv, others, error = midi_processes()
+        warn, line = midi_lines(srv, others, error, self.last_midisrv, flash=job.kind == 'flash')
+        if not error:
+            self.last_midisrv = sorted(r['pid'] for r in srv)
+        job.midisrv = line
+        self.log_line({'session': job.sess.sid, 'job': job.id, 'midisrv': srv, 'midi_clients': others,
+                       **({'midi_error': error} if error else {})})
+        return warn
+
     def start(self, job, cmd, cwd, done, port=None):
         """Run cmd in the background; done(job, rc, output) sets the verdict lines."""
         os.makedirs(os.path.dirname(job.log), exist_ok=True)
+        warn = self.midi_check(job) if job.target == 'hardware' else []
         with self.lock:
             self.jobs[job.id] = job
 
@@ -1491,6 +1637,8 @@ class Daemon:
                     log.write('$ %s\n(cwd %s)\n' % ('; '.join(
                         getattr(c, '__name__', None) or subprocess.list2cmdline(c)
                         for c in (cmd if isinstance(cmd[0], (list, tuple)) or callable(cmd[0]) else [cmd])), cwd))
+                    for line in ([job.midisrv] if job.midisrv else []) + warn:
+                        log.write('elkbench: %s\n' % line)
                     log.flush()
                     # A plan's `listen` step writes ANALOGRUN_LISTEN_FILE and waits until it is
                     # gone: listen_done removes it once the person has said they have finished.
@@ -1506,6 +1654,14 @@ class Daemon:
                                   else [cmd]):
                         if callable(stage):
                             rc, more = stage(rc, out)
+                        elif job.limit:
+                            rc, more, killed = run_limited(stage, cwd, env, job.limit)
+                            if killed:
+                                rc = rc or -9
+                                more += ('\nelkbench: killed after %d s with the processes it started: '
+                                         'it did not end (a call stuck in Windows MIDI does this; before '
+                                         'calling the unit dead, read the Sidecar Pi /log `midi from` '
+                                         'around one request)\n' % job.limit)
                         else:
                             p = subprocess.run(stage, cwd=cwd, env=env, stdout=subprocess.PIPE,
                                                stderr=subprocess.STDOUT, text=True, encoding='utf-8',
@@ -1526,9 +1682,11 @@ class Daemon:
                     port.release()
                 self.log_line({'session': job.sess.sid, 'job': job.id, 'end': job.state,
                                'lines': job.lines[:3]})
+                if job.target == 'hardware' and job.state == 'fail':
+                    self.midi_check(job)          # did midisrv restart, or a client appear, meanwhile?
 
         threading.Thread(target=work, daemon=True).start()
-        return ['running: %s %s; status with run_id %s waits for its end' % (job.id, job.desc, job.id)]
+        return warn + ['running: %s %s; status with run_id %s waits for its end' % (job.id, job.desc, job.id)]
 
     def watch_listen(self, job):
         """While a hardware run goes on: when it stops at a `listen` step, mark the unit as
@@ -1697,7 +1855,7 @@ class Daemon:
                        if u in s.os_left else 'not flashed by this session')
             full = '%s; runs: %s; OS: %s' % (note_u, '; '.join(done) or 'none', os_text)
             # a scratch ELKLOCK_DIR is a test: no device reads for the snapshot then
-            snap = ['--no-snapshot'] if os.environ.get('ELKLOCK_DIR') else []
+            snap = ['--no-snapshot'] if os.environ.get('ELKLOCK_DIR') else port_args(u)
             r = subprocess.run([sys.executable, ELKLOCK, 'release', u, '--note', full[:900]] + snap, env=s.env(),
                                capture_output=True, text=True, timeout=180, **NOWIN)
             if r.returncode:
@@ -1866,6 +2024,19 @@ class Daemon:
         for kind in ('flashes', 'recall_restores'):
             for f in a.get(kind) or []:
                 self.unit(f.get('unit'))
+                if kind == 'recall_restores' and f.get('take') is not None:
+                    # The image this go's own recall_take writes: it has no bytes yet, so the item
+                    # names the take, and the take binds its sha256 to it (note_take).
+                    if f.get('image'):
+                        raise Refused('a recall restore names an image or a take, not both')
+                    name = take_name(f['take'])
+                    items.append(dict(item=('restore-take', f['unit'], name), used=False,
+                                      label='recall restore of take %s on %s' % (name, f['unit'])))
+                    text.append('TOTAL RECALL RESTORE on %s (replaces the active project) of the image '
+                                'recall_take %r writes in this run: %s in this session\'s run folder, as that '
+                                'take wrote it (ungated: Total Recall can\'t run in the emulator)'
+                                % (f['unit'], name[:-4], name))
+                    continue
                 img = os.path.abspath(f.get('image', ''))
                 if not os.path.isfile(img):
                     raise Refused('no file %s' % img)
@@ -2284,7 +2455,7 @@ class Daemon:
             tcp = probe.getsockname()[1]
         cmd = [exe] + ([build] if build else []) + [
             '--flash', flash, '--no-audio', '--headless', '--no-midi',
-            '--usb-midi-tcp', '127.0.0.1:%d' % tcp, '--after', str(minutes * 60)]
+            '--usb-midi-tcp', '127.0.0.1:%d' % tcp, '--after', str(minutes * 60)] + self.emu_usb_args(a['unit'])
         din = None
         if self.emu_has_din(a['unit']):              # and its DIN MIDI, for send/capture ... din
             with socket.socket() as probe:
@@ -2579,6 +2750,33 @@ class Daemon:
                 self.emu_help_text[stamp] = False
         return self.emu_help_text[stamp]
 
+    def emu_usb_args(self, unit):
+        """['--usb-midi-real'] when config.toml sets units.<unit>.emu_usb_midi_real (Rytm, A4):
+        analog-emu runs the firmware's own USB MIDI sender, read by its simulated USB host, so a
+        mod that checks the sender's state before sending (core-ar2's core_midi_try_send, the
+        sidecar-check record reads) is answered over the USB MIDI TCP port. Without it analog-emu
+        takes the sender's calls and such a mod sends nothing. Refused when this analog-emu lacks it."""
+        args = self.emu_cv_args(unit)
+        if not UNITS[unit].get('emu_usb_midi_real'):
+            return args
+        if '--usb-midi-real' not in self.emu_help(unit):
+            raise Refused('units.%s.emu_usb_midi_real is set, but this analog-emu (%s) has no --usb-midi-real: '
+                          'build one that has it, or leave the key out' % (unit, ANALOG_EMU))
+        return ['--usb-midi-real'] + args
+
+    def emu_cv_args(self, unit):
+        """['--cv-in', SPEC] when config.toml sets units.<unit>.emu_cv_in (A4): what the emulator's
+        CONTROL IN 1/2 see, e.g. "1=A" for a cable from CV OUT A into CONTROL IN 1 (the bench patch a
+        CONTROL IN plan asks for), "2=2500" for a steady 2.5 V. An input whose CONTROL INPUT mode is OFF
+        (the default) ignores it. Refused when this analog-emu lacks --cv-in."""
+        spec = UNITS[unit].get('emu_cv_in')
+        if not spec:
+            return []
+        if '--cv-in' not in self.emu_help(unit):
+            raise Refused('units.%s.emu_cv_in is set, but this analog-emu (%s) has no --cv-in: '
+                          'build one that has it, or leave the key out' % (unit, ANALOG_EMU))
+        return ['--cv-in', str(spec)]
+
     def emu_has_din(self, unit):
         """Whether this unit's emulator serves its DIN MIDI over TCP: analog-emu's --din-midi-tcp,
         digiemu's usbrun.py --din-port."""
@@ -2733,7 +2931,7 @@ class Daemon:
                              tag='%s part %d of %d' % (tag, i + 1, len(parts)), hardware=tgt == 'hardware')
             lines = [l for _, ls in part for l in ls]
             if tgt == 'hardware':
-                stages.append([sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] +
+                stages.append([sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + port_args(unit) +
                               self.din_args(s, unit, tgt, lines) + ['--quiet', 'run', plan])
             else:
                 stages.append(self.emulator_part(s, unit, plan, lines, i + 1))
@@ -2803,7 +3001,8 @@ class Daemon:
             plan = self.twin(info, False, s.sid, emulator_run=ep['run_dir']) \
                 if info['flash'] and ep.get('run_dir') else info['path']
             cmd = self.plan_stages(s, info, job, tgt, info['steps']) if cycles else [
-                sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + din + ['--quiet', 'run', plan]
+                sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + port_args(unit) + din + [
+                '--quiet', 'run', plan]
             started = []
         else:
             if cycles and UNITS[unit].get('emulator') == 'digiemu':
@@ -2974,6 +3173,7 @@ class Daemon:
                 i, o = addr.split(',')
                 cmd = base + ['--in-port', i, '--out-port', o] + tail
         job = Job(s, 'flash', a['unit'], tgt, 'flash ' + os.path.basename(img))
+        job.limit = FLASH_JOB_LIMIT.get(tgt)
         flog = os.path.join(folder, 'elkflash.log')
         quiet = flash_start_line(job, port)
         self.log_line({'session': s.sid, 'job': job.id, 'flash_starts': quiet})
@@ -2993,8 +3193,8 @@ class Daemon:
                             if re.match(r'\s*(sent \d|Committed|back after|note:|Press YES|SUCCESS|no reply to PING)', l)]
             except OSError:
                 said = []
-            job.lines = [quiet] + [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + \
-                ['log: %s' % flog]
+            job.lines = [quiet] + ([job.midisrv] if job.midisrv else []) + \
+                [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + ['log: %s' % flog]
             if tgt == 'hardware':
                 if rc == 0:
                     s.os_left[a['unit']] = (os.path.basename(img), self.is_stock(a['unit'], d), d)
@@ -3179,7 +3379,8 @@ class Daemon:
         if not os.path.isfile(path):
             raise Refused('no file %s' % path)
         msgs = analogrun.load_syx(path)
-        if not msgs or not all(analogrun.is_dump(m) for m in msgs):
+        # sidecar-check's own commands (F0 7D 53 43 ...) are not dumps either; the 0.11 unit run sends them
+        if not msgs or not all(analogrun.is_dump(m) or bytes(m).startswith(b'\xf0\x7d\x53\x43') for m in msgs):
             raise Refused('%s holds messages other than Elektron dumps; send refuses it' % path)
 
     def t_shot(self, s, a):
@@ -3397,7 +3598,7 @@ class Daemon:
         verdict = lines[-1] if lines else 'exit %d' % r.returncode
         return ['%s: %s' % ('pass' if r.returncode == 0 else 'fail', verdict)]
 
-    def engine_job(self, s, a, verb, extra, label, approval_item=None):
+    def engine_job(self, s, a, verb, extra, label, approval_item=None, check=None, after=None):
         if not WINDOWS and sys.platform != 'darwin':
             raise Refused('Total Recall needs the Overbridge Engine, which Elektron makes for Windows '
                           'and macOS only')
@@ -3407,7 +3608,7 @@ class Daemon:
             raise Refused('no Total Recall for %s (obtr.py does not know its state types)' % a['unit'])
         self.check_hardware(s, list(UNITS))       # the Engine is shared by every unit
         if approval_item:
-            self.use_approval(s, a.get('approval'), approval_item, label)
+            self.use_approval(s, a.get('approval'), approval_item, label, check)
         try:
             port = self.busy_port('engine', 'hardware')
         except Refused:
@@ -3424,26 +3625,71 @@ class Daemon:
             if any('refused' in l.lower() or '10061' in l for l in lines):
                 lines.append('the Overbridge Engine is not answering; restarting it needs %s\'s OK' % PERSON)
             job.lines = lines[-4:]
+            if after:
+                job.lines += after(job, rc)
             s.done.setdefault(a['unit'], []).append('%s %s' % (label, job.state.upper()))
 
         return self.start(job, cmd, os.path.dirname(OBTR), done, port)
 
+    def note_take(self, s, unit, out, began):
+        """A take that passed binds the restore items naming it in this session's gos made before
+        it began: the item then covers that file as it is now (its sha256), and nothing else."""
+        d, name, bound = sha256(out), os.path.basename(out), []
+        with self.lock:
+            for t, g in self.approvals.items():
+                if g['session'] != s.sid or g.get('ended') or time.time() > g['expires'] or g['created'] > began:
+                    continue
+                for it in g['items']:
+                    if tuple(it['item']) == ('restore-take', unit, name) and not it['used'] and not it.get('taken'):
+                        it['taken'], it['taken_path'], it['taken_at'] = d, out, time.time()
+                        bound.append(t)
+            if bound:
+                self.save_approvals()
+        return ['go %s: its restore of the take %s now covers this file (sha256 %s)' % (t, name, d)
+                for t in bound]
+
+    def bound_takes(self, s, unit, name):
+        """This session's gos whose restore of the take `name` on `unit` a take already bound."""
+        with self.lock:
+            return sorted(t for t, g in self.approvals.items() if g['session'] == s.sid and any(
+                tuple(it['item']) == ('restore-take', unit, name) and it.get('taken') for it in g['items']))
+
     def t_recall_take(self, s, a):
-        name = a.get('name') or 'recall-%s.bin' % time.strftime('%H%M%S')
-        if re.search(r'[\\/:]', name):
-            raise Refused('name is a bare file name')
+        name = take_name(a.get('name') or 'recall-%s.bin' % time.strftime('%H%M%S'))
         self.unit(a.get('unit'))
-        out = os.path.join(s.folder(a['unit']), name if name.endswith('.bin') else name + '.bin')
-        return self.engine_job(s, a, 'take', [out], 'recall take ' + os.path.basename(out))
+        out = os.path.join(s.folder(a['unit']), name)
+        # obtr opens the image 'wb': a second take under a name would destroy the one a go's
+        # restore is bound to, so refuse before obtr runs.
+        bound = self.bound_takes(s, a['unit'], name)
+        if bound:
+            raise Refused('go %s already bound its restore to the take %s: a second take under that name '
+                          'would overwrite it; take under another name' % (', '.join(bound), name))
+        if os.path.exists(out):
+            raise Refused('%s is already in this session\'s run folder: take under another name' % name)
+        began = time.time()
+
+        def after(job, rc):
+            ok = rc == 0 and os.path.isfile(out) and os.path.isfile(os.path.splitext(out)[0] + '.json')
+            return self.note_take(s, a['unit'], out, began) if ok else []
+        return self.engine_job(s, a, 'take', [out], 'recall take ' + name, after=after)
 
     def t_recall_restore(self, s, a):
         self.unit(a.get('unit'))
         img = os.path.abspath(a.get('image', ''))
         if not os.path.isfile(img) or not os.path.isfile(os.path.splitext(img)[0] + '.json'):
             raise Refused('no image %s with its session .json beside it (from recall_take)' % img)
+        d = sha256(img)
+        item, check = ('restore', a['unit'], d), None
+        # A go may name the image a take in the same go writes (it has no sha256 when the go is
+        # asked for): that item covers only the file note_take bound to it, unchanged since.
+        take = ('restore-take', a['unit'], os.path.basename(img))
+        g = self.approvals.get(a.get('approval') or '') or {}
+        if os.path.normcase(os.path.dirname(img)) == os.path.normcase(os.path.abspath(s.folder(a['unit']))) \
+                and any(tuple(it['item']) == take for it in g.get('items', [])):
+            item, check = take, (lambda it: it.get('taken') == d and
+                                 os.path.normcase(it.get('taken_path') or '') == os.path.normcase(img))
         return self.engine_job(s, a, 'restore', [img, '--answer-timeout', '120'],
-                               'recall restore ' + os.path.basename(img),
-                               ('restore', a['unit'], sha256(img)))
+                               'recall restore ' + os.path.basename(img), item, check)
 
     # -- batches: one plan or flash run many times in the emulator, across variants --
 
@@ -3815,7 +4061,10 @@ class Daemon:
         with socket.socket() as probe:
             probe.bind(('127.0.0.1', 0))
             tcp = probe.getsockname()[1]
-        cmd += ['--usb-midi-tcp', '127.0.0.1:%d' % tcp]
+        try:
+            cmd += ['--usb-midi-tcp', '127.0.0.1:%d' % tcp] + self.emu_usb_args(unit)
+        except Refused as why:
+            return None, None, str(why), None
         addr = 'tcp:127.0.0.1:%d' % tcp
         din_addr = None
         if din:
@@ -4204,6 +4453,10 @@ TARGET = lambda: {'type': 'string', 'enum': ['emulator', 'hardware'], 'req': Tru
 OVER = lambda: {'type': 'string', 'description': 'hardware: the OS .syx on the unit when it is flashed '
                                             '(the flash\'s emulator pass is of that transition); left out, the '
                                             'file this session flashed last'}
+RESTORES = lambda: {'type': 'array', 'items': {'type': 'object', 'properties': {
+    'unit': {'type': 'string'}, 'image': {'type': 'string', 'description': 'an image that exists now'},
+    'take': {'type': 'string', 'description': 'instead of image: the name a recall_take under this go '
+                                              'writes (the session run folder\'s {take}.bin)'}}}}
 EMU_BUILD = lambda: {'type': 'string', 'description': 'emulator only: boot a fresh emulator of this OS '
                                                      '.syx first (replaces yours), instead of an emulator call'}
 TOOLS = [
@@ -4230,8 +4483,7 @@ TOOLS = [
      S(plans={'type': 'array', 'items': {'type': 'string'}}, purpose={'type': 'string', 'req': True},
        flashes={'type': 'array', 'items': {'type': 'object', 'properties': {
            'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
-       recall_restores={'type': 'array', 'items': {'type': 'object', 'properties': {
-           'unit': {'type': 'string'}, 'image': {'type': 'string'}}}},
+       recall_restores=RESTORES(),
        text_id={'type': 'string', 'description': 'from approval_text: refuse if the request changed since'})),
     ('approval_text', 'The go request approve_plan would make for the same arguments, word for word, and '
                       'its text_id, without asking anyone: refuses now if approve_plan would. Post the text '
@@ -4239,8 +4491,7 @@ TOOLS = [
      S(plans={'type': 'array', 'items': {'type': 'string'}}, purpose={'type': 'string', 'req': True},
        flashes={'type': 'array', 'items': {'type': 'object', 'properties': {
            'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
-       recall_restores={'type': 'array', 'items': {'type': 'object', 'properties': {
-           'unit': {'type': 'string'}, 'image': {'type': 'string'}}}})),
+       recall_restores=RESTORES())),
     ('check_plan', 'The plan checker, in seconds and without an emulator: a start check, what each section '
                    'proves (`say proves KIND`), listen format, build and reference rules; and whether a go '
                    'would be accepted now (emulator pass, shared references). approve_plan refuses what it refuses.',
@@ -4332,7 +4583,8 @@ TOOLS = [
        force={'type': 'boolean', 'description': 'gate: run plans whose pass still stands too'},
        stop={'type': 'string', 'description': 'a batch run_id: start no more of its runs'})),
     ('steps', 'analogrun steps (tap, hold, keys, turn, cc, nrpn, note, wait, stats, shot NAME, send FILE [din], '
-              'capture NAME S [any|none] [din], ping, save-project, save-kit...) on a unit or its emulator, any '
+              'capture NAME S [any|none] [din], capture NAME.txt S [any|none] short [nrpn=CH:MSB:LSB[:VAL]] [cc=CH:NUM[:VAL]] [din] (notes/CCs/NRPNs, '
+              'analoghealth with short-capture), ping, save-project, save-kit...) on a unit or its emulator, any '
               'local write policy applied; up to 2 min. din: over the unit\'s DIN MIDI (Rytm, A4; Digitone/Digitakt with a digirun.py that has --din; '
               'hardware: units.X.din in config).',
      S(unit=UNIT(), target=TARGET(), steps={'type': 'string', 'req': True})),
@@ -4362,10 +4614,13 @@ TOOLS = [
        ref={'type': 'string'}, channels={'type': 'string', 'description': 'e.g. 1,2'},
        folder={'type': 'string', 'description': 'where relative names are'})),
     ('recall_take', 'Overbridge Total Recall: take the unit\'s project image (obtr.py) into the evidence '
-                    'folder. Needs claims on all three units; never restarts Overbridge.',
+                    'folder of this session (name: a bare file name, .bin added; refused if that file is '
+                    'already there). Needs claims on every configured unit; never restarts Overbridge.',
      S(unit=UNIT(), name={'type': 'string'})),
     ('recall_restore', 'Overbridge Total Recall restore of an image from recall_take (replaces the active '
-                       'project). Needs all three claims and an approval token.',
+                       'project). Needs claims on every configured unit and an approval token: a go for '
+                       'the image (its sha256), or for the take of that name in this session\'s run folder '
+                       'that a recall_take under the go wrote.',
      S(unit=UNIT(), image={'type': 'string', 'req': True}, approval={'type': 'string'})),
 ]
 

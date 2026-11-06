@@ -288,6 +288,98 @@ class ApprovalInClaude(unittest.TestCase):
         self.assertTrue(self.L.read()['result']['content'][0]['text'].startswith('refused:'))
 
 
+class MidiGuard(unittest.TestCase):
+    """The stale-MIDI-port guards (2026-11-05): other MIDI programs warned about, midisrv's pid
+    and start time logged, a hung job killed with the processes it started."""
+
+    def test_parse_one_row_many_rows_none(self):
+        one = '{"name":"midisrv.exe","pid":4321,"start":"2026-11-05T18:52:29"}'
+        self.assertEqual(daemon.parse_midi_processes(one),
+                         ([{'name': 'midisrv.exe', 'pid': 4321, 'start': '2026-11-05T18:52:29'}], []))
+        many = json.dumps([{'name': 'MIDISRV.EXE', 'pid': 1, 'start': 'a'},
+                           {'name': 'Transfer.exe', 'pid': 2, 'start': 'b'}])
+        srv, others = daemon.parse_midi_processes(many)
+        self.assertEqual(([r['pid'] for r in srv], [r['name'] for r in others]), ([1], ['Transfer.exe']))
+        self.assertEqual(daemon.parse_midi_processes(''), ([], []))
+
+    def test_lines(self):
+        srv = [{'name': 'midisrv.exe', 'pid': 7, 'start': '2026-11-05T18:52:29'}]
+        transfer = [{'name': 'Transfer.exe', 'pid': 9, 'start': '2026-11-05T15:06:00'}]
+        warn, line = daemon.midi_lines(srv, transfer, None, flash=True)
+        self.assertEqual(line, 'midisrv: pid 7, started 2026-11-05T18:52:29')
+        self.assertEqual(len(warn), 1)
+        self.assertIn('Transfer.exe (pid 9, running since 2026-11-05T15:06:00)', warn[0])
+        self.assertIn('close it before flashing', warn[0])
+        self.assertEqual(daemon.midi_lines(srv, [], None, last_srv=[7])[0], [])
+        self.assertIn('restarted since the last hardware run: was pid 5',
+                      daemon.midi_lines(srv, [], None, last_srv=[5])[1])
+        self.assertEqual(daemon.midi_lines([], [], None)[1], 'midisrv: not running')
+        self.assertEqual(daemon.midi_lines([], [], 'not Windows')[1], 'midisrv: unknown (not Windows)')
+
+    def test_query_goes_encoded_and_lists_the_clients(self):
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append(cmd)
+            return types.SimpleNamespace(returncode=0, stdout='[]', stderr='')
+        self.assertEqual(daemon.midi_processes(['Transfer.exe', 'Overbridge%'], run=run), ([], [], None))
+        cmd = seen[0]
+        self.assertEqual(cmd[:4], ['powershell', '-NoProfile', '-NonInteractive', '-EncodedCommand'])
+        import base64
+        query = base64.b64decode(cmd[4]).decode('utf-16-le')
+        self.assertIn("Name='midisrv.exe' OR Name LIKE 'Transfer.exe' OR Name LIKE 'Overbridge%'", query)
+        with self.assertRaises(SystemExit):
+            daemon.midi_query(["x' OR 1=1"])
+
+    def test_a_failed_query_is_reported_not_raised(self):
+        def run(cmd, **kw):
+            raise subprocess.TimeoutExpired(cmd, 20)
+        srv, others, error = daemon.midi_processes([], run=run)
+        self.assertEqual((srv, others), ([], []))
+        self.assertIn('TimeoutExpired', error)
+
+    @unittest.skipIf(os.name == 'nt', 'the process-group kill is the POSIX path; Windows uses taskkill /T')
+    def test_run_limited_kills_the_tree(self):
+        marker = os.path.join(TMP, 'grandchild.pid')
+        code = ('import subprocess, sys, time; p = subprocess.Popen([sys.executable, "-c", '
+                '"import time; time.sleep(60)"]); open(%r, "w").write(str(p.pid)); print("started", '
+                'flush=True); time.sleep(60)' % marker)
+        t0 = time.monotonic()
+        rc, out, killed = daemon.run_limited([sys.executable, '-c', code], TMP, dict(os.environ), 1.5)
+        self.assertTrue(killed)
+        self.assertLess(time.monotonic() - t0, 20)
+        self.assertIn('started', out)
+        with open(marker) as fh:
+            gpid = int(fh.read())
+        for _ in range(50):                      # the grandchild (elkflash under elklock run) too
+            try:
+                os.kill(gpid, 0)
+            except OSError:
+                break
+            time.sleep(0.1)
+        else:
+            self.fail('the grandchild was not killed')
+        self.assertEqual(daemon.run_limited([sys.executable, '-c', 'print(1)'], TMP, dict(os.environ), 30),
+                         (0, '1\n', False))
+
+    def test_a_job_over_its_limit_fails_and_says_why(self):
+        d = daemon.Daemon()
+        s = daemon.Session('test-session-midi', os.getpid(), TMP)
+        job = daemon.Job(s, 'flash', 'rytm', 'emulator', 'flash X.syx')
+        job.limit = 1
+        got = []
+        d.start(job, [sys.executable, '-c', 'import time; time.sleep(60)'], TMP,
+                lambda job, rc, out: got.append((rc, out)))
+        for _ in range(200):
+            if job.ended:
+                break
+            time.sleep(0.05)
+        self.assertTrue(got, 'done was not called')
+        rc, out = got[0]
+        self.assertNotEqual(rc, 0)
+        self.assertIn('killed after 1 s', out)
+
+
 class InProcess(unittest.TestCase):
     def setUp(self):
         forget_passes()
@@ -460,12 +552,15 @@ class InProcess(unittest.TestCase):
         token = self.approve(plans=[plan])
         self.assertTrue(token.startswith('ap-'), token)
         a = {'plan': plan, 'target': 'hardware', 'approval': token}
+        saved = daemon.elklock.midi_inputs                  # this PC's ports are not the test's
+        daemon.elklock.midi_inputs = lambda: ['Analog Rytm MKII']
+        self.addCleanup(setattr, daemon.elklock, 'midi_inputs', saved)
         with self.assertRaisesRegex(daemon.Refused, 'claim rytm first'):
             self.d.t_run_plan(self.s, a)
         r = subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
                            env=self.s.env(), capture_output=True, text=True)
         self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
-        other = daemon.Session('test-session-d', os.getpid(), TMP)
+        other = daemon.Session('other-session', os.getpid(), TMP)     # its own run folder
         with self.assertRaisesRegex(daemon.Refused, 'claim rytm first'):
             self.d.t_run_plan(other, a)
         self.d.t_run_plan(self.s, a)
@@ -1058,6 +1153,29 @@ class InProcess(unittest.TestCase):
                 'power-cycle\n', 'power-cycle\nsay contrast fresh, dirty, occupied, testslot: x\n'))
         with self.assertRaisesRegex(daemon.Refused, r'stop in \[kept\]\).* would reach'):
             self.d.t_batch(self.s, {'gate': True, 'plans': [late], 'build': build})
+
+    def test_emulator_usb_midi_real(self):
+        """units.rytm.emu_usb_midi_real: the emulator starts with --usb-midi-real (the firmware's own
+        USB MIDI sender, so mod SysEx replies come back); refused by an analog-emu without it."""
+        self.fake_power_off_emulator('rytm')
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build})
+        e = self.d.emulators[(self.s.sid, 'rytm')]
+        self.assertNotIn('--usb-midi-real', e['cmd'])          # off unless config.toml sets it
+        self.d.stop_emulator(e)
+        daemon.UNITS['rytm']['emu_usb_midi_real'] = True
+        self.addCleanup(lambda: daemon.UNITS['rytm'].pop('emu_usb_midi_real', None))
+        saved = self.d.emu_help
+        self.addCleanup(lambda: setattr(self.d, 'emu_help', saved))
+        self.d.emu_help = lambda unit: 'usage: rytm [--usb-midi-tcp ADDR]'
+        with self.assertRaisesRegex(daemon.Refused, 'has no --usb-midi-real'):
+            self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build})
+        self.assertEqual(self.d.batch_emulator('rytm', build, TMP, 1)[2][:4], 'unit')
+        self.d.emu_help = lambda unit: 'usage: rytm [--usb-midi-tcp ADDR] [--usb-midi-real]'
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build})
+        e = self.d.emulators[(self.s.sid, 'rytm')]
+        self.assertIn('--usb-midi-real', e['cmd'])
 
     def test_power_cycle_emulator(self, unit='rytm'):
         self.fake_power_off_emulator(unit)
@@ -1730,6 +1848,10 @@ class InProcess(unittest.TestCase):
         info('capture back.syx 1\nsend back.syx')                  # what this run captured
         with self.assertRaisesRegex(daemon.Refused, 'other than Elektron dumps'):
             info('send "%s"' % rpc.replace('\\', '/'))
+        sc = os.path.join(TMP, 'sc.syx')              # sidecar-check's own command (0.8): accepted
+        with open(sc, 'wb') as fh:
+            fh.write(bytes([0xF0, 0x7D, 0x53, 0x43, 1, 7, 1, 0, 0, 0, 0, 0x4D, 0xF7]))
+        info('send "%s"' % sc.replace('\\', '/'))
         sent = info('send "%s"' % dump.replace('\\', '/'))['key']
         with open(dump, 'ab') as fh:
             fh.write(bytes([0xF0, 0x00, 0x20, 0x3C, 0x07, 0x00, 0x62, 1, 1, 1, 0, 0, 0, 5, 0xF7]))
@@ -1755,6 +1877,11 @@ class InProcess(unittest.TestCase):
         self.assertEqual(daemon.din_steps(['send a.syx din', 'capture k.syx 6 any din', 'capture k.syx 6 din',
                                            'capture din 5', 'send din', 'send a.syx', 'cc 1 2 3']),
                          ['send a.syx din', 'capture k.syx 6 any din', 'capture k.syx 6 din'])
+        self.assertEqual(daemon.din_steps(['cc 1 2 3 din', 'nrpn 1 0 112 9856 din', 'note 1 60 100 din',
+                                           'bend 1 0 din', 'at 1 70 din', 'at 1 din', 'bend 1 0']),
+                         ['cc 1 2 3 din', 'nrpn 1 0 112 9856 din', 'note 1 60 100 din', 'bend 1 0 din',
+                          'at 1 70 din'])
+        self.assertTrue({'bend', 'at'} <= daemon.STEP_OPS)
 
     @needs_runner
     def test_din_on_hardware_needs_the_configured_interface(self):
@@ -1779,6 +1906,44 @@ class InProcess(unittest.TestCase):
         self.assertIn(daemon.ELKLOCK, cmd)                           # still under the claim
         self.d.t_steps(self.s, {'unit': 'rytm', 'target': 'hardware', 'steps': 'send %s' % self.kit_request()})
         self.assertNotIn('--din', ran[-1])                           # only when a step uses it
+
+    def test_unit_port_through_a_midi_host(self):
+        # units.<unit>.port (or ELKBENCH_<UNIT>_PORT): a Rytm behind Sidecar has its host's port name
+        saved = daemon.elklock.midi_inputs, daemon.UNITS['rytm']['port']
+        self.addCleanup(lambda: setattr(daemon.elklock, 'midi_inputs', saved[0]) or
+                        daemon.UNITS['rytm'].update(port=saved[1]))
+        daemon.elklock.midi_inputs = lambda: ['Sidecar | Expander (Pi)', 'USB MIDI Interface']
+        self.assertEqual(daemon.port_args('rytm'), [])                    # built-in name: runner defaults
+        with self.assertRaisesRegex(daemon.Refused, "rytm is not on USB \\(no 'Analog Rytm' MIDI port\\)"):
+            self.d.check_connected('rytm', 'hardware')
+        daemon.UNITS['rytm']['port'] = 'Sidecar | Expander (Pi)'
+        self.assertEqual(daemon.port_args('rytm'), ['--port', 'Sidecar | Expander (Pi)'])
+        self.d.check_connected('rytm', 'hardware')                         # found under the host's name
+        daemon.elklock.midi_inputs = lambda: ['Analog Rytm MKII']
+        with self.assertRaisesRegex(daemon.Refused, "no 'Sidecar \\| Expander \\(Pi\\)' MIDI port"):
+            self.d.check_connected('rytm', 'hardware')                     # the setting, not the old name
+        old = os.environ.get('ELKBENCH_RYTM_PORT')
+        os.environ['ELKBENCH_RYTM_PORT'] = 'From Env'
+        self.addCleanup(lambda: os.environ.pop('ELKBENCH_RYTM_PORT') if old is None else
+                        os.environ.update(ELKBENCH_RYTM_PORT=old))
+        cfg = daemon.load_config(os.path.join(TMP, 'no-such-config.toml'))
+        self.assertEqual(cfg['units']['rytm']['port'], 'From Env')
+        self.assertEqual(cfg['units']['a4']['port'], 'Analog Four')
+
+    @needs_runner
+    def test_hardware_runs_use_the_units_port(self):
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        saved = daemon.elklock.midi_inputs, daemon.UNITS['rytm']['port']
+        self.addCleanup(lambda: setattr(daemon.elklock, 'midi_inputs', saved[0]) or
+                        daemon.UNITS['rytm'].update(port=saved[1]))
+        daemon.elklock.midi_inputs = lambda: ['Sidecar | Expander (Pi)']
+        daemon.UNITS['rytm']['port'] = 'Sidecar | Expander (Pi)'
+        ran = self.capture_runs()
+        self.d.t_steps(self.s, {'unit': 'rytm', 'target': 'hardware', 'steps': 'tap PLAY'})
+        cmd = ran[-1]
+        self.assertEqual(cmd[cmd.index('--port') + 1], 'Sidecar | Expander (Pi)')
+        self.assertIn(daemon.ELKLOCK, cmd)                                 # still under the claim
 
     @needs_runner
     def test_din_in_the_emulator(self):
@@ -2086,6 +2251,120 @@ class InProcess(unittest.TestCase):
                        env=self.s.env(), capture_output=True)
         with self.assertRaisesRegex(daemon.Refused, 'claim a4 first' if daemon.WINDOWS else 'Overbridge Engine'):
             self.d.t_recall_take(self.s, {'unit': 'rytm'})
+
+    def engine_stubs(self):
+        """Total Recall without the Engine: obtr never runs (self.d.start is stubbed), claims are
+        taken as held, and the platform check passes on Linux too."""
+        saved = daemon.WINDOWS, daemon.OBTR
+        daemon.WINDOWS, daemon.OBTR = True, os.path.abspath(__file__)
+        self.d.check_hardware = lambda s, units: None
+        self.addCleanup(lambda: setattr(daemon, 'WINDOWS', saved[0]) or setattr(daemon, 'OBTR', saved[1]))
+
+    def take(self, s, unit, name, data=b'image'):
+        """recall_take as obtr would end it: the image, its .json from save_meta, exit 0."""
+        self.d.t_recall_take(s, {'unit': unit, 'name': name})
+        job, cmd = self.started[-1]
+        out = cmd[cmd.index('take') + 1]
+        with open(out, 'wb') as fh:
+            fh.write(data)
+        with open(os.path.splitext(out)[0] + '.json', 'w') as fh:
+            json.dump({'session': 12345, 'total': len(data), 'name': name}, fh)
+        self.done(job, 0, 'ok: took %d bytes' % len(data))
+        return out, job
+
+    def restore(self, s, unit, img, token):
+        return self.d.t_recall_restore(s, {'unit': unit, 'image': img, 'approval': token})
+
+    def test_restore_of_this_runs_take(self):
+        self.engine_stubs()
+        args = dict(purpose='test', recall_restores=[{'unit': 'rytm', 'take': 'tr09'}])
+        out = self.d.t_approval_text(self.s, args)
+        body = '\n'.join(out)
+        self.assertIn("of the image recall_take 'tr09' writes in this run: tr09.bin", body)
+        self.assertIn("ungated: Total Recall can't run in the emulator", body)
+        with self.assertRaisesRegex(daemon.Refused, 'bare file name'):
+            self.d.t_approval_text(self.s, dict(args, recall_restores=[{'unit': 'rytm', 'take': 'a/b'}]))
+        with self.assertRaisesRegex(daemon.Refused, 'image or a take, not both'):
+            self.d.t_approval_text(self.s, dict(args, recall_restores=[
+                {'unit': 'rytm', 'take': 'tr09', 'image': __file__}]))
+        token = self.approve(recall_restores=[{'unit': 'rytm', 'take': 'tr09.bin'}])
+        self.assertTrue(token.startswith('ap-'), token)
+        img = os.path.join(self.s.folder('rytm'), 'tr09.bin')
+
+        # before the take: no file, then a file nobody's take under the go wrote
+        with self.assertRaisesRegex(daemon.Refused, 'no image'):
+            self.restore(self.s, 'rytm', img, token)
+        with open(img, 'wb') as fh:
+            fh.write(b'planted')
+        with open(img[:-4] + '.json', 'w') as fh:
+            fh.write('{}')
+        with self.assertRaisesRegex(daemon.Refused, 'not that one'):
+            self.restore(self.s, 'rytm', img, token)
+        # a take refuses to overwrite a file already there
+        with self.assertRaisesRegex(daemon.Refused, 'already in this session'):
+            self.d.t_recall_take(self.s, {'unit': 'rytm', 'name': 'tr09'})
+        os.remove(img)
+        os.remove(img[:-4] + '.json')
+
+        out, job = self.take(self.s, 'rytm', 'tr09')
+        self.assertEqual(os.path.normcase(out), os.path.normcase(img))
+        self.assertTrue(any('now covers this file' in l for l in job.lines), job.lines)
+        # a second take under the bound name is refused before obtr runs
+        n = len(self.started)
+        os.rename(img, img + '.away')       # even with the file gone, the binding refuses
+        with self.assertRaisesRegex(daemon.Refused, 'already bound its restore'):
+            self.d.t_recall_take(self.s, {'unit': 'rytm', 'name': 'tr09.bin'})
+        self.assertEqual(len(self.started), n)
+        os.rename(img + '.away', img)
+
+        # altered after the take, then another unit
+        with open(img, 'ab') as fh:
+            fh.write(b'!')
+        with self.assertRaisesRegex(daemon.Refused, 'not that one'):
+            self.restore(self.s, 'rytm', img, token)
+        with open(img, 'wb') as fh:
+            fh.write(b'image')
+        with self.assertRaisesRegex(daemon.Refused, 'does not cover'):
+            self.restore(self.s, 'a4', img, token)
+        # a copy elsewhere, same bytes: not the bound path
+        other = os.path.join(TMP, 'tr09.bin')
+        shutil.copy(img, other)
+        shutil.copy(img[:-4] + '.json', other[:-4] + '.json')
+        with self.assertRaisesRegex(daemon.Refused, 'does not cover'):
+            self.restore(self.s, 'rytm', other, token)
+
+        self.assertEqual(self.restore(self.s, 'rytm', img, token), ['running'])
+        cmd = self.started[-1][1]
+        self.assertEqual(cmd[cmd.index('restore') + 1], img)
+        with self.assertRaisesRegex(daemon.Refused, 'has run; a new run needs a new go'):
+            self.restore(self.s, 'rytm', img, token)
+
+    def test_restore_take_is_this_sessions(self):
+        self.engine_stubs()
+        token = self.approve(recall_restores=[{'unit': 'rytm', 'take': 'mine'}])
+        other = daemon.Session('other-session', os.getpid(), TMP)     # its own run folder
+        theirs, job = self.take(other, 'rytm', 'mine')
+        self.assertFalse(any('now covers' in l for l in job.lines), job.lines)   # their take binds no go of ours
+        with self.assertRaisesRegex(daemon.Refused, 'does not cover'):
+            self.restore(self.s, 'rytm', theirs, token)
+        with self.assertRaisesRegex(daemon.Refused, 'another session'):
+            self.restore(other, 'rytm', theirs, token)
+        # a take made before the go does not bind it either
+        self.d.approvals.clear()
+        early, _ = self.take(self.s, 'rytm', 'early')
+        token = self.approve(recall_restores=[{'unit': 'rytm', 'take': 'early'}])
+        with self.assertRaisesRegex(daemon.Refused, 'not that one'):
+            self.restore(self.s, 'rytm', early, token)
+
+    def test_restore_by_sha_still_works(self):
+        self.engine_stubs()
+        img, _ = self.take(self.s, 'rytm', 'plain')
+        self.assertIn('TOTAL RECALL RESTORE plain.bin on rytm', '\n'.join(self.d.t_approval_text(
+            self.s, dict(purpose='test', recall_restores=[{'unit': 'rytm', 'image': img}]))))
+        token = self.approve(recall_restores=[{'unit': 'rytm', 'image': img}])
+        self.assertEqual(self.restore(self.s, 'rytm', img, token), ['running'])
+        with self.assertRaisesRegex(daemon.Refused, 'has run'):
+            self.restore(self.s, 'rytm', img, token)
 
     def test_batch_rules(self):
         img = self.saved['stock'][0]
