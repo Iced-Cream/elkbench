@@ -1848,6 +1848,10 @@ class InProcess(unittest.TestCase):
         info('capture back.syx 1\nsend back.syx')                  # what this run captured
         with self.assertRaisesRegex(daemon.Refused, 'other than Elektron dumps'):
             info('send "%s"' % rpc.replace('\\', '/'))
+        sc = os.path.join(TMP, 'sc.syx')              # sidecar-check's own command (0.8): accepted
+        with open(sc, 'wb') as fh:
+            fh.write(bytes([0xF0, 0x7D, 0x53, 0x43, 1, 7, 1, 0, 0, 0, 0, 0x4D, 0xF7]))
+        info('send "%s"' % sc.replace('\\', '/'))
         sent = info('send "%s"' % dump.replace('\\', '/'))['key']
         with open(dump, 'ab') as fh:
             fh.write(bytes([0xF0, 0x00, 0x20, 0x3C, 0x07, 0x00, 0x62, 1, 1, 1, 0, 0, 0, 5, 0xF7]))

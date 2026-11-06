@@ -3365,7 +3365,8 @@ class Daemon:
         if not os.path.isfile(path):
             raise Refused('no file %s' % path)
         msgs = analogrun.load_syx(path)
-        if not msgs or not all(analogrun.is_dump(m) for m in msgs):
+        # sidecar-check's own commands (F0 7D 53 43 ...) are not dumps either; the 0.11 unit run sends them
+        if not msgs or not all(analogrun.is_dump(m) or bytes(m).startswith(b'\xf0\x7d\x53\x43') for m in msgs):
             raise Refused('%s holds messages other than Elektron dumps; send refuses it' % path)
 
     def t_shot(self, s, a):
