@@ -102,7 +102,7 @@ IDLE_EXIT = 30 * 60
 UNIT_FACTS = {
     'rytm': dict(port='Analog Rytm', emu='rytm-emu usb out,rytm-emu usb in', emu_exe='rytm' + EXE,
                  asio='Elektron Analog Rytm MKII', engine='Analog Rytm', runner=True, stock=[], no_stats=[],
-                 din=None),
+                 din=None, drive=True),           # drive: its +Drive sample store by samplegate (drive_items)
     'a4': dict(port='Analog Four', emu='a4-emu usb out,a4-emu usb in', emu_exe='a4' + EXE,
                asio='Elektron Analog Four MKII', engine='Analog Four', runner=True, stock=[], no_stats=[],
                din=None),
@@ -325,6 +325,44 @@ def slot_numbers(spec):
     return sorted(out)
 
 
+DRIVE_NAME = re.compile(r'~T [A-Z0-9 +\-=&/#@?%$~]{1,12}')   # a ~T name, at most 15 characters
+
+
+def drive_items(a):
+    """approval_text / approve_plan `drive_items` -> {unit: [path, ...]}: the +Drive folders and
+    files a run creates on each unit and its release removes, each one `/~T NAME` at the root
+    (owner, 2026-11-07: no shared +Drive fixtures; a run uploads its own ~T items and its release
+    removes them, as it clears the test slots). Refused for anything else."""
+    out = {}
+    for d in a.get('drive_items') or []:
+        u, path = (d or {}).get('unit'), ((d or {}).get('path') or '').rstrip('/')
+        if u not in UNITS:
+            raise Refused('drive_items: unknown unit %r' % u)
+        if not UNITS[u].get('drive'):
+            raise Refused('drive_items: the %s has no +Drive sample tool here (only the Rytm)' % u)
+        if not SAMPLEGATE:
+            raise Refused('drive_items: tools.samplegate is not set in config.toml, so the release '
+                          'could not remove them')
+        name = path[1:] if path.startswith('/') else ''
+        if not DRIVE_NAME.fullmatch(name) or '/' in name:
+            raise Refused('drive_items: %r is not a +Drive root item named "~T NAME" (one level, A-Z, '
+                          '0-9, space, at most 15 characters): the release removes root items with all '
+                          'they hold' % path)
+        if path not in out.setdefault(u, []):
+            out[u].append(path)
+    return out
+
+
+def drive_rows(ls_text):
+    """samplegate `ls` output ('D NAME SIZE' / 'F NAME SIZE' rows) -> [(name, is_folder)]."""
+    out = []
+    for line in ls_text.splitlines():
+        w = line.rstrip().split(' ')
+        if len(w) >= 3 and len(w[0]) == 1 and w[0].isalpha() and w[-1].isdigit():
+            out.append((' '.join(w[1:-1]), w[0].upper() == 'D'))
+    return out
+
+
 def clears_at_release(unit):
     """Release empties `unit`'s test slots: it sets clear_at_release and has a data store runner
     (analogrun on the Rytm and A4; digirun lists and analogrun's `data` erases on the Digitone and
@@ -510,7 +548,7 @@ def load_config(path=CONFIG):
     return dict(
         person=c.get('person') or 'the person at this PC',
         elklock=t.get('elklock') or os.path.join(HERE, 'elklock', 'elklock.py'),
-        analoghealth=t.get('analoghealth'), digihealth=t.get('digihealth'),
+        analoghealth=t.get('analoghealth'), digihealth=t.get('digihealth'), samplegate=t.get('samplegate'),
         analog_emu=t.get('analog_emu'), digiemu=t.get('digiemu'), digiemu_python=t.get('digiemu_python') or [sys.executable], elkflash=t.get('elkflash'), usb_audio=t.get('usb_audio') or os.path.join(HERE, 'audio'),
         obtr=os.path.join(HERE, 'obtr.py'), audio_python=t.get('audio_python') or [sys.executable],
         approval_fallback=c.get('approval_fallback') or 'popup',
@@ -535,6 +573,7 @@ ELKLOCK = CFG['elklock']
 ANALOGHEALTH = CFG['analoghealth']
 RUNNER = os.path.join(ANALOGHEALTH, 'tools', 'analogrun.py') if ANALOGHEALTH else None
 DIGIHEALTH = CFG['digihealth']            # a digihealth tree with tools/digirun.py (Digitone)
+SAMPLEGATE = CFG['samplegate']            # samplegate.py: the Rytm's +Drive sample store (drive_items)
 ANALOG_EMU = CFG['analog_emu']            # folder with analog-emu's rytm.exe and a4.exe
 DIGIEMU = CFG['digiemu']                  # a digiemu checkout (emu.fwcheck)
 DIGIEMU_PY = CFG['digiemu_python']        # its Python; ['wsl', '~/venv/bin/python'] runs it in WSL
@@ -1859,6 +1898,18 @@ class Daemon:
                 raise Refused('%s: the test slots are not empty, so the claim is kept: %s. Fix it and release '
                               'again, or say why in the note and pass accept_slots_left' % (u, '; '.join(lines)))
             cleared[u] = (ok, lines)
+        # Every run removes the +Drive ~T items its go named, so no run finds another's there.
+        drive = {}
+        for u in mine:
+            paths = self.drive_to_remove(s, u)
+            if not paths:
+                continue
+            ok, lines = self.remove_drive_items(s, u, paths)
+            if not ok and not a.get('accept_drive_left'):
+                raise Refused('%s: the run\'s +Drive items are not all removed, so the claim is kept: %s. Fix '
+                              'it and release again, or say why in the note and pass accept_drive_left'
+                              % (u, '; '.join(lines)))
+            drive[u] = (ok, paths, lines)
         out = ['ok: released %s' % ', '.join(mine)]
         for u in mine:
             if u in cleared:
@@ -1868,6 +1919,12 @@ class Daemon:
                                                    'empty (data ls)' if ok else 'NOT EMPTY: ' + '; '.join(lines))
             else:
                 note_u = note
+            if u in drive:
+                ok, paths, lines = drive[u]
+                out += ['%s: %s' % (u, l) for l in lines]
+                note_u += '; +Drive %s %s' % (', '.join(paths), 'removed (ls)' if ok else
+                                              'NOT ALL REMOVED: ' + '; '.join(lines))
+                self.drive_removed(s, u)
             done = s.done.get(u, [])
             os_text = ('%s (%s)' % (s.os_left[u][0], 'stock' if s.os_left[u][1] else 'NOT STOCK')
                        if u in s.os_left else 'not flashed by this session')
@@ -1896,6 +1953,85 @@ class Daemon:
             s.purpose.pop(u, None)
             s.os_left.pop(u, None)
         return out
+
+    def drive_to_remove(self, s, u):
+        """The +Drive items this session's goes named on `u` (drive_items) that no release removed yet."""
+        out = []
+        with self.lock:
+            for g in self.approvals.values():
+                if g.get('session') == s.sid and not (g.get('drive_done') or {}).get(u):
+                    out += [p for p in (g.get('drive') or {}).get(u, []) if p not in out]
+        return out
+
+    def drive_removed(self, s, u):
+        with self.lock:
+            for g in self.approvals.values():
+                if g.get('session') == s.sid and (g.get('drive') or {}).get(u):
+                    g.setdefault('drive_done', {})[u] = time.time()
+        self.save_approvals()
+
+    def remove_drive_items(self, s, u, paths):
+        """At release: remove each +Drive root item in `paths` with everything below it (samplegate
+        rm and rmdir, which ask the local write policy), then list the root to show them gone.
+        Nothing else on the +Drive is entered or removed. -> (ok, lines)"""
+        try:
+            self.check_connected(u, 'hardware')
+            gate = need(SAMPLEGATE, 'samplegate', 'the +Drive sample tool (samplegate.py)')
+        except Refused as e:
+            return False, ['+Drive items not removed: %s' % e]
+        folder = os.path.join(s.folder(u), 'release-drive-%s' % time.strftime('%H%M%S'))
+        os.makedirs(folder, exist_ok=True)
+        port = self.busy_port(u, 'hardware', 'release: remove the run\'s +Drive items')
+        log, lines = [], []
+
+        def run(*args):
+            r = subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, gate, '--port',
+                                UNITS[u]['port']] + list(args), cwd=os.path.dirname(os.path.abspath(gate)),
+                               env=s.env(), capture_output=True, text=True, encoding='utf-8',
+                               errors='replace', timeout=300, **NOWIN)
+            log.append('$ samplegate %s\n%s%s' % (' '.join(args), r.stdout, r.stderr))
+            return r
+
+        def remove(path, is_folder):
+            if is_folder:
+                r = run('ls', path)
+                if r.returncode:
+                    lines.append('%s not listed (exit %d)' % (path, r.returncode))
+                    return
+                for name, sub in drive_rows(r.stdout):
+                    remove(path + '/' + name, sub)
+            r = run('rmdir' if is_folder else 'rm', path)
+            if r.returncode:
+                lines.append('%s not removed (%s)' % (
+                    path, 'the write policy refused' if r.returncode == 3 else 'exit %d' % r.returncode))
+            else:
+                lines.append('removed %s' % path)
+        try:
+            r = run('ls', '/')
+            if r.returncode:
+                return False, ['samplegate ls / failed: %s' % (r.stdout + r.stderr).strip()[-200:]]
+            root = dict(drive_rows(r.stdout))
+            for p in paths:
+                if p[1:] in root:
+                    remove(p, root[p[1:]])
+                else:
+                    lines.append('%s was not on the +Drive' % p)
+            r = run('ls', '/')
+            if r.returncode:
+                return False, lines + ['samplegate ls / after the removal failed']
+            names = [n for n, _ in drive_rows(r.stdout)]
+            left = [p for p in paths if p[1:] in names]
+            others = [n for n in names if n.startswith('~T ') and '/' + n not in paths]
+            if others:                       # named, never removed: no go of this session covers them
+                lines.append('other ~T items on the +Drive root, not this session\'s, kept: %s'
+                             % ', '.join('/' + n for n in others))
+            if left:
+                return False, lines + ['still on the +Drive: %s' % ', '.join(left)]
+            return True, lines + ['%s gone from the +Drive root (ls)' % ', '.join(paths)]
+        finally:
+            port.release()
+            with open(os.path.join(folder, 'steps.log'), 'a', encoding='utf-8') as fh:
+                fh.write('\n'.join(log) + '\n')
 
     def empty_test_slots(self, s, u):
         """At release: back up and erase every project in the unit's `clear_at_release` slots
@@ -2085,6 +2221,11 @@ class Daemon:
                 text.append('AT RELEASE on %s, however the run ends: project slots %s, whatever they hold, '
                             'backed up to the run folder and erased (data clear), then listed to show them empty'
                             % (u, slot_text(UNITS[u]['clear_at_release'])))
+        for u, paths in sorted(drive_items(a).items()):
+            text.append('+DRIVE on %s: the run creates %s (its own ~T items; nothing else on the +Drive is '
+                        'used). AT RELEASE on %s, however the run ends: each removed with all it holds '
+                        '(samplegate rm/rmdir), then the +Drive root listed to show them gone'
+                        % (u, ', '.join(paths), u))
         purpose = (a.get('purpose') or '').strip() or '(no purpose given)'
         body = ('An AI session asks for one go for this hardware run.\n\nSession %s (%s)\n'
                 'Purpose: %s\n\n%s\n\nEach item runs once; the go expires in %d h.\n'
@@ -2209,7 +2350,8 @@ class Daemon:
                 token = 'ap-' + secrets.token_hex(6)
                 with self.lock:
                     self.approvals[token] = dict(session=s.sid, items=items, created=time.time(),
-                                                 expires=time.time() + APPROVAL_TTL, text=body)
+                                                 expires=time.time() + APPROVAL_TTL, text=body,
+                                                 drive=drive_items(a))
                     self.save_approvals()
                 job.state, job.lines = 'approved', ['token: %s (covers %s; expires %s)' % (
                     token, '; '.join(i['label'] for i in items), stamp(time.time() + APPROVAL_TTL))]
@@ -4488,12 +4630,15 @@ TOOLS = [
        purpose={'type': 'string', 'req': True}, wait_minutes={'type': 'integer', 'description': '0-10, queue for a busy unit'})),
     ('release', 'Release units: writes the elklock handoff note and a test-log row in the unit\'s runs folder. '
                 'Asks for the stock OS back first. Where the unit sets clear_at_release, backs up and erases '
-                'those test slots first and lists them empty.',
+                'those test slots first and lists them empty; removes the +Drive ~T items this session\'s '
+                'goes named (drive_items) and lists the +Drive root.',
      S(unit={'type': ['string', 'array'], 'items': {'type': 'string'}, 'req': True},
        note={'type': 'string', 'req': True, 'description': 'state left: OS, project, menus'},
        accept_non_stock={'type': 'boolean', 'description': 'leave a non-stock OS on purpose (say why in note)'},
        accept_slots_left={'type': 'boolean', 'description': 'release although the test slots could not be '
-                                                             'emptied (say why in note)'})),
+                                                             'emptied (say why in note)'},
+       accept_drive_left={'type': 'boolean', 'description': 'release although the run\'s +Drive items could '
+                                                             'not all be removed (say why in note)'})),
     ('status', 'This session\'s claims and runs, or one run (run_id): waits until that run ends '
                '(up to wait_s) and gives its verdict. Call it again if it still answers running.',
      S(run_id={'type': 'string'},
@@ -4505,6 +4650,9 @@ TOOLS = [
        flashes={'type': 'array', 'items': {'type': 'object', 'properties': {
            'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
        recall_restores=RESTORES(),
+       drive_items={'type': 'array', 'items': {'type': 'object', 'properties': {
+           'unit': {'type': 'string'}, 'path': {'type': 'string', 'description': '/~T NAME at the +Drive root'}}},
+           'description': 'the +Drive ~T folders and files the run creates (Rytm); the release removes them'},
        text_id={'type': 'string', 'description': 'from approval_text: refuse if the request changed since'})),
     ('approval_text', 'The go request approve_plan would make for the same arguments, word for word, and '
                       'its text_id, without asking anyone: refuses now if approve_plan would. Post the text '
@@ -4512,7 +4660,10 @@ TOOLS = [
      S(plans={'type': 'array', 'items': {'type': 'string'}}, purpose={'type': 'string', 'req': True},
        flashes={'type': 'array', 'items': {'type': 'object', 'properties': {
            'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
-       recall_restores=RESTORES())),
+       recall_restores=RESTORES(),
+       drive_items={'type': 'array', 'items': {'type': 'object', 'properties': {
+           'unit': {'type': 'string'}, 'path': {'type': 'string', 'description': '/~T NAME at the +Drive root'}}},
+           'description': 'the +Drive ~T folders and files the run creates (Rytm); the release removes them'})),
     ('check_plan', 'The plan checker, in seconds and without an emulator: a start check, what each section '
                    'proves (`say proves KIND`), listen format, build and reference rules; and whether a go '
                    'would be accepted now (emulator pass, shared references). approve_plan refuses what it refuses.',
