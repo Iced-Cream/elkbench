@@ -287,7 +287,15 @@ their answer to the client's prompt. A session can't end it itself.
 - **Leave the unit on its stock OS** at the end, and say so in the handoff note. If the restore
   can't run, release with a note that the unit is not on stock and what it is on, ask for the
   restore at once, and nobody else takes the unit until stock is back or the owner clears it.
-- Test items stay unless the plan says to clean up; the handoff note lists them.
+- **Remove what the run put on the +Drive.** At release, a run removes every sample folder or
+  file it created there, the way the test slots are emptied, and the go request and the handoff
+  note list them. There are no shared +Drive fixtures: a run that needs samples uploads its own
+  small test folder and removes it at release, so nothing on the +Drive waits for a later run.
+- **Don't rely on what else is on the +Drive.** Folder lists sort by name, so another folder
+  (the owner's, or one a run left) moves the row a key route lands on. Reach the run's own folder
+  by a route that doesn't depend on the other rows, or prove the highlighted row on screen before
+  opening it, and compare only the run's own rows.
+- Other test items stay unless the plan says to clean up; the handoff note lists them.
 
 **An example: the rules elkbench was developed with.** They come with it as a ready write
 policy, `examples/write-policy/policy.py` (tests beside it).
@@ -308,6 +316,13 @@ policy, `examples/write-policy/policy.py` (tests beside it).
   the slots empty, and keeps the claim if it can't. So a run finds them empty, and its setup's
   start check (121 empty) only stops it when a session ended without releasing. Nobody saves
   their own work there by hand, so the cleanup touches only test projects.
+- **+Drive items removed at every release:** a go names the `~T` folders and files its run
+  creates at the +Drive root (`drive_items` on `approval_text` and `approve_plan`, for example
+  `/~T SAMPLES` on the Rytm), and `release` removes each with all it holds (files first, then the
+  folders, through `tools.samplegate`, a sample-store tool behind the write policy), lists the root
+  to show them gone, and keeps the claim if it can't (`accept_drive_left` releases anyway, with
+  the reason in the note). Other `~T` items on the root are named in the release output and left
+  alone: no go of this session covered them.
 - **The active project:** the unit doesn't say which project is active, so by convention a test
   project names its kit 1 `~T ...`, and the policy checks the active kit 1 before any kit or
   sound dump is sent. On the Digitone and Digitakt the marker is pattern A01's name instead

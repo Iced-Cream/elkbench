@@ -1824,6 +1824,99 @@ class InProcess(unittest.TestCase):
               'MY SONG               id 3  51200 B\n')
         self.assertEqual(daemon.occupied_slots(ls), {121, 3})
 
+    def test_drive_items_rules(self):
+        saved = daemon.SAMPLEGATE
+        daemon.SAMPLEGATE = os.path.join(TMP, 'samplegate.py')
+        try:
+            self.assertEqual(daemon.drive_items({'drive_items': [{'unit': 'rytm', 'path': '/~T DL/'},
+                                                                 {'unit': 'rytm', 'path': '/~T DL'}]}),
+                             {'rytm': ['/~T DL']})
+            for bad in ('/~T DL/~T BD', '/MY SAMPLES', '~T DL', '/~T dl', '/~T WAY TOO LONG X'):
+                with self.assertRaisesRegex(daemon.Refused, r'not a \+Drive root item'):
+                    daemon.drive_items({'drive_items': [{'unit': 'rytm', 'path': bad}]})
+            with self.assertRaisesRegex(daemon.Refused, r'no \+Drive sample tool'):
+                daemon.drive_items({'drive_items': [{'unit': 'a4', 'path': '/~T DL'}]})
+            daemon.SAMPLEGATE = None
+            with self.assertRaisesRegex(daemon.Refused, 'tools.samplegate is not set'):
+                daemon.drive_items({'drive_items': [{'unit': 'rytm', 'path': '/~T DL'}]})
+        finally:
+            daemon.SAMPLEGATE = saved
+        self.assertEqual(daemon.drive_rows('write policy: ok\nD ~T DL 0\nF ~T BD 1234\nD Drums 0\n'),
+                         [('~T DL', True), ('~T BD', False), ('Drums', True)])
+
+    def test_release_removes_drive_items(self):
+        """Release removes the +Drive items the session's go named, with all they hold (files
+        first, then the folder), lists the root, and names other ~T items without touching them."""
+        tree = {'/': [('D', '~T DL'), ('D', '~T OLD'), ('D', 'Factory')],
+                '/~T DL': [('F', '~T BD'), ('D', '~T SUB')], '/~T DL/~T SUB': [('F', '~T SD')]}
+        ran = []
+
+        def fake(cmd, **kw):
+            op, path = cmd[-2], cmd[-1]
+            ran.append((op, path))
+            if op == 'ls':
+                return subprocess.CompletedProcess(cmd, 0, ''.join('%s %s 0\n' % r for r in tree.get(path, [])), '')
+            parent, name = path.rsplit('/', 1)
+            parent = parent or '/'
+            tree[parent] = [r for r in tree[parent] if r[1] != name]
+            return subprocess.CompletedProcess(cmd, 0, 'DELETED %s\n' % path, '')
+        saved = daemon.SAMPLEGATE, daemon.subprocess.run
+        daemon.SAMPLEGATE = os.path.join(TMP, 'samplegate.py')
+        with open(daemon.SAMPLEGATE, 'w') as fh:
+            fh.write('# stand-in\n')
+        self.d.check_connected = lambda unit, target: None
+        self.d.approvals['ap-test'] = dict(session=self.s.sid, items=[], created=time.time(),
+                                           expires=time.time() + 60, text='', drive={'rytm': ['/~T DL']})
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        real_run = daemon.subprocess.run
+        daemon.subprocess.run = lambda cmd, **kw: (fake(cmd, **kw) if daemon.SAMPLEGATE in cmd
+                                                   else real_run(cmd, **kw))
+        try:
+            out = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'menus closed'})
+        finally:
+            daemon.SAMPLEGATE, daemon.subprocess.run = saved
+            del self.d.check_connected
+        self.assertTrue(out[0].startswith('ok: released'), out)
+        self.assertEqual(ran, [('ls', '/'), ('ls', '/~T DL'), ('rm', '/~T DL/~T BD'), ('ls', '/~T DL/~T SUB'),
+                               ('rm', '/~T DL/~T SUB/~T SD'), ('rmdir', '/~T DL/~T SUB'), ('rmdir', '/~T DL'),
+                               ('ls', '/')])
+        self.assertIn('rytm: other ~T items on the +Drive root, not this session\'s, kept: /~T OLD', out)
+        handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], 'rytm.handoff.json')))
+        self.assertIn('+Drive /~T DL removed (ls)', handoff['note'])
+        self.assertEqual(self.d.drive_to_remove(self.s, 'rytm'), [])     # done: the next release skips it
+
+    def test_release_keeps_claim_when_drive_items_left(self):
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        self.d.approvals['ap-test'] = dict(session=self.s.sid, items=[], created=time.time(),
+                                           expires=time.time() + 60, text='', drive={'rytm': ['/~T DL']})
+        self.d.remove_drive_items = lambda s, u, paths: (False, ['/~T DL/~T BD not removed (exit 2)',
+                                                                 'still on the +Drive: /~T DL'])
+        try:
+            with self.assertRaisesRegex(daemon.Refused, 'not all removed, so the claim is kept'):
+                self.d.t_release(self.s, {'unit': 'rytm', 'note': 'x'})
+            self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
+            out = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'cable out', 'accept_drive_left': True})
+        finally:
+            del self.d.remove_drive_items
+        self.assertTrue(out[0].startswith('ok: released'), out)
+        handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], 'rytm.handoff.json')))
+        self.assertIn('+Drive /~T DL NOT ALL REMOVED', handoff['note'])
+
+    @needs_runner
+    def test_go_names_drive_items(self):
+        plan = os.path.join(PLANS, 'menus.txt')
+        self.fake_pass(self.d.plan_info(plan))
+        saved = daemon.SAMPLEGATE
+        daemon.SAMPLEGATE = os.path.join(TMP, 'samplegate.py')
+        try:
+            _, body = self.d.go_request(self.s, {'plans': [plan], 'drive_items': [{'unit': 'rytm', 'path': '/~T DL'}]})
+        finally:
+            daemon.SAMPLEGATE = saved
+        self.assertIn('+DRIVE on rytm: the run creates /~T DL', body)
+        self.assertIn('AT RELEASE on rytm, however the run ends: each removed', body)
+
     def test_release_asks_for_stock(self):
         subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
                        env=self.s.env(), capture_output=True)
