@@ -1904,6 +1904,80 @@ class InProcess(unittest.TestCase):
         handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], 'rytm.handoff.json')))
         self.assertIn('+Drive /~T DL NOT ALL REMOVED', handoff['note'])
 
+    def test_mods_items_rules(self):
+        saved = daemon.MODSGATE
+        daemon.MODSGATE = os.path.join(TMP, 'modsgate.py')
+        try:
+            self.assertEqual(daemon.drive_items({'drive_items': [
+                {'unit': 'rytm', 'path': '/mods/~T NAV/'}, {'unit': 'rytm', 'path': '/mods/~T NAV'},
+                {'unit': 'rytm', 'path': '/mods/~T NAV/~T A/~T B'},
+                {'unit': 'rytm', 'path': '/mods/~T NAV/~T x-0.1.elemod'}]}),
+                {'rytm': ['/mods/~T NAV', '/mods/~T NAV/~T A/~T B', '/mods/~T NAV/~T x-0.1.elemod']})
+            for bad in ('/mods', '/mods/~T NAV/~T A/~T B/~T C', '/mods/DRUMS', '/mods/~T NAV/FX',
+                        '/mods/~T nav', '/mods/~T NAV/..', '/mods/..', '/mods/~T x-0.1.elemod',
+                        '/mods/x-0.1.elemod', '/mods/~T NAV/x-0.1.elemod', '/mods/active',
+                        '/mods//~T NAV', '/mods/~T WAY TOO LONG X'):
+                with self.assertRaisesRegex(daemon.Refused, 'not a /mods test item|modsgate'):
+                    daemon.drive_items({'drive_items': [{'unit': 'rytm', 'path': bad}]})
+            daemon.MODSGATE = None
+            with self.assertRaisesRegex(daemon.Refused, 'tools.modsgate is not set'):
+                daemon.drive_items({'drive_items': [{'unit': 'rytm', 'path': '/mods/~T NAV'}]})
+        finally:
+            daemon.MODSGATE = saved
+        self.assertEqual(daemon.mods_rows('~T NAV/ 0\ndrive-hello-0.1.elemod 1734\nactive 30\n'),
+                         [('~T NAV', True), ('drive-hello-0.1.elemod', False), ('active', False)])
+
+    def test_release_removes_mods_items(self):
+        """Release removes the /mods items the session's go named, deepest first and only ~T items,
+        keeps a folder that holds a non-~T item, and lists /mods."""
+        tree = {'': [('~T NAV', True), ('~T KEEP', True), ('drive-hello-0.1.elemod', False)],
+                '~T NAV': [('~T a-0.1.elemod', False), ('~T A', True), ('~T EMPTY', True)],
+                '~T NAV/~T A': [('~T b-0.1.elemod', False), ('~T B', True)],
+                '~T NAV/~T A/~T B': [('~T c-0.1.elemod', False)], '~T NAV/~T EMPTY': [],
+                '~T KEEP': [('owner-0.1.elemod', False)]}
+        ran = []
+
+        def fake(cmd, **kw):
+            args = cmd[cmd.index(daemon.MODSGATE) + 3:]
+            ran.append(tuple(args))
+            if args[0] == 'ls':
+                rel = args[1] if len(args) > 1 else ''
+                rows = tree.get(rel, [])
+                return subprocess.CompletedProcess(cmd, 0, ''.join('%s%s 0\n' % (n, '/' if d else '')
+                                                                   for n, d in rows), '')
+            rel = args[1]
+            parent, name = rel.rsplit('/', 1) if '/' in rel else ('', rel)
+            tree[parent] = [r for r in tree[parent] if r[0] != name]
+            return subprocess.CompletedProcess(cmd, 0, 'DELETED /mods/%s\n' % rel, '')
+        saved = daemon.MODSGATE, daemon.subprocess.run
+        daemon.MODSGATE = os.path.join(TMP, 'modsgate.py')
+        with open(daemon.MODSGATE, 'w') as fh:
+            fh.write('# stand-in\n')
+        self.d.check_connected = lambda unit, target: None
+        self.d.approvals['ap-test'] = dict(session=self.s.sid, items=[], created=time.time(),
+                                           expires=time.time() + 60, text='',
+                                           drive={'rytm': ['/mods/~T NAV', '/mods/~T KEEP']})
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        real_run = daemon.subprocess.run
+        daemon.subprocess.run = lambda cmd, **kw: (fake(cmd, **kw) if daemon.MODSGATE in cmd
+                                                   else real_run(cmd, **kw))
+        try:
+            with self.assertRaisesRegex(daemon.Refused, 'not all removed, so the claim is kept'):
+                self.d.t_release(self.s, {'unit': 'rytm', 'note': 'x'})
+        finally:
+            daemon.MODSGATE, daemon.subprocess.run = saved
+            del self.d.check_connected
+        removes = [a[1] for a in ran if a[0] == 'rm']
+        self.assertEqual(removes, ['~T NAV/~T a-0.1.elemod', '~T NAV/~T A/~T b-0.1.elemod',
+                                   '~T NAV/~T A/~T B/~T c-0.1.elemod', '~T NAV/~T A/~T B', '~T NAV/~T A',
+                                   '~T NAV/~T EMPTY', '~T NAV'])
+        self.assertNotIn('~T KEEP', removes)             # holds an owner file: kept
+        self.assertNotIn('drive-hello-0.1.elemod', removes)
+        self.assertEqual(tree[''], [('~T KEEP', True), ('drive-hello-0.1.elemod', False)])
+        self.assertEqual(ran[-1], ('ls',))               # /mods listed last
+        self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
+
     @needs_runner
     def test_go_names_drive_items(self):
         plan = os.path.join(PLANS, 'menus.txt')

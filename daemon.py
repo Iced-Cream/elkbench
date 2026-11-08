@@ -328,11 +328,35 @@ def slot_numbers(spec):
 DRIVE_NAME = re.compile(r'~T [A-Z0-9 +\-=&/#@?%$~]{1,12}')   # a ~T name, at most 15 characters
 
 
+MODS_DEPTH = 3                            # ~T folders below /mods the Drive Loader takes
+MODS_FOLDER = re.compile(r'~T [A-Z0-9 +\-=&#@?%$~]{1,12}')            # a ~T folder below /mods
+MODS_FILE = re.compile(r'~T [A-Za-z0-9 +\-=&#@?%$~._]{1,55}\.elemod')  # a ~T mod file below them
+
+
+def mods_item(path):
+    """A /mods item a run creates and its release removes (drive_items): `~T` folders 1 to 3 deep,
+    the last of which may be a `~T ...elemod` file, as the write policy allows them
+    (check_mods_path, check_mods_dir). -> its path below /mods, or None."""
+    parts = path.split('/')
+    if len(parts) < 3 or parts[:2] != ['', 'mods']:
+        return None
+    below = parts[2:]
+    if below[-1].endswith('.elemod'):
+        folders, ok = below[:-1], bool(MODS_FILE.fullmatch(below[-1])) and len(below) > 1
+    else:
+        folders, ok = below, True
+    if not ok or not folders or len(folders) > MODS_DEPTH or \
+            not all(MODS_FOLDER.fullmatch(f) for f in folders):
+        return None
+    return '/'.join(below)
+
+
 def drive_items(a):
     """approval_text / approve_plan `drive_items` -> {unit: [path, ...]}: the +Drive folders and
-    files a run creates on each unit and its release removes, each one `/~T NAME` at the root
-    (owner, 2026-11-07: no shared +Drive fixtures; a run uploads its own ~T items and its release
-    removes them, as it clears the test slots). Refused for anything else."""
+    files a run creates on each unit and its release removes (owner, 2026-11-07: no shared +Drive
+    fixtures; a run uploads its own ~T items and its release removes them, as it clears the test
+    slots). Each is `/~T NAME` at the sample store's root (samplegate), or a `~T` folder or file
+    below /mods, 1 to 3 folders deep (modsgate; owner 2026-11-08). Refused for anything else."""
     out = {}
     for d in a.get('drive_items') or []:
         u, path = (d or {}).get('unit'), ((d or {}).get('path') or '').rstrip('/')
@@ -340,16 +364,36 @@ def drive_items(a):
             raise Refused('drive_items: unknown unit %r' % u)
         if not UNITS[u].get('drive'):
             raise Refused('drive_items: the %s has no +Drive sample tool here (only the Rytm)' % u)
-        if not SAMPLEGATE:
-            raise Refused('drive_items: tools.samplegate is not set in config.toml, so the release '
-                          'could not remove them')
-        name = path[1:] if path.startswith('/') else ''
-        if not DRIVE_NAME.fullmatch(name) or '/' in name:
-            raise Refused('drive_items: %r is not a +Drive root item named "~T NAME" (one level, A-Z, '
-                          '0-9, space, at most 15 characters): the release removes root items with all '
-                          'they hold' % path)
+        if path.startswith('/mods/') or path == '/mods':
+            if not MODSGATE:
+                raise Refused('drive_items: tools.modsgate is not set in config.toml, so the release '
+                              'could not remove /mods items')
+            if mods_item(path) is None:
+                raise Refused('drive_items: %r is not a /mods test item: "~T NAME" folders 1 to %d deep '
+                              '(A-Z, 0-9, space, at most 15 characters), the last one may be a '
+                              '"~T name.elemod" file; the release removes it with the ~T items it holds'
+                              % (path, MODS_DEPTH))
+        else:
+            if not SAMPLEGATE:
+                raise Refused('drive_items: tools.samplegate is not set in config.toml, so the release '
+                              'could not remove them')
+            name = path[1:] if path.startswith('/') else ''
+            if not DRIVE_NAME.fullmatch(name) or '/' in name:
+                raise Refused('drive_items: %r is not a +Drive root item named "~T NAME" (one level, A-Z, '
+                              '0-9, space, at most 15 characters): the release removes root items with all '
+                              'they hold' % path)
         if path not in out.setdefault(u, []):
             out[u].append(path)
+    return out
+
+
+def mods_rows(ls_text):
+    """modsgate `ls` output ('NAME/ SIZE' for a folder, 'NAME SIZE' for a file) -> [(name, is_folder)]."""
+    out = []
+    for line in ls_text.splitlines():
+        w = line.rstrip().rsplit(' ', 1)
+        if len(w) == 2 and w[1].isdigit() and w[0]:
+            out.append((w[0][:-1], True) if w[0].endswith('/') else (w[0], False))
     return out
 
 
@@ -549,6 +593,7 @@ def load_config(path=CONFIG):
         person=c.get('person') or 'the person at this PC',
         elklock=t.get('elklock') or os.path.join(HERE, 'elklock', 'elklock.py'),
         analoghealth=t.get('analoghealth'), digihealth=t.get('digihealth'), samplegate=t.get('samplegate'),
+        modsgate=t.get('modsgate'), modsgate_elekloader=t.get('modsgate_elekloader'),
         analog_emu=t.get('analog_emu'), digiemu=t.get('digiemu'), digiemu_python=t.get('digiemu_python') or [sys.executable], elkflash=t.get('elkflash'), usb_audio=t.get('usb_audio') or os.path.join(HERE, 'audio'),
         obtr=os.path.join(HERE, 'obtr.py'), audio_python=t.get('audio_python') or [sys.executable],
         approval_fallback=c.get('approval_fallback') or 'popup',
@@ -574,6 +619,8 @@ ANALOGHEALTH = CFG['analoghealth']
 RUNNER = os.path.join(ANALOGHEALTH, 'tools', 'analogrun.py') if ANALOGHEALTH else None
 DIGIHEALTH = CFG['digihealth']            # a digihealth tree with tools/digirun.py (Digitone)
 SAMPLEGATE = CFG['samplegate']            # samplegate.py: the Rytm's +Drive sample store (drive_items)
+MODSGATE = CFG['modsgate']                # modsgate.py: the Rytm's +Drive /mods folder (drive_items)
+MODSGATE_ELEKLOADER = CFG['modsgate_elekloader']   # the elekloader tree modsgate runs (ELEKLOADER)
 ANALOG_EMU = CFG['analog_emu']            # folder with analog-emu's rytm.exe and a4.exe
 DIGIEMU = CFG['digiemu']                  # a digiemu checkout (emu.fwcheck)
 DIGIEMU_PY = CFG['digiemu_python']        # its Python; ['wsl', '~/venv/bin/python'] runs it in WSL
@@ -1971,6 +2018,105 @@ class Daemon:
         self.save_approvals()
 
     def remove_drive_items(self, s, u, paths):
+        """At release: the sample store's root items (remove_sample_items) and the /mods items
+        (remove_mods_items) a go named. -> (ok, lines)"""
+        mods = [p for p in paths if p.startswith('/mods/')]
+        samples = [p for p in paths if p not in mods]
+        ok, lines = True, []
+        for part, fn in ((samples, self.remove_sample_items), (mods, self.remove_mods_items)):
+            if part:
+                k, more = fn(s, u, part)
+                ok, lines = ok and k, lines + more
+        return ok, lines
+
+    def remove_mods_items(self, s, u, paths):
+        """At release: remove each /mods item in `paths` (a ~T file, or a ~T folder with the ~T files
+        and folders it holds, deepest first) through modsgate, which asks the local write policy
+        for each; a non-~T item inside is never removed (its folder stays, and the release says
+        so). Then list /mods to show them gone. Nothing else in /mods is entered or removed.
+        -> (ok, lines)"""
+        try:
+            self.check_connected(u, 'hardware')
+            gate = need(MODSGATE, 'modsgate', 'the +Drive /mods tool (modsgate.py)')
+        except Refused as e:
+            return False, ['/mods items not removed: %s' % e]
+        folder = os.path.join(s.folder(u), 'release-mods-%s' % time.strftime('%H%M%S'))
+        os.makedirs(folder, exist_ok=True)
+        port = self.busy_port(u, 'hardware', 'release: remove the run\'s /mods items')
+        log, lines = [], []
+        env = dict(s.env())
+        if MODSGATE_ELEKLOADER:
+            env['ELEKLOADER'] = MODSGATE_ELEKLOADER
+
+        def run(*args):
+            r = subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, gate, '--port',
+                                UNITS[u]['port']] + list(args), cwd=os.path.dirname(os.path.abspath(gate)),
+                               env=env, capture_output=True, text=True, encoding='utf-8',
+                               errors='replace', timeout=300, **NOWIN)
+            log.append('$ modsgate %s\n%s%s' % (' '.join(args), r.stdout, r.stderr))
+            return r
+
+        def listing(rel):
+            r = run('ls', rel) if rel else run('ls')
+            return None if r.returncode else mods_rows(r.stdout)
+
+        def remove(rel, is_folder):
+            """-> True when rel and everything below it is gone."""
+            gone = True
+            if is_folder:
+                rows = listing(rel)
+                if rows is None:
+                    lines.append('/mods/%s not listed' % rel)
+                    return False
+                for name, sub in rows:
+                    if not name.startswith('~T '):
+                        lines.append('/mods/%s/%s is not a ~T item: kept, so /mods/%s stays'
+                                     % (rel, name, rel))
+                        gone = False
+                    elif not remove(rel + '/' + name, sub):
+                        gone = False
+                if not gone:
+                    return False
+            r = run('rm', rel)
+            if r.returncode:
+                lines.append('/mods/%s not removed (%s)' % (
+                    rel, 'the write policy refused' if r.returncode == 3 else 'exit %d' % r.returncode))
+                return False
+            lines.append('removed /mods/%s' % rel)
+            return True
+        try:
+            for p in paths:
+                rel = mods_item(p)
+                parent, name = rel.rsplit('/', 1) if '/' in rel else ('', rel)
+                rows = listing(parent)
+                if rows is None:
+                    lines.append('%s: its folder is not on the +Drive' % p)
+                    continue
+                here = dict(rows)
+                if name in here:
+                    remove(rel, here[name])
+                else:
+                    lines.append('%s was not on the +Drive' % p)
+            left = []
+            for p in paths:
+                rel = mods_item(p)
+                parent, name = rel.rsplit('/', 1) if '/' in rel else ('', rel)
+                rows = listing(parent)
+                if rows is not None and name in dict(rows):
+                    left.append(p)
+            top = listing('')
+            if top is None:
+                return False, lines + ['modsgate ls /mods after the removal failed']
+            lines.append('/mods now: %s' % (', '.join(n + ('/' if d else '') for n, d in top) or 'empty'))
+            if left:
+                return False, lines + ['still in /mods: %s' % ', '.join(left)]
+            return True, lines + ['%s gone from /mods (ls)' % ', '.join(paths)]
+        finally:
+            port.release()
+            with open(os.path.join(folder, 'steps.log'), 'a', encoding='utf-8') as fh:
+                fh.write('\n'.join(log) + '\n')
+
+    def remove_sample_items(self, s, u, paths):
         """At release: remove each +Drive root item in `paths` with everything below it (samplegate
         rm and rmdir, which ask the local write policy), then list the root to show them gone.
         Nothing else on the +Drive is entered or removed. -> (ok, lines)"""
