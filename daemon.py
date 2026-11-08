@@ -2097,8 +2097,9 @@ class Daemon:
                 fh.write('\n'.join(log) + '\n')
 
     def remove_drive_items(self, s, u, paths):
-        """At release: the sample store's root items (remove_sample_items) and the /mods items
-        (remove_mods_items) a go named. -> (ok, lines)"""
+        """At release: the sample store's root items (remove_sample_items: samplegate, then the
+        +Drive root listed) and the /mods items (remove_mods_items: modsgate, then /mods listed by
+        the Drive Loader; stock cannot list /mods) a go named. -> (ok, lines)"""
         mods = [p for p in paths if p.startswith('/mods/')]
         samples = [p for p in paths if p not in mods]
         ok, lines = True, []
@@ -2447,10 +2448,20 @@ class Daemon:
                             'backed up to the run folder and erased (data clear), then listed to show them empty'
                             % (u, slot_text(UNITS[u]['clear_at_release'])))
         for u, paths in sorted(drive_items(a).items()):
+            mods = [p for p in paths if p.startswith('/mods/')]
+            root = [p for p in paths if p not in mods]
+            how = []
+            if root:
+                how.append('%s each removed with all it holds (samplegate rm/rmdir), then the +Drive root '
+                           'listed to show them gone' % ', '.join(root))
+            if mods:
+                how.append('%s each removed with the ~T items it holds (modsgate rm, the write policy asked '
+                           'for each), then /mods listed by the Drive Loader\'s own listing (modsgate ls) to '
+                           'show them gone; stock cannot list /mods, so the run removes them before its '
+                           'last flash (the stock restore)' % ', '.join(mods))
             text.append('+DRIVE on %s: the run creates %s (its own ~T items; nothing else on the +Drive is '
-                        'used). AT RELEASE on %s, however the run ends: each removed with all it holds '
-                        '(samplegate rm/rmdir), then the +Drive root listed to show them gone'
-                        % (u, ', '.join(paths), u))
+                        'used). AT RELEASE on %s, however the run ends: %s'
+                        % (u, ', '.join(paths), u, '; '.join(how)))
         purpose = (a.get('purpose') or '').strip() or '(no purpose given)'
         body = ('An AI session asks for one go for this hardware run.\n\nSession %s (%s)\n'
                 'Purpose: %s\n\n%s\n\nEach item runs once; the go expires in %d h.\n'
@@ -4856,7 +4867,9 @@ TOOLS = [
     ('release', 'Release units: writes the elklock handoff note and a test-log row in the unit\'s runs folder. '
                 'Asks for the stock OS back first. Where the unit sets clear_at_release, backs up and erases '
                 'those test slots first and lists them empty; removes the +Drive ~T items this session\'s '
-                'goes named (drive_items) and lists the +Drive root.',
+                'goes named (drive_items): +Drive root items by samplegate, then the root listed; /mods items '
+                'by modsgate, then /mods listed by the Drive Loader (stock cannot list /mods, so a run '
+                'removes those before its stock restore).',
      S(unit={'type': ['string', 'array'], 'items': {'type': 'string'}, 'req': True},
        note={'type': 'string', 'req': True, 'description': 'state left: OS, project, menus'},
        accept_non_stock={'type': 'boolean', 'description': 'leave a non-stock OS on purpose (say why in note)'},
@@ -4876,7 +4889,7 @@ TOOLS = [
            'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
        recall_restores=RESTORES(),
        drive_items={'type': 'array', 'items': {'type': 'object', 'properties': {
-           'unit': {'type': 'string'}, 'path': {'type': 'string', 'description': '/~T NAME at the +Drive root'}}},
+           'unit': {'type': 'string'}, 'path': {'type': 'string', 'description': '/~T NAME at the +Drive root, or a ~T folder or file below /mods'}}},
            'description': 'the +Drive ~T folders and files the run creates (Rytm); the release removes them'},
        text_id={'type': 'string', 'description': 'from approval_text: refuse if the request changed since'})),
     ('approval_text', 'The go request approve_plan would make for the same arguments, word for word, and '
@@ -4887,7 +4900,7 @@ TOOLS = [
            'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
        recall_restores=RESTORES(),
        drive_items={'type': 'array', 'items': {'type': 'object', 'properties': {
-           'unit': {'type': 'string'}, 'path': {'type': 'string', 'description': '/~T NAME at the +Drive root'}}},
+           'unit': {'type': 'string'}, 'path': {'type': 'string', 'description': '/~T NAME at the +Drive root, or a ~T folder or file below /mods'}}},
            'description': 'the +Drive ~T folders and files the run creates (Rytm); the release removes them'})),
     ('check_plan', 'The plan checker, in seconds and without an emulator: a start check, what each section '
                    'proves (`say proves KIND`), listen format, build and reference rules; and whether a go '

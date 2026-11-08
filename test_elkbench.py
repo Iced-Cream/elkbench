@@ -2077,7 +2077,41 @@ class InProcess(unittest.TestCase):
         finally:
             daemon.SAMPLEGATE = saved
         self.assertIn('+DRIVE on rytm: the run creates /~T DL', body)
-        self.assertIn('AT RELEASE on rytm, however the run ends: each removed', body)
+        self.assertIn('AT RELEASE on rytm, however the run ends: /~T DL each removed with all it holds '
+                      '(samplegate rm/rmdir), then the +Drive root listed to show them gone', body)
+        self.assertNotIn('modsgate', body)
+
+    @needs_runner
+    def test_go_names_mods_drive_items(self):
+        """/mods items: modsgate and the loader's /mods listing, removed before the stock restore;
+        +Drive root items keep the samplegate wording."""
+        plan = os.path.join(PLANS, 'menus.txt')
+        self.fake_pass(self.d.plan_info(plan))
+        saved = daemon.SAMPLEGATE, daemon.MODSGATE
+        daemon.SAMPLEGATE = os.path.join(TMP, 'samplegate.py')
+        daemon.MODSGATE = os.path.join(TMP, 'modsgate.py')
+        try:
+            _, body = self.d.go_request(self.s, {'plans': [plan], 'drive_items': [
+                {'unit': 'rytm', 'path': '/~T DL'}, {'unit': 'rytm', 'path': '/mods/~T NAV'}]})
+            _, only = self.d.go_request(self.s, {'plans': [plan], 'drive_items': [
+                {'unit': 'rytm', 'path': '/mods/~T NAV'}]})
+        finally:
+            daemon.SAMPLEGATE, daemon.MODSGATE = saved
+        self.assertIn('+DRIVE on rytm: the run creates /~T DL, /mods/~T NAV', body)
+        self.assertIn('/~T DL each removed with all it holds (samplegate rm/rmdir), then the +Drive root '
+                      'listed to show them gone; /mods/~T NAV each removed with the ~T items it holds '
+                      '(modsgate rm, the write policy asked for each), then /mods listed by the Drive '
+                      'Loader\'s own listing (modsgate ls) to show them gone; stock cannot list /mods, so '
+                      'the run removes them before its last flash (the stock restore)', body)
+        self.assertNotIn('samplegate', only)
+        self.assertNotIn('+Drive root listed', only)
+        self.assertIn('/mods listed by the Drive Loader', only)
+
+    def test_release_tool_text_names_mods(self):
+        desc = dict((t[0], t[1]) for t in daemon.TOOLS)['release']
+        self.assertIn('+Drive root items by samplegate, then the root listed', desc)
+        self.assertIn('/mods items by modsgate, then /mods listed by the Drive Loader', desc)
+        self.assertIn('stock cannot list /mods', desc)
 
     def test_release_asks_for_stock(self):
         subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
