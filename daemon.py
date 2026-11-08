@@ -389,6 +389,27 @@ def drive_items(a):
     return out
 
 
+MODS_LIST_TRUST = 254                     # a /mods listing this long may be cut (the policy's)
+
+
+def claim_mods_items(u):
+    """What the current claim of `u` made in /mods and has not removed, from the write policy's
+    manifest (<elklock DIR>\\manifests\\<claim nonce>.json, written by modsgate before each put):
+    -> ([its top ~T folders, each removed with the ~T items it holds], [its files at the top])."""
+    nonce = (elklock.holder(u) or {}).get('nonce')
+    if not nonce:
+        return [], []
+    try:
+        with open(os.path.join(elklock.DIR, 'manifests', '%s.json' % nonce), encoding='utf-8') as fh:
+            m = json.load(fh)
+    except (OSError, ValueError):
+        return [], []
+    live = lambda d: sorted(k for k, v in (d or {}).items() if not (v or {}).get('removed'))  # noqa: E731
+    folders = ['/mods/' + k for k in live(m.get('folders')) if '/' not in k and mods_item('/mods/' + k)]
+    files = ['/mods/' + k for k in live(m.get('files')) if '/' not in k]
+    return folders, files
+
+
 def mods_rows(ls_text):
     """modsgate `ls` output ('NAME/ SIZE' for a folder, 'NAME SIZE' for a file) -> [(name, is_folder)]."""
     out = []
@@ -1951,9 +1972,15 @@ class Daemon:
         drive = {}
         for u in mine:
             paths = self.drive_to_remove(s, u)
-            if not paths:
+            # and what this claim made in /mods (the write policy's manifest), named in a go or not
+            folders, files = claim_mods_items(u)
+            paths += [p for p in folders if p not in paths]
+            if not paths and not files:
                 continue
-            ok, lines = self.remove_drive_items(s, u, paths)
+            ok, lines = self.remove_drive_items(s, u, paths) if paths else (True, [])
+            if files:
+                k, more = self.remove_manifest_files(s, u, files)
+                ok, lines, paths = ok and k, lines + more, paths + files
             if not ok and not a.get('accept_drive_left'):
                 raise Refused('%s: the run\'s +Drive items are not all removed, so the claim is kept: %s. Fix '
                               'it and release again, or say why in the note and pass accept_drive_left'
@@ -2018,6 +2045,56 @@ class Daemon:
                 if g.get('session') == s.sid and (g.get('drive') or {}).get(u):
                     g.setdefault('drive_done', {})[u] = time.time()
         self.save_approvals()
+
+    def remove_manifest_files(self, s, u, paths):
+        """At release: remove the files at the top of /mods this claim created (claim_mods_items:
+        the write policy's manifest; modsgate asks the policy again for each, which allows only
+        this claim's), then list /mods and name any of them left behind. Nothing else in /mods is
+        touched. -> (ok, lines)"""
+        try:
+            self.check_connected(u, 'hardware')
+            gate = need(MODSGATE, 'modsgate', 'the +Drive /mods tool (modsgate.py)')
+        except Refused as e:
+            return False, ['/mods files this claim created not removed: %s; left behind: %s'
+                           % (e, ', '.join(paths))]
+        folder = os.path.join(s.folder(u), 'release-mods-%s' % time.strftime('%H%M%S'))
+        os.makedirs(folder, exist_ok=True)
+        port = self.busy_port(u, 'hardware', 'release: remove the /mods files this claim created')
+        log, lines = [], []
+        env = dict(s.env())
+        env.setdefault('ELKLOCK', ELKLOCK)
+        if MODSGATE_ELEKLOADER:
+            env['ELEKLOADER'] = MODSGATE_ELEKLOADER
+
+        def run(*args):
+            r = subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, gate, '--port',
+                                UNITS[u]['port']] + list(args), cwd=os.path.dirname(os.path.abspath(gate)),
+                               env=env, capture_output=True, text=True, encoding='utf-8',
+                               errors='replace', timeout=300, **NOWIN)
+            log.append('$ modsgate %s\n%s%s' % (' '.join(args), r.stdout, r.stderr))
+            return r
+        try:
+            for p in paths:
+                r = run('rm', p[len('/mods/'):])
+                lines.append('removed %s' % p if not r.returncode else '%s not removed (%s)' % (
+                    p, 'the write policy refused' if r.returncode == 3 else 'exit %d' % r.returncode))
+            r = run('ls')
+            if r.returncode:
+                return False, lines + ['modsgate ls /mods failed: cannot show %s gone; left behind '
+                                       'unknown' % ', '.join(paths)]
+            rows = mods_rows(r.stdout)
+            names = {n for n, _d in rows}
+            left = [p for p in paths if p[len('/mods/'):] in names]
+            if left:
+                return False, lines + ['/mods left behind: %s' % ', '.join(left)]
+            if len(rows) >= MODS_LIST_TRUST:
+                return False, lines + ['/mods lists %d entries, where a listing may be cut: cannot show '
+                                       '%s gone; left behind unknown' % (len(rows), ', '.join(paths))]
+            return True, lines + ['%s gone from /mods (ls)' % ', '.join(paths)]
+        finally:
+            port.release()
+            with open(os.path.join(folder, 'steps.log'), 'a', encoding='utf-8') as fh:
+                fh.write('\n'.join(log) + '\n')
 
     def remove_drive_items(self, s, u, paths):
         """At release: the sample store's root items (remove_sample_items) and the /mods items

@@ -1980,6 +1980,92 @@ class InProcess(unittest.TestCase):
         self.assertEqual(ran[-1], ('ls',))               # /mods listed last
         self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
 
+    def release_with_manifest(self, tree, manifest, refuse=()):
+        """Claim, write `manifest` as the claim's (as the write policy would), release with a
+        fake modsgate over `tree`; rm of a name in `refuse` exits 3 (the policy). -> (ran, result
+        or the Refused text, the handoff note)."""
+        ran = []
+
+        def fake(cmd, **kw):
+            args = cmd[cmd.index(daemon.MODSGATE) + 3:]
+            ran.append(tuple(args))
+            if args[0] == 'ls':
+                rel = args[1] if len(args) > 1 else ''
+                return subprocess.CompletedProcess(cmd, 0, ''.join('%s%s 0\n' % (n, '/' if d else '')
+                                                                   for n, d in tree.get(rel, [])), '')
+            rel = args[1]
+            if rel in refuse:
+                return subprocess.CompletedProcess(cmd, 3, 'refused (write policy): not this claim\'s\n', '')
+            parent, name = rel.rsplit('/', 1) if '/' in rel else ('', rel)
+            tree[parent] = [r for r in tree[parent] if r[0] != name]
+            return subprocess.CompletedProcess(cmd, 0, 'DELETED /mods/%s\n' % rel, '')
+        saved = daemon.MODSGATE, daemon.subprocess.run
+        daemon.MODSGATE = os.path.join(TMP, 'modsgate.py')
+        with open(daemon.MODSGATE, 'w') as fh:
+            fh.write('# stand-in\n')
+        self.d.check_connected = lambda unit, target: None
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        nonce = daemon.elklock.holder('rytm')['nonce']
+        mpath = os.path.join(daemon.elklock.DIR, 'manifests', '%s.json' % nonce)
+        os.makedirs(os.path.dirname(mpath), exist_ok=True)
+        with open(mpath, 'w', encoding='utf-8') as fh:
+            json.dump(dict(manifest, claim=nonce), fh)
+        real_run = daemon.subprocess.run
+        daemon.subprocess.run = lambda cmd, **kw: (fake(cmd, **kw) if daemon.MODSGATE in cmd
+                                                   else real_run(cmd, **kw))
+        try:
+            try:
+                res = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'x'})
+            except daemon.Refused as e:
+                res = str(e)
+        finally:
+            daemon.MODSGATE, daemon.subprocess.run = saved
+            del self.d.check_connected
+        try:
+            note = json.loads(read(os.path.join(daemon.elklock.DIR, 'rytm.handoff.json')))['note']
+        except (OSError, ValueError):
+            note = ''
+        return ran, res, note
+
+    def test_release_removes_claim_manifest(self):
+        """With no drive_items in any go, release removes what the claim's manifest records: its
+        files at the top and its ~T folders (nested, deepest first); the owner's hellos, an owner
+        folder and an entry marked removed are never touched."""
+        hellos = [('drive-hello-0.1.elemod', False), ('drive-hello-user-0.1.elemod', False)]
+        tree = {'': hellos + [('dl256-001-0.1.elemod', False), ('~T NAV', True), ('DRUMS', True)],
+                '~T NAV': [('~T A', True)], '~T NAV/~T A': [('~T c-0.1.elemod', False)],
+                'DRUMS': [('kick-0.1.elemod', False)]}
+        manifest = {'files': {'dl256-001-0.1.elemod': {'put': 't'}, '~T NAV/~T A/~T c-0.1.elemod': {'put': 't'},
+                              'old-0.1.elemod': {'put': 't', 'removed': 't'}},
+                    'folders': {'~T NAV': {'first': 't'}, '~T NAV/~T A': {'first': 't'}}}
+        ran, res, note = self.release_with_manifest(tree, manifest)
+        removes = [a[1] for a in ran if a[0] == 'rm']
+        self.assertEqual(removes, ['~T NAV/~T A/~T c-0.1.elemod', '~T NAV/~T A', '~T NAV',
+                                   'dl256-001-0.1.elemod'])
+        self.assertEqual(tree[''], hellos + [('DRUMS', True)])
+        self.assertEqual(tree['DRUMS'], [('kick-0.1.elemod', False)])
+        self.assertIn('ok: released rytm', res[0])
+        self.assertIn('/mods/dl256-001-0.1.elemod', note)
+        self.assertFalse(daemon.elklock.holder('rytm'))
+        # the manifest stays for audit after the release
+        self.assertTrue(os.listdir(os.path.join(daemon.elklock.DIR, 'manifests')))
+
+    def test_release_names_mods_left_behind(self):
+        """A manifest file the rm could not remove keeps the claim and is named as left behind."""
+        tree = {'': [('dl256-001-0.1.elemod', False), ('drive-hello-0.1.elemod', False)]}
+        manifest = {'files': {'dl256-001-0.1.elemod': {'put': 't'}}, 'folders': {}}
+        ran, res, _note = self.release_with_manifest(tree, manifest, refuse=('dl256-001-0.1.elemod',))
+        self.assertIn('/mods left behind: /mods/dl256-001-0.1.elemod', res)
+        self.assertIn('claim is kept', res)
+        self.assertNotIn('drive-hello-0.1.elemod', [a[1] for a in ran if a[0] == 'rm'])
+        self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'release', 'rytm', '--note', 'test', '--no-snapshot'],
+                       env=self.s.env(), capture_output=True)
+
+    def test_claim_mods_items_without_claim(self):
+        self.assertEqual(daemon.claim_mods_items('a4'), ([], []))
+
     @needs_runner
     def test_go_names_drive_items(self):
         plan = os.path.join(PLANS, 'menus.txt')
