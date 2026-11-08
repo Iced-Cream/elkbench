@@ -1916,7 +1916,9 @@ class InProcess(unittest.TestCase):
             for bad in ('/mods', '/mods/~T NAV/~T A/~T B/~T C', '/mods/DRUMS', '/mods/~T NAV/FX',
                         '/mods/~T nav', '/mods/~T NAV/..', '/mods/..', '/mods/~T x-0.1.elemod',
                         '/mods/x-0.1.elemod', '/mods/~T NAV/x-0.1.elemod', '/mods/active',
-                        '/mods//~T NAV', '/mods/~T WAY TOO LONG X'):
+                        '/mods//~T NAV', '/mods/~T WAY TOO LONG X', '/mods/~T NAV/~T ..elemod',
+                        '/mods/~T NAV/~T x..elemod', '/mods/~T NAV/~T .x.elemod', '/mods/~T NAV/.build',
+                        '/mods/~T NAV/.armed', '/mods/~T NAV/~T A/active', '/mods/~T .', '/mods/~T NAV/..'):
                 with self.assertRaisesRegex(daemon.Refused, 'not a /mods test item|modsgate'):
                     daemon.drive_items({'drive_items': [{'unit': 'rytm', 'path': bad}]})
             daemon.MODSGATE = None

@@ -342,7 +342,9 @@ def mods_item(path):
         return None
     below = parts[2:]
     if below[-1].endswith('.elemod'):
-        folders, ok = below[:-1], bool(MODS_FILE.fullmatch(below[-1])) and len(below) > 1
+        stem = below[-1][:-len('.elemod')]
+        folders, ok = below[:-1], bool(MODS_FILE.fullmatch(below[-1])) and len(below) > 1 and \
+            not stem[3:].startswith('.') and not stem.endswith('.') and '..' not in stem
     else:
         folders, ok = below, True
     if not ok or not folders or len(folders) > MODS_DEPTH or \
