@@ -70,6 +70,11 @@ SNAPSHOT_DAYS, SNAPSHOT_MAX = 7, 20             # setup snapshots: unused days, 
 OB_CHANNELS = ('Main L', 'Main R', 'Track 1 L', 'Track 1 R', 'Track 2 L', 'Track 2 R', 'Track 3 L',
                'Track 3 R', 'Track 4 L', 'Track 4 R', 'Input L', 'Input R')   # the Digitone's Overbridge order
 DIGI_PARALLEL_MAX = 3                          # digiemu runs one batch may have going at once
+# An emulator's working copies in a batch or session emulator folder (its SD card, ~0.9 GB, its
+# flash, the snapshot it resumed or saved): they go once the emulator is done with them and, from a
+# run that did not pass, after EMU_COPY_DAYS; logs, screenshots and recordings beside them stay
+EMU_COPIES = ('card.img', 'flash.img', 'start.snap', 'setup.snap', 'start.snap.tmp', 'setup.snap.tmp')
+EMU_COPY_DAYS = 2
 DIGI_SNAPSHOT_MAX = 10                          # digiemu setup snapshots kept (a machine and its +Drive)
 DIGI_SAVE_WAIT = 180                            # s digiemu has to save and store a setup snapshot
 AUDIO_WAIT_EMULATOR = 0.5                       # s an emulator twin waits for `wait N audio`
@@ -794,6 +799,24 @@ def stamp(t=None):
     return time.strftime('%Y-%m-%d %H:%M', time.localtime(t or time.time()))
 
 
+def drop_emu_copies(work, older_than=None):
+    """Remove an emulator's working copies (EMU_COPIES) from its folder `work`, with older_than
+    (seconds) only those last written longer ago than that; everything else in it stays.
+    -> bytes freed. A file still open (Windows) stays for the next sweep."""
+    freed = 0
+    for f in EMU_COPIES:
+        p = os.path.join(work, f)
+        try:
+            st = os.stat(p)
+            if older_than is not None and st.st_mtime > time.time() - older_than:
+                continue
+            os.remove(p)
+            freed += st.st_size
+        except OSError:
+            pass
+    return freed
+
+
 # ---- sessions, jobs, approvals ------------------------------------------------------------
 
 class Session:
@@ -990,6 +1013,7 @@ class Daemon:
         self.ports = {}                   # (unit, target) -> PortLock: one user per port
         self.last_midisrv = None          # midisrv's pids at the last hardware job (midi_lines)
         self.emulators = {}               # (session, unit) -> dict(proc, session, build, address)
+        self.prune_guard = threading.Lock()   # one prune_emu_copies sweep at a time
         self.dialog = threading.Lock()
         self.passes_path = os.path.join(STATE, 'emulator-passes.json')
         self.starts_path = os.path.join(STATE, 'emulator-starts.json')
@@ -3106,6 +3130,51 @@ class Daemon:
                     except OSError:
                         pass
 
+    def prune_emu_copies(self):
+        """Emulator working copies (EMU_COPIES) last written over EMU_COPY_DAYS ago go: from the
+        work folders of batch and gate folders in each unit's evidence folder (mostly runs that
+        did not pass, which keep theirs for a look at the emulator's state), and from session
+        emulator folders no running emulator uses. Logs, screenshots and recordings stay.
+        -> bytes freed. One sweep at a time; another call meanwhile returns 0 at once."""
+        if not self.prune_guard.acquire(blocking=False):
+            return 0
+        try:
+            freed, age = 0, EMU_COPY_DAYS * 86400
+            for name, u in UNITS.items():
+                ev = u.get('evidence')
+                if not ev or not os.path.isdir(ev):
+                    continue
+                for sess in os.listdir(ev):
+                    sdir = os.path.join(ev, sess)
+                    if not sess.startswith('mcp-') or not os.path.isdir(sdir):
+                        continue
+                    for b in os.listdir(sdir):
+                        bdir = os.path.join(sdir, b)
+                        if not b.startswith(('gate-', 'batch-')) or not os.path.isdir(bdir):
+                            continue
+                        for w in os.listdir(bdir):
+                            if os.path.isdir(os.path.join(bdir, w)):
+                                freed += drop_emu_copies(os.path.join(bdir, w), age)
+            emus = os.path.join(STATE, 'emulators')
+            busy = {'%s-%s' % (unit, sid[:8]) for (sid, unit), e in list(self.emulators.items())
+                    if e.get('proc') is not None and e['proc'].poll() is None}
+            if os.path.isdir(emus):
+                for w in os.listdir(emus):
+                    if w not in busy and os.path.isdir(os.path.join(emus, w)):
+                        freed += drop_emu_copies(os.path.join(emus, w), age)
+            if freed:
+                self.log_line({'session': 'daemon', 'daemon': 'removed emulator copies over %d days old: %.1f GB'
+                               % (EMU_COPY_DAYS, freed / 1e9)})
+            return freed
+        except OSError:
+            return 0
+        finally:
+            self.prune_guard.release()
+
+    def prune_emu_copies_soon(self):
+        """prune_emu_copies in a thread of its own: a sweep over the evidence folders takes a while."""
+        threading.Thread(target=self.prune_emu_copies, daemon=True).start()
+
     def emu_help(self, unit):
         """This unit's analog-emu --help text ('' without one), read once per binary."""
         exe = os.path.join(ANALOG_EMU or '', UNITS[unit].get('emu_exe') or '')
@@ -4313,6 +4382,7 @@ class Daemon:
         job = Job(s, 'batch', unit, 'emulator', desc)
         folder = os.path.join(s.folder(unit), ('gate-' if gate else 'batch-') + job.id)
         os.makedirs(folder)
+        self.prune_emu_copies_soon()
         write_json(os.path.join(folder, 'batch.json'), dict(
             unit=unit, kind='gate' if gate else 'flash' if flash else 'plan', runs=runs, parallel=parallel,
             seed=seed, minutes=minutes, snapshot=snapshot, kept=kept,
@@ -4558,6 +4628,7 @@ class Daemon:
         work = os.path.join(folder, 'setup-%s' % re.sub(r'\W+', '-', v['name']))
         os.makedirs(work)
         live = os.path.join(work, 'setup.snap')
+        stored = False
         proc, addr, why, din = self.batch_emulator(unit, v['build'], work, minutes, snapshot=None if digi else live,
                                                    din=info['din'], setup_key=key if digi else None)
         try:
@@ -4566,6 +4637,7 @@ class Daemon:
             if digi and proc.get('resumed'):           # digiemu had it, this daemon had lost its .json
                 write_json(store + '.json', {'plan': info['path'], 'setup_until': info['steps'][cut - 1][0],
                                              'run_dir': None, 'time': time.time()})
+                stored = True
                 return None
             plan = self.batch_plan(info, work, 'its setup', sections=info['steps'][:cut])
             guard = v.get('gate') and guards_projects(unit)
@@ -4595,6 +4667,7 @@ class Daemon:
                 os.replace(store + '.tmp', store)
             write_json(store + '.json', {'plan': info['path'], 'setup_until': info['steps'][cut - 1][0],
                                          'run_dir': m.group(1).strip() if m else None, 'time': time.time()})
+            stored = True
             return None
         except subprocess.TimeoutExpired:
             return 'variant %s: its setup had no end after %d min (%s)' % (v['name'], minutes, work)
@@ -4602,6 +4675,8 @@ class Daemon:
             return 'variant %s: could not read its saved projects: %s (%s)' % (v['name'], e, work)
         finally:
             self.end_emulator(proc)
+            if stored:                                 # the store has it: the work folder keeps its logs only
+                drop_emu_copies(work)
 
     def start_key(self, unit, build, chain):
         """What a built-in start's snapshot vouches for: the unit, the emulator binary, the build
@@ -4679,6 +4754,7 @@ class Daemon:
         work = os.path.join(folder, 'start-%s-%s' % (st, key[:8]))
         os.makedirs(work, exist_ok=True)
         live = os.path.join(work, 'start.snap')
+        stored = False
         proc, addr, why, _ = self.batch_emulator(unit, v['build'], work, minutes, snapshot=live)
         try:
             if why:
@@ -4700,11 +4776,14 @@ class Daemon:
             os.replace(store + '.tmp', store)
             write_json(store + '.json', {'start': st, 'plan': v['start_plan'], 'run_dir': work,
                                          'time': time.time()})
+            stored = True
             return None
         except subprocess.TimeoutExpired:
             return 'start %s had no end after %d min (%s)' % (st, minutes, work)
         finally:
             self.end_emulator(proc)
+            if stored:                                 # the store has it: the work folder keeps start.log
+                drop_emu_copies(work)
 
     def batch_run(self, s, unit, flash, minutes, folder, n, v):
         """One run of a batch in its own folder: a fresh emulator of v['build'] on a port of its
@@ -5213,6 +5292,7 @@ def main():
     D.log_line({'session': 'daemon', 'daemon': 'started', 'pid': os.getpid(), 'version': VERSION,
                 'approvals_kept': len(D.open_goes())})
     threading.Thread(target=idle_watch, daemon=True).start()
+    D.prune_emu_copies_soon()
     if CFG['keep_awake']:
         threading.Thread(target=awake_watch, daemon=True).start()
     try:

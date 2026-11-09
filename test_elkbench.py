@@ -1413,6 +1413,76 @@ class InProcess(unittest.TestCase):
         self.assertNotIn(os.path.basename(recent[-2]), left)
         self.assertFalse(os.path.exists(old + '.json'))
 
+    def test_old_emulator_copies_are_pruned(self):
+        ev = daemon.UNITS['rytm']['evidence']
+        now = time.time()
+        old, new = now - (daemon.EMU_COPY_DAYS + 1) * 86400, now - 3600
+
+        def put(folder, name, when):
+            os.makedirs(folder, exist_ok=True)
+            p = os.path.join(folder, name)
+            with open(p, 'wb') as fh:
+                fh.write(b'x' * 10)
+            os.utime(p, (when, when))
+            return p
+        failed = os.path.join(ev, 'mcp-20261101-aaaaaaaa', 'gate-r-000001', 'r03')
+        start = os.path.join(ev, 'mcp-20261101-aaaaaaaa', 'gate-r-000001', 'start-dirty-0123abcd')
+        fresh = os.path.join(ev, 'mcp-20261108-bbbbbbbb', 'batch-r-000002', 'r01')
+        other = os.path.join(ev, 'kept-by-hand', 'r01')
+        gone = [put(failed, f, old) for f in ('card.img', 'flash.img', 'start.snap')] + [put(start, 'card.img', old)]
+        stay = [put(failed, f, old) for f in ('run.log', 'emulator.log', 'after.png', 'take.wav')]
+        stay += [put(fresh, 'card.img', new), put(other, 'card.img', old)]
+        emus = os.path.join(daemon.STATE, 'emulators')
+        idle = put(os.path.join(emus, 'rytm-idle0000'), 'card.img', old)
+        busy = put(os.path.join(emus, 'rytm-%s' % self.s.sid[:8]), 'card.img', old)
+        proc = type('P', (), {'poll': lambda self: None})()
+        self.d.emulators[(self.s.sid, 'rytm')] = dict(proc=proc, session=self.s.sid)
+        try:
+            self.assertEqual(self.d.prune_emu_copies(), 50)
+            self.assertEqual(self.d.prune_emu_copies(), 0)                  # nothing more to take
+        finally:
+            self.d.emulators.clear()
+        for p in gone + [idle]:
+            self.assertFalse(os.path.exists(p), p)
+        for p in stay + [busy]:
+            self.assertTrue(os.path.exists(p), p)
+
+    def test_a_saved_start_leaves_no_emulator_copies(self):
+        folder = tempfile.mkdtemp(dir=TMP)
+        saved = self.d.batch_emulator, self.d.start_steps, self.d.start_key, self.d.end_emulator
+        store = os.path.join(daemon.STATE, 'snapshots', 'start-dirty-%s.snap' % ('f' * 32))
+        for q in (store, store + '.json'):
+            if os.path.exists(q):
+                os.remove(q)
+
+        def emulator(unit, build, work, minutes, snapshot=None, **kw):
+            for f in ('card.img', 'flash.img'):
+                with open(os.path.join(work, f), 'wb') as fh:
+                    fh.write(b'x')
+
+            class Stdin:
+                def write(self, data):
+                    with open(snapshot, 'wb') as fh:
+                        fh.write(b'snap')
+                    with open(os.path.join(work, 'emulator.log'), 'w') as fh:
+                        fh.write('saved %s\n' % snapshot)
+
+                def flush(self):
+                    pass
+            return type('P', (), {'stdin': Stdin()})(), 'tcp:x', None, None
+        self.d.batch_emulator = emulator
+        self.d.start_steps = lambda s, unit, v, addr, work, minutes: open(os.path.join(work, 'start.log'), 'w').close()
+        self.d.start_key = lambda unit, build, chain: 'f' * 64
+        self.d.end_emulator = lambda proc: None
+        try:
+            v = dict(start='dirty', home='dirty', start_chain=[('dirty', 'dirty.txt', [])], build='b.syx', start_plan='p.txt')
+            self.assertIsNone(self.d.batch_start(self.s, 'rytm', v, 5, folder))
+        finally:
+            self.d.batch_emulator, self.d.start_steps, self.d.start_key, self.d.end_emulator = saved
+        work = os.path.join(folder, 'start-dirty-ffffffff')
+        self.assertTrue(os.path.isfile(store))                              # the store keeps the snapshot
+        self.assertEqual(sorted(os.listdir(work)), ['emulator.log', 'start.log'])
+
     def test_digitone_emulator_steps_need_no_claim(self):
         proc = type('P', (), {'poll': lambda self: None, 'pid': 98})()
         ran = []
