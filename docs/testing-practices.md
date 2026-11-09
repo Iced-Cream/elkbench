@@ -45,7 +45,8 @@ reaches the hardware only with something that has already worked in the emulator
   emulator pass, the run pauses until the owner says it is done, and the next plan starts with a
   readback that proves the state the power cycle had to keep (and stops the run if it doesn't).
   Never power cycle by software.
-- Every test plan ends with the restore to stock, and that flash passes in the emulator too.
+- Every test plan ends with the restore to the unit's rest OS (stock, or a base build named in
+  `rest`), and that flash passes in the emulator too.
 - **The emulator's card is not the unit's.** Each emulator run starts from a fresh copy of its
   card, so its project slots say nothing about the unit's. A plan handles the slot it writes as
   it finds it on the unit at run time (empty, or a test item to clear first), and its emulator
@@ -284,9 +285,10 @@ their answer to the client's prompt. A session can't end it itself.
   load. Never save their project yourself.
 - **Global settings**: don't save them. If a test needs a changed setting, change the live
   setting and put it back before release; list it in the handoff note.
-- **Leave the unit on its stock OS** at the end, and say so in the handoff note. If the restore
-  can't run, release with a note that the unit is not on stock and what it is on, ask for the
-  restore at once, and nobody else takes the unit until stock is back or the owner clears it.
+- **Leave the unit on its rest OS** at the end (stock, or the base build the unit's `rest` names),
+  and say which in the handoff note. If the restore can't run, release with a note that the unit
+  is not on its rest OS and what it is on, ask for the restore at once, and nobody else takes the
+  unit until its rest OS is back or the owner clears it.
 - **Remove what the run put on the +Drive.** At release, a run removes every sample folder or
   file it created there, the way the test slots are emptied, and the go request and the handoff
   note list them. There are no shared +Drive fixtures: a run that needs samples uploads its own

@@ -159,8 +159,26 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
 - **Flash plans on hardware**: run_plan writes a hardware twin with `emulator-run =` the
   recorded emulator pass, so testplan's flash gate passes without editing the plan; a pass
   whose OS file differs is refused before the person is asked.
-- **Stock OS last**: release asks for it; a hardware flash records stock or not by sha256
-  against the unit's `stock` files.
+- **Stock or rest OS last**: release asks for it; a hardware flash records stock or not by sha256
+  against the unit's `stock` files. A unit's `rest` files (config.toml, empty by default) are
+  other OSes release accepts, such as the Rytm's base build for Drive Loader tests; the handoff
+  note says "rest OS" for them. `stock` keeps its meaning, so key and stats steps after a rest
+  OS flash are allowed.
+- **Drive Loader steps** (`modsteps.py`, Rytm, needs `tools.modsgate`): `mods-put "~T NAME"
+  FILE...` (makes the ~T folder below /mods, uploads the files; release removes them from the
+  claim's /mods manifest), `mods-active PATH...|none|restore` (the first one in a session saves
+  /mods/active to the evidence folder; `restore` or release writes it back and reads it back byte
+  for byte), `expect-mods N loaded [ID...]` (reads /mods/.status: exactly N `loaded` records,
+  the IDs among them, no `skipped:` line, a `boot:` line; a machine assertion). They run through
+  modsgate and the write policy, on the unit under the claim or on the session's emulator (with
+  a scratch lock folder, so emulator writes never enter the unit claim's manifest). elkbench
+  runs the plan in parts around them, as around a `power-cycle`; a plan with them flashes
+  nothing (reboot with the base flashed over itself in a plan of its own, or a `power-cycle`).
+  The uploaded files' sha256s are part of the pass key, and the go request lists each file,
+  each step and the /mods/active backup. The plan checker refuses mods steps after a stock
+  flash, a malformed one, and a key step after a power cycle that loads a new active without
+  an `expect-mods` before it; it flags a `mods-active` with no reboot in the plan. Batches run
+  such a plan's start runs up to its first mods step, as for power cycles.
 - **No `stats` on remote-only builds**: a plan or steps call with a `stats` step is refused when
   the OS (the plan's flash, the unit's last flash or the emulator's build) is one of the unit's
   `no_stats` files.

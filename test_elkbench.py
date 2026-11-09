@@ -68,14 +68,129 @@ with open(os.path.join(TMP, 'config.toml'), 'w', encoding='utf-8') as fh:
              % (toml_str(os.path.join(TMP, 'evidence')), toml_str(os.path.join(TMP, 'no-starts'))))
     if ANALOGHEALTH:
         fh.write('analoghealth = %s\n' % toml_str(ANALOGHEALTH))
-    fh.write('\n[units.rytm]\nstock = [%s]\nno_stats = [%s]\n' % (
-        toml_str(os.path.join(TMP, 'os', 'stock.syx')), toml_str(os.path.join(TMP, 'os', 'remote-only.syx'))))
+    fh.write('modsgate = %s\n' % toml_str(os.path.join(TMP, 'fake-modsgate.py')))
+    fh.write('\n[units.rytm]\nstock = [%s]\nno_stats = [%s]\nrest = [%s]\n' % (
+        toml_str(os.path.join(TMP, 'os', 'stock.syx')), toml_str(os.path.join(TMP, 'os', 'remote-only.syx')),
+        toml_str(os.path.join(TMP, 'os', 'test-build.syx'))))
+# A stand-in for modsgate.py: /mods as a JSON file (FAKE_MODS), the loader's .status in FAKE_STATUS
+with open(os.path.join(TMP, 'fake-modsgate.py'), 'w', encoding='utf-8') as fh:
+    fh.write('''import json, os, sys
+st = os.environ['FAKE_MODS']
+m = json.load(open(st)) if os.path.exists(st) else {}
+a = sys.argv[sys.argv.index('--port') + 2:]
+op, rest = a[0], a[1:]
+def save():
+    json.dump(m, open(st, 'w'))
+if op == 'ls':
+    pre = rest[0] + '/' if rest else ''
+    names = sorted({k[len(pre):].split('/')[0] + ('/' if '/' in k[len(pre):] else '') for k in m if k.startswith(pre)})
+    for n in names:
+        print('%s %d' % (n, 0 if n.endswith('/') else len(m[pre + n])))
+elif op == 'mkdir':
+    m[rest[0] + '/.dir'] = ''; save()
+elif op == 'put':
+    into = rest[1]
+    for f in rest[2:]:
+        m[into + '/' + os.path.basename(f)] = open(f, 'rb').read().hex()
+    save()
+elif op == 'active':
+    m['active'] = '\\n'.join(rest); save()
+elif op == 'get':
+    body = open(os.environ['FAKE_STATUS']).read() if rest[0] == '.status' else m[rest[0]]
+    open(rest[2], 'w').write(body)
+elif op == 'restore-active':
+    m['active'] = open(rest[0]).read(); save()
+elif op == 'rm':
+    m.pop(rest[0]); save()
+''')
 os.environ['ELKBENCH_CONFIG'] = os.path.join(TMP, 'config.toml')
 os.environ['ELKBENCH_DIR'] = os.path.join(TMP, 'state')
 os.environ['ELKLOCK_DIR'] = os.path.join(TMP, 'locks')
 os.makedirs(os.environ['ELKLOCK_DIR'])
 sys.path.insert(0, HERE)
 import daemon      # noqa: E402
+
+class ModsSteps(unittest.TestCase):
+    """The Drive Loader steps elkbench runs between a plan's parts (modsteps.py), against a stand-in
+    modsgate, and the rest OS release accepts."""
+
+    def setUp(self):
+        self.d = daemon.Daemon()
+        self.s = daemon.Session('test-session-mods', os.getpid(), TMP)
+        self.d.emu_port = lambda s, unit: 'tcp:127.0.0.1:1'
+        self.dir = tempfile.mkdtemp(dir=TMP)
+        os.environ['FAKE_MODS'] = os.path.join(self.dir, 'mods.json')
+        os.environ['FAKE_STATUS'] = os.path.join(self.dir, 'status.txt')
+        with open(os.environ['FAKE_MODS'], 'w') as fh:
+            json.dump({'active': 'OWNER.elemod', 'OWNER.elemod': '00'}, fh)
+        with open(os.path.join(self.dir, 'a.elemod'), 'wb') as fh:
+            fh.write(b'mod')
+
+    def run_step(self, line):
+        return self.d.mods_stage(self.s, 'rytm', 'emulator', line, self.dir)(0, '')
+
+    def mods(self):
+        with open(os.environ['FAKE_MODS']) as fh:
+            return json.load(fh)
+
+    def test_put_active_expect_restore(self):
+        rc, out = self.run_step('mods-put "~T BASE" a.elemod')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('~T BASE/a.elemod', self.mods())
+        rc, out = self.run_step('mods-active "~T BASE/a.elemod"')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('saved /mods/active', out)
+        self.assertEqual(self.mods()['active'], '~T BASE/a.elemod')
+        rc, out = self.run_step('mods-active none')            # a second one saves nothing again
+        self.assertNotIn('saved', out)
+        with open(os.environ['FAKE_STATUS'], 'w') as fh:
+            fh.write('drive-loader route\nboot: 1 us (checks 0, link 0, inits 0)\nmine loaded 0 0\n')
+        self.assertEqual(self.run_step('expect-mods 1 loaded mine')[0], 0)
+        rc, out = self.run_step('expect-mods 2 loaded')
+        self.assertEqual(rc, 1)
+        self.assertIn('expected 2', out)
+        rc, out = self.run_step('mods-active restore')
+        self.assertEqual(rc, 0, out)
+        self.assertEqual(self.mods()['active'], 'OWNER.elemod')
+        self.assertNotIn('rytm', self.s.mods_saved)
+
+    def test_no_active_before_is_removed(self):
+        with open(os.environ['FAKE_MODS'], 'w') as fh:
+            json.dump({}, fh)
+        self.run_step('mods-active none')
+        self.assertIn('active', self.mods())
+        rc, out = self.run_step('mods-active restore')
+        self.assertEqual(rc, 0, out)
+        self.assertNotIn('active', self.mods())
+
+    def test_emulator_writes_use_scratch_locks(self):
+        _cmd, env = self.d.mods_cmd(self.s, 'rytm', 'emulator', 'ls')
+        self.assertNotEqual(env['ELKLOCK_DIR'], os.environ['ELKLOCK_DIR'])
+
+    def test_rest_os(self):
+        rest = daemon.sha256(os.path.join(TMP, 'os', 'test-build.syx'))
+        other = daemon.sha256(os.path.join(TMP, 'os', 'remote-only.syx'))
+        self.assertTrue(self.d.is_rest('rytm', rest))
+        self.assertFalse(self.d.is_rest('rytm', other))
+        self.assertEqual(self.d.os_label('rytm', ('test-build.syx', False, rest)), 'rest OS')
+        self.assertEqual(self.d.os_label('rytm', ('remote-only.syx', False, other)), 'NOT STOCK')
+        self.assertFalse(self.d.is_rest('a4', rest))
+
+    def test_plan_with_mods_steps(self):
+        plan = os.path.join(self.dir, 'p.txt')
+        with open(plan, 'w') as fh:
+            fh.write('format = 1\nname = m\nunit = rytm\n\n[start]\nexpect-screen s\n\n[load]\n'
+                     'say proves setup: mods\nmods-put "~T BASE" a.elemod\nmods-active "~T BASE/a.elemod"\n'
+                     'power-cycle\nexpect-mods 1 loaded\n')
+        try:
+            info = self.d.plan_info(plan)
+        except daemon.Refused as e:
+            self.skipTest('plan_info needs testplan here: %s' % e)
+        self.assertEqual(len(info['mods_steps']), 3)
+        self.assertEqual(len(info['stages']), 4)
+        self.assertEqual([os.path.basename(f) for f, _d, _n in info['mods_files']], ['a.elemod'])
+        self.assertEqual(len(daemon.stage_parts(info['steps'])), 5)
+
 
 needs_runner = unittest.skipUnless(ANALOGHEALTH, 'no analoghealth checkout (ELKBENCH_TEST_ANALOGHEALTH)')
 
@@ -176,7 +291,7 @@ class RestartForNewerCode(unittest.TestCase):
         self.code = os.path.join(TMP, 'code')
         shutil.rmtree(self.code, ignore_errors=True)
         os.makedirs(self.code)
-        for f in ('daemon.py', 'launcher.py', 'batch.py', 'plancheck.py'):
+        for f in ('daemon.py', 'launcher.py', 'batch.py', 'plancheck.py', 'modsteps.py'):
             shutil.copy(os.path.join(HERE, f), self.code)
         shutil.copytree(os.path.join(HERE, 'elklock'), os.path.join(self.code, 'elklock'),
                         ignore=shutil.ignore_patterns('__pycache__'))
@@ -1136,7 +1251,7 @@ class InProcess(unittest.TestCase):
             self.d.plan_info(noread)
         os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
         build = os.path.join(TMP, 'os', 'test-build.syx')
-        with self.assertRaisesRegex(daemon.Refused, 'batches do not power cycle yet'):
+        with self.assertRaisesRegex(daemon.Refused, 'batches do not run those yet'):
             self.d.t_batch(self.s, {'plan': plan, 'variants': [{}], 'build': build})
         self.d.emu_has_snapshots = lambda unit: False
         saved = daemon.ANALOG_EMU, daemon.ELKFLASH
@@ -1145,7 +1260,7 @@ class InProcess(unittest.TestCase):
         # a gate runs only start runs that stop before the first power cycle: a run from a start
         # that must pass (no contrast for it) would reach the power cycle
         self.with_starts(unit)
-        with self.assertRaisesRegex(daemon.Refused, r'start dirty \(must pass\).* would reach the power cycle'):
+        with self.assertRaisesRegex(daemon.Refused, r'start dirty \(must pass\).* would reach a power cycle or mods step'):
             self.d.t_batch(self.s, {'gate': True, 'plans': [plan], 'build': build})
         late = os.path.join(TMP, 'pc-late.txt')
         with open(late, 'w', encoding='utf-8') as fh:
