@@ -1413,6 +1413,76 @@ class InProcess(unittest.TestCase):
         self.assertNotIn(os.path.basename(recent[-2]), left)
         self.assertFalse(os.path.exists(old + '.json'))
 
+    def test_old_emulator_copies_are_pruned(self):
+        ev = daemon.UNITS['rytm']['evidence']
+        now = time.time()
+        old, new = now - (daemon.EMU_COPY_DAYS + 1) * 86400, now - 3600
+
+        def put(folder, name, when):
+            os.makedirs(folder, exist_ok=True)
+            p = os.path.join(folder, name)
+            with open(p, 'wb') as fh:
+                fh.write(b'x' * 10)
+            os.utime(p, (when, when))
+            return p
+        failed = os.path.join(ev, 'mcp-20261101-aaaaaaaa', 'gate-r-000001', 'r03')
+        start = os.path.join(ev, 'mcp-20261101-aaaaaaaa', 'gate-r-000001', 'start-dirty-0123abcd')
+        fresh = os.path.join(ev, 'mcp-20261108-bbbbbbbb', 'batch-r-000002', 'r01')
+        other = os.path.join(ev, 'kept-by-hand', 'r01')
+        gone = [put(failed, f, old) for f in ('card.img', 'flash.img', 'start.snap')] + [put(start, 'card.img', old)]
+        stay = [put(failed, f, old) for f in ('run.log', 'emulator.log', 'after.png', 'take.wav')]
+        stay += [put(fresh, 'card.img', new), put(other, 'card.img', old)]
+        emus = os.path.join(daemon.STATE, 'emulators')
+        idle = put(os.path.join(emus, 'rytm-idle0000'), 'card.img', old)
+        busy = put(os.path.join(emus, 'rytm-%s' % self.s.sid[:8]), 'card.img', old)
+        proc = type('P', (), {'poll': lambda self: None})()
+        self.d.emulators[(self.s.sid, 'rytm')] = dict(proc=proc, session=self.s.sid)
+        try:
+            self.assertEqual(self.d.prune_emu_copies(), 50)
+            self.assertEqual(self.d.prune_emu_copies(), 0)                  # nothing more to take
+        finally:
+            self.d.emulators.clear()
+        for p in gone + [idle]:
+            self.assertFalse(os.path.exists(p), p)
+        for p in stay + [busy]:
+            self.assertTrue(os.path.exists(p), p)
+
+    def test_a_saved_start_leaves_no_emulator_copies(self):
+        folder = tempfile.mkdtemp(dir=TMP)
+        saved = self.d.batch_emulator, self.d.start_steps, self.d.start_key, self.d.end_emulator
+        store = os.path.join(daemon.STATE, 'snapshots', 'start-dirty-%s.snap' % ('f' * 32))
+        for q in (store, store + '.json'):
+            if os.path.exists(q):
+                os.remove(q)
+
+        def emulator(unit, build, work, minutes, snapshot=None, **kw):
+            for f in ('card.img', 'flash.img'):
+                with open(os.path.join(work, f), 'wb') as fh:
+                    fh.write(b'x')
+
+            class Stdin:
+                def write(self, data):
+                    with open(snapshot, 'wb') as fh:
+                        fh.write(b'snap')
+                    with open(os.path.join(work, 'emulator.log'), 'w') as fh:
+                        fh.write('saved %s\n' % snapshot)
+
+                def flush(self):
+                    pass
+            return type('P', (), {'stdin': Stdin()})(), 'tcp:x', None, None
+        self.d.batch_emulator = emulator
+        self.d.start_steps = lambda s, unit, v, addr, work, minutes: open(os.path.join(work, 'start.log'), 'w').close()
+        self.d.start_key = lambda unit, build, chain: 'f' * 64
+        self.d.end_emulator = lambda proc: None
+        try:
+            v = dict(start='dirty', home='dirty', start_chain=[('dirty', 'dirty.txt', [])], build='b.syx', start_plan='p.txt')
+            self.assertIsNone(self.d.batch_start(self.s, 'rytm', v, 5, folder))
+        finally:
+            self.d.batch_emulator, self.d.start_steps, self.d.start_key, self.d.end_emulator = saved
+        work = os.path.join(folder, 'start-dirty-ffffffff')
+        self.assertTrue(os.path.isfile(store))                              # the store keeps the snapshot
+        self.assertEqual(sorted(os.listdir(work)), ['emulator.log', 'start.log'])
+
     def test_digitone_emulator_steps_need_no_claim(self):
         proc = type('P', (), {'poll': lambda self: None, 'pid': 98})()
         ran = []
@@ -1904,6 +1974,168 @@ class InProcess(unittest.TestCase):
         handoff = json.loads(read(os.path.join(os.environ['ELKLOCK_DIR'], 'rytm.handoff.json')))
         self.assertIn('+Drive /~T DL NOT ALL REMOVED', handoff['note'])
 
+    def test_mods_items_rules(self):
+        saved = daemon.MODSGATE
+        daemon.MODSGATE = os.path.join(TMP, 'modsgate.py')
+        try:
+            self.assertEqual(daemon.drive_items({'drive_items': [
+                {'unit': 'rytm', 'path': '/mods/~T NAV/'}, {'unit': 'rytm', 'path': '/mods/~T NAV'},
+                {'unit': 'rytm', 'path': '/mods/~T NAV/~T A/~T B'},
+                {'unit': 'rytm', 'path': '/mods/~T NAV/~T x-0.1.elemod'}]}),
+                {'rytm': ['/mods/~T NAV', '/mods/~T NAV/~T A/~T B', '/mods/~T NAV/~T x-0.1.elemod']})
+            for bad in ('/mods', '/mods/~T NAV/~T A/~T B/~T C', '/mods/DRUMS', '/mods/~T NAV/FX',
+                        '/mods/~T nav', '/mods/~T NAV/..', '/mods/..', '/mods/~T x-0.1.elemod',
+                        '/mods/x-0.1.elemod', '/mods/~T NAV/x-0.1.elemod', '/mods/active',
+                        '/mods//~T NAV', '/mods/~T WAY TOO LONG X', '/mods/~T NAV/~T ..elemod',
+                        '/mods/~T NAV/~T x..elemod', '/mods/~T NAV/~T .x.elemod', '/mods/~T NAV/.build',
+                        '/mods/~T NAV/.armed', '/mods/~T NAV/~T A/active', '/mods/~T .', '/mods/~T NAV/..'):
+                with self.assertRaisesRegex(daemon.Refused, 'not a /mods test item|modsgate'):
+                    daemon.drive_items({'drive_items': [{'unit': 'rytm', 'path': bad}]})
+            daemon.MODSGATE = None
+            with self.assertRaisesRegex(daemon.Refused, 'tools.modsgate is not set'):
+                daemon.drive_items({'drive_items': [{'unit': 'rytm', 'path': '/mods/~T NAV'}]})
+        finally:
+            daemon.MODSGATE = saved
+        self.assertEqual(daemon.mods_rows('~T NAV/ 0\ndrive-hello-0.1.elemod 1734\nactive 30\n'),
+                         [('~T NAV', True), ('drive-hello-0.1.elemod', False), ('active', False)])
+
+    def test_release_removes_mods_items(self):
+        """Release removes the /mods items the session's go named, deepest first and only ~T items,
+        keeps a folder that holds a non-~T item, and lists /mods."""
+        tree = {'': [('~T NAV', True), ('~T KEEP', True), ('drive-hello-0.1.elemod', False)],
+                '~T NAV': [('~T a-0.1.elemod', False), ('~T A', True), ('~T EMPTY', True)],
+                '~T NAV/~T A': [('~T b-0.1.elemod', False), ('~T B', True)],
+                '~T NAV/~T A/~T B': [('~T c-0.1.elemod', False)], '~T NAV/~T EMPTY': [],
+                '~T KEEP': [('owner-0.1.elemod', False)]}
+        ran = []
+
+        def fake(cmd, **kw):
+            args = cmd[cmd.index(daemon.MODSGATE) + 3:]
+            ran.append(tuple(args))
+            if args[0] == 'ls':
+                rel = args[1] if len(args) > 1 else ''
+                rows = tree.get(rel, [])
+                return subprocess.CompletedProcess(cmd, 0, ''.join('%s%s 0\n' % (n, '/' if d else '')
+                                                                   for n, d in rows), '')
+            rel = args[1]
+            parent, name = rel.rsplit('/', 1) if '/' in rel else ('', rel)
+            tree[parent] = [r for r in tree[parent] if r[0] != name]
+            return subprocess.CompletedProcess(cmd, 0, 'DELETED /mods/%s\n' % rel, '')
+        saved = daemon.MODSGATE, daemon.subprocess.run
+        daemon.MODSGATE = os.path.join(TMP, 'modsgate.py')
+        with open(daemon.MODSGATE, 'w') as fh:
+            fh.write('# stand-in\n')
+        self.d.check_connected = lambda unit, target: None
+        self.d.approvals['ap-test'] = dict(session=self.s.sid, items=[], created=time.time(),
+                                           expires=time.time() + 60, text='',
+                                           drive={'rytm': ['/mods/~T NAV', '/mods/~T KEEP']})
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        real_run = daemon.subprocess.run
+        daemon.subprocess.run = lambda cmd, **kw: (fake(cmd, **kw) if daemon.MODSGATE in cmd
+                                                   else real_run(cmd, **kw))
+        try:
+            with self.assertRaisesRegex(daemon.Refused, 'not all removed, so the claim is kept'):
+                self.d.t_release(self.s, {'unit': 'rytm', 'note': 'x'})
+        finally:
+            daemon.MODSGATE, daemon.subprocess.run = saved
+            del self.d.check_connected
+        removes = [a[1] for a in ran if a[0] == 'rm']
+        self.assertEqual(removes, ['~T NAV/~T a-0.1.elemod', '~T NAV/~T A/~T b-0.1.elemod',
+                                   '~T NAV/~T A/~T B/~T c-0.1.elemod', '~T NAV/~T A/~T B', '~T NAV/~T A',
+                                   '~T NAV/~T EMPTY', '~T NAV'])
+        self.assertNotIn('~T KEEP', removes)             # holds an owner file: kept
+        self.assertNotIn('drive-hello-0.1.elemod', removes)
+        self.assertEqual(tree[''], [('~T KEEP', True), ('drive-hello-0.1.elemod', False)])
+        self.assertEqual(ran[-1], ('ls',))               # /mods listed last
+        self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
+
+    def release_with_manifest(self, tree, manifest, refuse=()):
+        """Claim, write `manifest` as the claim's (as the write policy would), release with a
+        fake modsgate over `tree`; rm of a name in `refuse` exits 3 (the policy). -> (ran, result
+        or the Refused text, the handoff note)."""
+        ran = []
+
+        def fake(cmd, **kw):
+            args = cmd[cmd.index(daemon.MODSGATE) + 3:]
+            ran.append(tuple(args))
+            if args[0] == 'ls':
+                rel = args[1] if len(args) > 1 else ''
+                return subprocess.CompletedProcess(cmd, 0, ''.join('%s%s 0\n' % (n, '/' if d else '')
+                                                                   for n, d in tree.get(rel, [])), '')
+            rel = args[1]
+            if rel in refuse:
+                return subprocess.CompletedProcess(cmd, 3, 'refused (write policy): not this claim\'s\n', '')
+            parent, name = rel.rsplit('/', 1) if '/' in rel else ('', rel)
+            tree[parent] = [r for r in tree[parent] if r[0] != name]
+            return subprocess.CompletedProcess(cmd, 0, 'DELETED /mods/%s\n' % rel, '')
+        saved = daemon.MODSGATE, daemon.subprocess.run
+        daemon.MODSGATE = os.path.join(TMP, 'modsgate.py')
+        with open(daemon.MODSGATE, 'w') as fh:
+            fh.write('# stand-in\n')
+        self.d.check_connected = lambda unit, target: None
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        nonce = daemon.elklock.holder('rytm')['nonce']
+        mpath = os.path.join(daemon.elklock.DIR, 'manifests', '%s.json' % nonce)
+        os.makedirs(os.path.dirname(mpath), exist_ok=True)
+        with open(mpath, 'w', encoding='utf-8') as fh:
+            json.dump(dict(manifest, claim=nonce), fh)
+        real_run = daemon.subprocess.run
+        daemon.subprocess.run = lambda cmd, **kw: (fake(cmd, **kw) if daemon.MODSGATE in cmd
+                                                   else real_run(cmd, **kw))
+        try:
+            try:
+                res = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'x'})
+            except daemon.Refused as e:
+                res = str(e)
+        finally:
+            daemon.MODSGATE, daemon.subprocess.run = saved
+            del self.d.check_connected
+        try:
+            note = json.loads(read(os.path.join(daemon.elklock.DIR, 'rytm.handoff.json')))['note']
+        except (OSError, ValueError):
+            note = ''
+        return ran, res, note
+
+    def test_release_removes_claim_manifest(self):
+        """With no drive_items in any go, release removes what the claim's manifest records: its
+        files at the top and its ~T folders (nested, deepest first); the owner's hellos, an owner
+        folder and an entry marked removed are never touched."""
+        hellos = [('drive-hello-0.1.elemod', False), ('drive-hello-user-0.1.elemod', False)]
+        tree = {'': hellos + [('dl256-001-0.1.elemod', False), ('~T NAV', True), ('DRUMS', True)],
+                '~T NAV': [('~T A', True)], '~T NAV/~T A': [('~T c-0.1.elemod', False)],
+                'DRUMS': [('kick-0.1.elemod', False)]}
+        manifest = {'files': {'dl256-001-0.1.elemod': {'put': 't'}, '~T NAV/~T A/~T c-0.1.elemod': {'put': 't'},
+                              'old-0.1.elemod': {'put': 't', 'removed': 't'}},
+                    'folders': {'~T NAV': {'first': 't'}, '~T NAV/~T A': {'first': 't'}}}
+        ran, res, note = self.release_with_manifest(tree, manifest)
+        removes = [a[1] for a in ran if a[0] == 'rm']
+        self.assertEqual(removes, ['~T NAV/~T A/~T c-0.1.elemod', '~T NAV/~T A', '~T NAV',
+                                   'dl256-001-0.1.elemod'])
+        self.assertEqual(tree[''], hellos + [('DRUMS', True)])
+        self.assertEqual(tree['DRUMS'], [('kick-0.1.elemod', False)])
+        self.assertIn('ok: released rytm', res[0])
+        self.assertIn('/mods/dl256-001-0.1.elemod', note)
+        self.assertFalse(daemon.elklock.holder('rytm'))
+        # the manifest stays for audit after the release
+        self.assertTrue(os.listdir(os.path.join(daemon.elklock.DIR, 'manifests')))
+
+    def test_release_names_mods_left_behind(self):
+        """A manifest file the rm could not remove keeps the claim and is named as left behind."""
+        tree = {'': [('dl256-001-0.1.elemod', False), ('drive-hello-0.1.elemod', False)]}
+        manifest = {'files': {'dl256-001-0.1.elemod': {'put': 't'}}, 'folders': {}}
+        ran, res, _note = self.release_with_manifest(tree, manifest, refuse=('dl256-001-0.1.elemod',))
+        self.assertIn('/mods left behind: /mods/dl256-001-0.1.elemod', res)
+        self.assertIn('claim is kept', res)
+        self.assertNotIn('drive-hello-0.1.elemod', [a[1] for a in ran if a[0] == 'rm'])
+        self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'release', 'rytm', '--note', 'test', '--no-snapshot'],
+                       env=self.s.env(), capture_output=True)
+
+    def test_claim_mods_items_without_claim(self):
+        self.assertEqual(daemon.claim_mods_items('a4'), ([], []))
+
     @needs_runner
     def test_go_names_drive_items(self):
         plan = os.path.join(PLANS, 'menus.txt')
@@ -1915,7 +2147,41 @@ class InProcess(unittest.TestCase):
         finally:
             daemon.SAMPLEGATE = saved
         self.assertIn('+DRIVE on rytm: the run creates /~T DL', body)
-        self.assertIn('AT RELEASE on rytm, however the run ends: each removed', body)
+        self.assertIn('AT RELEASE on rytm, however the run ends: /~T DL each removed with all it holds '
+                      '(samplegate rm/rmdir), then the +Drive root listed to show them gone', body)
+        self.assertNotIn('modsgate', body)
+
+    @needs_runner
+    def test_go_names_mods_drive_items(self):
+        """/mods items: modsgate and the loader's /mods listing, removed before the stock restore;
+        +Drive root items keep the samplegate wording."""
+        plan = os.path.join(PLANS, 'menus.txt')
+        self.fake_pass(self.d.plan_info(plan))
+        saved = daemon.SAMPLEGATE, daemon.MODSGATE
+        daemon.SAMPLEGATE = os.path.join(TMP, 'samplegate.py')
+        daemon.MODSGATE = os.path.join(TMP, 'modsgate.py')
+        try:
+            _, body = self.d.go_request(self.s, {'plans': [plan], 'drive_items': [
+                {'unit': 'rytm', 'path': '/~T DL'}, {'unit': 'rytm', 'path': '/mods/~T NAV'}]})
+            _, only = self.d.go_request(self.s, {'plans': [plan], 'drive_items': [
+                {'unit': 'rytm', 'path': '/mods/~T NAV'}]})
+        finally:
+            daemon.SAMPLEGATE, daemon.MODSGATE = saved
+        self.assertIn('+DRIVE on rytm: the run creates /~T DL, /mods/~T NAV', body)
+        self.assertIn('/~T DL each removed with all it holds (samplegate rm/rmdir), then the +Drive root '
+                      'listed to show them gone; /mods/~T NAV each removed with the ~T items it holds '
+                      '(modsgate rm, the write policy asked for each), then /mods listed by the Drive '
+                      'Loader\'s own listing (modsgate ls) to show them gone; stock cannot list /mods, so '
+                      'the run removes them before its last flash (the stock restore)', body)
+        self.assertNotIn('samplegate', only)
+        self.assertNotIn('+Drive root listed', only)
+        self.assertIn('/mods listed by the Drive Loader', only)
+
+    def test_release_tool_text_names_mods(self):
+        desc = dict((t[0], t[1]) for t in daemon.TOOLS)['release']
+        self.assertIn('+Drive root items by samplegate, then the root listed', desc)
+        self.assertIn('/mods items by modsgate, then /mods listed by the Drive Loader', desc)
+        self.assertIn('stock cannot list /mods', desc)
 
     def test_release_asks_for_stock(self):
         subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],

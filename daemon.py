@@ -70,6 +70,11 @@ SNAPSHOT_DAYS, SNAPSHOT_MAX = 7, 20             # setup snapshots: unused days, 
 OB_CHANNELS = ('Main L', 'Main R', 'Track 1 L', 'Track 1 R', 'Track 2 L', 'Track 2 R', 'Track 3 L',
                'Track 3 R', 'Track 4 L', 'Track 4 R', 'Input L', 'Input R')   # the Digitone's Overbridge order
 DIGI_PARALLEL_MAX = 3                          # digiemu runs one batch may have going at once
+# An emulator's working copies in a batch or session emulator folder (its SD card, ~0.9 GB, its
+# flash, the snapshot it resumed or saved): they go once the emulator is done with them and, from a
+# run that did not pass, after EMU_COPY_DAYS; logs, screenshots and recordings beside them stay
+EMU_COPIES = ('card.img', 'flash.img', 'start.snap', 'setup.snap', 'start.snap.tmp', 'setup.snap.tmp')
+EMU_COPY_DAYS = 2
 DIGI_SNAPSHOT_MAX = 10                          # digiemu setup snapshots kept (a machine and its +Drive)
 DIGI_SAVE_WAIT = 180                            # s digiemu has to save and store a setup snapshot
 AUDIO_WAIT_EMULATOR = 0.5                       # s an emulator twin waits for `wait N audio`
@@ -328,11 +333,37 @@ def slot_numbers(spec):
 DRIVE_NAME = re.compile(r'~T [A-Z0-9 +\-=&/#@?%$~]{1,12}')   # a ~T name, at most 15 characters
 
 
+MODS_DEPTH = 3                            # ~T folders below /mods the Drive Loader takes
+MODS_FOLDER = re.compile(r'~T [A-Z0-9 +\-=&#@?%$~]{1,12}')            # a ~T folder below /mods
+MODS_FILE = re.compile(r'~T [A-Za-z0-9 +\-=&#@?%$~._]{1,55}\.elemod')  # a ~T mod file below them
+
+
+def mods_item(path):
+    """A /mods item a run creates and its release removes (drive_items): `~T` folders 1 to 3 deep,
+    the last of which may be a `~T ...elemod` file, as the write policy allows them
+    (check_mods_path, check_mods_dir). -> its path below /mods, or None."""
+    parts = path.split('/')
+    if len(parts) < 3 or parts[:2] != ['', 'mods']:
+        return None
+    below = parts[2:]
+    if below[-1].endswith('.elemod'):
+        stem = below[-1][:-len('.elemod')]
+        folders, ok = below[:-1], bool(MODS_FILE.fullmatch(below[-1])) and len(below) > 1 and \
+            not stem[3:].startswith('.') and not stem.endswith('.') and '..' not in stem
+    else:
+        folders, ok = below, True
+    if not ok or not folders or len(folders) > MODS_DEPTH or \
+            not all(MODS_FOLDER.fullmatch(f) for f in folders):
+        return None
+    return '/'.join(below)
+
+
 def drive_items(a):
     """approval_text / approve_plan `drive_items` -> {unit: [path, ...]}: the +Drive folders and
-    files a run creates on each unit and its release removes, each one `/~T NAME` at the root
-    (owner, 2026-11-07: no shared +Drive fixtures; a run uploads its own ~T items and its release
-    removes them, as it clears the test slots). Refused for anything else."""
+    files a run creates on each unit and its release removes (owner, 2026-11-07: no shared +Drive
+    fixtures; a run uploads its own ~T items and its release removes them, as it clears the test
+    slots). Each is `/~T NAME` at the sample store's root (samplegate), or a `~T` folder or file
+    below /mods, 1 to 3 folders deep (modsgate; owner 2026-11-08). Refused for anything else."""
     out = {}
     for d in a.get('drive_items') or []:
         u, path = (d or {}).get('unit'), ((d or {}).get('path') or '').rstrip('/')
@@ -340,16 +371,57 @@ def drive_items(a):
             raise Refused('drive_items: unknown unit %r' % u)
         if not UNITS[u].get('drive'):
             raise Refused('drive_items: the %s has no +Drive sample tool here (only the Rytm)' % u)
-        if not SAMPLEGATE:
-            raise Refused('drive_items: tools.samplegate is not set in config.toml, so the release '
-                          'could not remove them')
-        name = path[1:] if path.startswith('/') else ''
-        if not DRIVE_NAME.fullmatch(name) or '/' in name:
-            raise Refused('drive_items: %r is not a +Drive root item named "~T NAME" (one level, A-Z, '
-                          '0-9, space, at most 15 characters): the release removes root items with all '
-                          'they hold' % path)
+        if path.startswith('/mods/') or path == '/mods':
+            if not MODSGATE:
+                raise Refused('drive_items: tools.modsgate is not set in config.toml, so the release '
+                              'could not remove /mods items')
+            if mods_item(path) is None:
+                raise Refused('drive_items: %r is not a /mods test item: "~T NAME" folders 1 to %d deep '
+                              '(A-Z, 0-9, space, at most 15 characters), the last one may be a '
+                              '"~T name.elemod" file; the release removes it with the ~T items it holds'
+                              % (path, MODS_DEPTH))
+        else:
+            if not SAMPLEGATE:
+                raise Refused('drive_items: tools.samplegate is not set in config.toml, so the release '
+                              'could not remove them')
+            name = path[1:] if path.startswith('/') else ''
+            if not DRIVE_NAME.fullmatch(name) or '/' in name:
+                raise Refused('drive_items: %r is not a +Drive root item named "~T NAME" (one level, A-Z, '
+                              '0-9, space, at most 15 characters): the release removes root items with all '
+                              'they hold' % path)
         if path not in out.setdefault(u, []):
             out[u].append(path)
+    return out
+
+
+MODS_LIST_TRUST = 254                     # a /mods listing this long may be cut (the policy's)
+
+
+def claim_mods_items(u):
+    """What the current claim of `u` made in /mods and has not removed, from the write policy's
+    manifest (<elklock DIR>\\manifests\\<claim nonce>.json, written by modsgate before each put):
+    -> ([its top ~T folders, each removed with the ~T items it holds], [its files at the top])."""
+    nonce = (elklock.holder(u) or {}).get('nonce')
+    if not nonce:
+        return [], []
+    try:
+        with open(os.path.join(elklock.DIR, 'manifests', '%s.json' % nonce), encoding='utf-8') as fh:
+            m = json.load(fh)
+    except (OSError, ValueError):
+        return [], []
+    live = lambda d: sorted(k for k, v in (d or {}).items() if not (v or {}).get('removed'))  # noqa: E731
+    folders = ['/mods/' + k for k in live(m.get('folders')) if '/' not in k and mods_item('/mods/' + k)]
+    files = ['/mods/' + k for k in live(m.get('files')) if '/' not in k]
+    return folders, files
+
+
+def mods_rows(ls_text):
+    """modsgate `ls` output ('NAME/ SIZE' for a folder, 'NAME SIZE' for a file) -> [(name, is_folder)]."""
+    out = []
+    for line in ls_text.splitlines():
+        w = line.rstrip().rsplit(' ', 1)
+        if len(w) == 2 and w[1].isdigit() and w[0]:
+            out.append((w[0][:-1], True) if w[0].endswith('/') else (w[0], False))
     return out
 
 
@@ -549,6 +621,7 @@ def load_config(path=CONFIG):
         person=c.get('person') or 'the person at this PC',
         elklock=t.get('elklock') or os.path.join(HERE, 'elklock', 'elklock.py'),
         analoghealth=t.get('analoghealth'), digihealth=t.get('digihealth'), samplegate=t.get('samplegate'),
+        modsgate=t.get('modsgate'), modsgate_elekloader=t.get('modsgate_elekloader'),
         analog_emu=t.get('analog_emu'), digiemu=t.get('digiemu'), digiemu_python=t.get('digiemu_python') or [sys.executable], elkflash=t.get('elkflash'), usb_audio=t.get('usb_audio') or os.path.join(HERE, 'audio'),
         obtr=os.path.join(HERE, 'obtr.py'), audio_python=t.get('audio_python') or [sys.executable],
         approval_fallback=c.get('approval_fallback') or 'popup',
@@ -574,6 +647,8 @@ ANALOGHEALTH = CFG['analoghealth']
 RUNNER = os.path.join(ANALOGHEALTH, 'tools', 'analogrun.py') if ANALOGHEALTH else None
 DIGIHEALTH = CFG['digihealth']            # a digihealth tree with tools/digirun.py (Digitone)
 SAMPLEGATE = CFG['samplegate']            # samplegate.py: the Rytm's +Drive sample store (drive_items)
+MODSGATE = CFG['modsgate']                # modsgate.py: the Rytm's +Drive /mods folder (drive_items)
+MODSGATE_ELEKLOADER = CFG['modsgate_elekloader']   # the elekloader tree modsgate runs (ELEKLOADER)
 ANALOG_EMU = CFG['analog_emu']            # folder with analog-emu's rytm.exe and a4.exe
 DIGIEMU = CFG['digiemu']                  # a digiemu checkout (emu.fwcheck)
 DIGIEMU_PY = CFG['digiemu_python']        # its Python; ['wsl', '~/venv/bin/python'] runs it in WSL
@@ -722,6 +797,24 @@ def write_json(p, data):
 
 def stamp(t=None):
     return time.strftime('%Y-%m-%d %H:%M', time.localtime(t or time.time()))
+
+
+def drop_emu_copies(work, older_than=None):
+    """Remove an emulator's working copies (EMU_COPIES) from its folder `work`, with older_than
+    (seconds) only those last written longer ago than that; everything else in it stays.
+    -> bytes freed. A file still open (Windows) stays for the next sweep."""
+    freed = 0
+    for f in EMU_COPIES:
+        p = os.path.join(work, f)
+        try:
+            st = os.stat(p)
+            if older_than is not None and st.st_mtime > time.time() - older_than:
+                continue
+            os.remove(p)
+            freed += st.st_size
+        except OSError:
+            pass
+    return freed
 
 
 # ---- sessions, jobs, approvals ------------------------------------------------------------
@@ -920,6 +1013,7 @@ class Daemon:
         self.ports = {}                   # (unit, target) -> PortLock: one user per port
         self.last_midisrv = None          # midisrv's pids at the last hardware job (midi_lines)
         self.emulators = {}               # (session, unit) -> dict(proc, session, build, address)
+        self.prune_guard = threading.Lock()   # one prune_emu_copies sweep at a time
         self.dialog = threading.Lock()
         self.passes_path = os.path.join(STATE, 'emulator-passes.json')
         self.starts_path = os.path.join(STATE, 'emulator-starts.json')
@@ -1902,9 +1996,15 @@ class Daemon:
         drive = {}
         for u in mine:
             paths = self.drive_to_remove(s, u)
-            if not paths:
+            # and what this claim made in /mods (the write policy's manifest), named in a go or not
+            folders, files = claim_mods_items(u)
+            paths += [p for p in folders if p not in paths]
+            if not paths and not files:
                 continue
-            ok, lines = self.remove_drive_items(s, u, paths)
+            ok, lines = self.remove_drive_items(s, u, paths) if paths else (True, [])
+            if files:
+                k, more = self.remove_manifest_files(s, u, files)
+                ok, lines, paths = ok and k, lines + more, paths + files
             if not ok and not a.get('accept_drive_left'):
                 raise Refused('%s: the run\'s +Drive items are not all removed, so the claim is kept: %s. Fix '
                               'it and release again, or say why in the note and pass accept_drive_left'
@@ -1970,7 +2070,157 @@ class Daemon:
                     g.setdefault('drive_done', {})[u] = time.time()
         self.save_approvals()
 
+    def remove_manifest_files(self, s, u, paths):
+        """At release: remove the files at the top of /mods this claim created (claim_mods_items:
+        the write policy's manifest; modsgate asks the policy again for each, which allows only
+        this claim's), then list /mods and name any of them left behind. Nothing else in /mods is
+        touched. -> (ok, lines)"""
+        try:
+            self.check_connected(u, 'hardware')
+            gate = need(MODSGATE, 'modsgate', 'the +Drive /mods tool (modsgate.py)')
+        except Refused as e:
+            return False, ['/mods files this claim created not removed: %s; left behind: %s'
+                           % (e, ', '.join(paths))]
+        folder = os.path.join(s.folder(u), 'release-mods-%s' % time.strftime('%H%M%S'))
+        os.makedirs(folder, exist_ok=True)
+        port = self.busy_port(u, 'hardware', 'release: remove the /mods files this claim created')
+        log, lines = [], []
+        env = dict(s.env())
+        env.setdefault('ELKLOCK', ELKLOCK)
+        if MODSGATE_ELEKLOADER:
+            env['ELEKLOADER'] = MODSGATE_ELEKLOADER
+
+        def run(*args):
+            r = subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, gate, '--port',
+                                UNITS[u]['port']] + list(args), cwd=os.path.dirname(os.path.abspath(gate)),
+                               env=env, capture_output=True, text=True, encoding='utf-8',
+                               errors='replace', timeout=300, **NOWIN)
+            log.append('$ modsgate %s\n%s%s' % (' '.join(args), r.stdout, r.stderr))
+            return r
+        try:
+            for p in paths:
+                r = run('rm', p[len('/mods/'):])
+                lines.append('removed %s' % p if not r.returncode else '%s not removed (%s)' % (
+                    p, 'the write policy refused' if r.returncode == 3 else 'exit %d' % r.returncode))
+            r = run('ls')
+            if r.returncode:
+                return False, lines + ['modsgate ls /mods failed: cannot show %s gone; left behind '
+                                       'unknown' % ', '.join(paths)]
+            rows = mods_rows(r.stdout)
+            names = {n for n, _d in rows}
+            left = [p for p in paths if p[len('/mods/'):] in names]
+            if left:
+                return False, lines + ['/mods left behind: %s' % ', '.join(left)]
+            if len(rows) >= MODS_LIST_TRUST:
+                return False, lines + ['/mods lists %d entries, where a listing may be cut: cannot show '
+                                       '%s gone; left behind unknown' % (len(rows), ', '.join(paths))]
+            return True, lines + ['%s gone from /mods (ls)' % ', '.join(paths)]
+        finally:
+            port.release()
+            with open(os.path.join(folder, 'steps.log'), 'a', encoding='utf-8') as fh:
+                fh.write('\n'.join(log) + '\n')
+
     def remove_drive_items(self, s, u, paths):
+        """At release: the sample store's root items (remove_sample_items: samplegate, then the
+        +Drive root listed) and the /mods items (remove_mods_items: modsgate, then /mods listed by
+        the Drive Loader; stock cannot list /mods) a go named. -> (ok, lines)"""
+        mods = [p for p in paths if p.startswith('/mods/')]
+        samples = [p for p in paths if p not in mods]
+        ok, lines = True, []
+        for part, fn in ((samples, self.remove_sample_items), (mods, self.remove_mods_items)):
+            if part:
+                k, more = fn(s, u, part)
+                ok, lines = ok and k, lines + more
+        return ok, lines
+
+    def remove_mods_items(self, s, u, paths):
+        """At release: remove each /mods item in `paths` (a ~T file, or a ~T folder with the ~T files
+        and folders it holds, deepest first) through modsgate, which asks the local write policy
+        for each; a non-~T item inside is never removed (its folder stays, and the release says
+        so). Then list /mods to show them gone. Nothing else in /mods is entered or removed.
+        -> (ok, lines)"""
+        try:
+            self.check_connected(u, 'hardware')
+            gate = need(MODSGATE, 'modsgate', 'the +Drive /mods tool (modsgate.py)')
+        except Refused as e:
+            return False, ['/mods items not removed: %s' % e]
+        folder = os.path.join(s.folder(u), 'release-mods-%s' % time.strftime('%H%M%S'))
+        os.makedirs(folder, exist_ok=True)
+        port = self.busy_port(u, 'hardware', 'release: remove the run\'s /mods items')
+        log, lines = [], []
+        env = dict(s.env())
+        if MODSGATE_ELEKLOADER:
+            env['ELEKLOADER'] = MODSGATE_ELEKLOADER
+
+        def run(*args):
+            r = subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, gate, '--port',
+                                UNITS[u]['port']] + list(args), cwd=os.path.dirname(os.path.abspath(gate)),
+                               env=env, capture_output=True, text=True, encoding='utf-8',
+                               errors='replace', timeout=300, **NOWIN)
+            log.append('$ modsgate %s\n%s%s' % (' '.join(args), r.stdout, r.stderr))
+            return r
+
+        def listing(rel):
+            r = run('ls', rel) if rel else run('ls')
+            return None if r.returncode else mods_rows(r.stdout)
+
+        def remove(rel, is_folder):
+            """-> True when rel and everything below it is gone."""
+            gone = True
+            if is_folder:
+                rows = listing(rel)
+                if rows is None:
+                    lines.append('/mods/%s not listed' % rel)
+                    return False
+                for name, sub in rows:
+                    if not name.startswith('~T '):
+                        lines.append('/mods/%s/%s is not a ~T item: kept, so /mods/%s stays'
+                                     % (rel, name, rel))
+                        gone = False
+                    elif not remove(rel + '/' + name, sub):
+                        gone = False
+                if not gone:
+                    return False
+            r = run('rm', rel)
+            if r.returncode:
+                lines.append('/mods/%s not removed (%s)' % (
+                    rel, 'the write policy refused' if r.returncode == 3 else 'exit %d' % r.returncode))
+                return False
+            lines.append('removed /mods/%s' % rel)
+            return True
+        try:
+            for p in paths:
+                rel = mods_item(p)
+                parent, name = rel.rsplit('/', 1) if '/' in rel else ('', rel)
+                rows = listing(parent)
+                if rows is None:
+                    lines.append('%s: its folder is not on the +Drive' % p)
+                    continue
+                here = dict(rows)
+                if name in here:
+                    remove(rel, here[name])
+                else:
+                    lines.append('%s was not on the +Drive' % p)
+            left = []
+            for p in paths:
+                rel = mods_item(p)
+                parent, name = rel.rsplit('/', 1) if '/' in rel else ('', rel)
+                rows = listing(parent)
+                if rows is not None and name in dict(rows):
+                    left.append(p)
+            top = listing('')
+            if top is None:
+                return False, lines + ['modsgate ls /mods after the removal failed']
+            lines.append('/mods now: %s' % (', '.join(n + ('/' if d else '') for n, d in top) or 'empty'))
+            if left:
+                return False, lines + ['still in /mods: %s' % ', '.join(left)]
+            return True, lines + ['%s gone from /mods (ls)' % ', '.join(paths)]
+        finally:
+            port.release()
+            with open(os.path.join(folder, 'steps.log'), 'a', encoding='utf-8') as fh:
+                fh.write('\n'.join(log) + '\n')
+
+    def remove_sample_items(self, s, u, paths):
         """At release: remove each +Drive root item in `paths` with everything below it (samplegate
         rm and rmdir, which ask the local write policy), then list the root to show them gone.
         Nothing else on the +Drive is entered or removed. -> (ok, lines)"""
@@ -2222,10 +2472,20 @@ class Daemon:
                             'backed up to the run folder and erased (data clear), then listed to show them empty'
                             % (u, slot_text(UNITS[u]['clear_at_release'])))
         for u, paths in sorted(drive_items(a).items()):
+            mods = [p for p in paths if p.startswith('/mods/')]
+            root = [p for p in paths if p not in mods]
+            how = []
+            if root:
+                how.append('%s each removed with all it holds (samplegate rm/rmdir), then the +Drive root '
+                           'listed to show them gone' % ', '.join(root))
+            if mods:
+                how.append('%s each removed with the ~T items it holds (modsgate rm, the write policy asked '
+                           'for each), then /mods listed by the Drive Loader\'s own listing (modsgate ls) to '
+                           'show them gone; stock cannot list /mods, so the run removes them before its '
+                           'last flash (the stock restore)' % ', '.join(mods))
             text.append('+DRIVE on %s: the run creates %s (its own ~T items; nothing else on the +Drive is '
-                        'used). AT RELEASE on %s, however the run ends: each removed with all it holds '
-                        '(samplegate rm/rmdir), then the +Drive root listed to show them gone'
-                        % (u, ', '.join(paths), u))
+                        'used). AT RELEASE on %s, however the run ends: %s'
+                        % (u, ', '.join(paths), u, '; '.join(how)))
         purpose = (a.get('purpose') or '').strip() or '(no purpose given)'
         body = ('An AI session asks for one go for this hardware run.\n\nSession %s (%s)\n'
                 'Purpose: %s\n\n%s\n\nEach item runs once; the go expires in %d h.\n'
@@ -2869,6 +3129,51 @@ class Daemon:
                         os.remove(q)
                     except OSError:
                         pass
+
+    def prune_emu_copies(self):
+        """Emulator working copies (EMU_COPIES) last written over EMU_COPY_DAYS ago go: from the
+        work folders of batch and gate folders in each unit's evidence folder (mostly runs that
+        did not pass, which keep theirs for a look at the emulator's state), and from session
+        emulator folders no running emulator uses. Logs, screenshots and recordings stay.
+        -> bytes freed. One sweep at a time; another call meanwhile returns 0 at once."""
+        if not self.prune_guard.acquire(blocking=False):
+            return 0
+        try:
+            freed, age = 0, EMU_COPY_DAYS * 86400
+            for name, u in UNITS.items():
+                ev = u.get('evidence')
+                if not ev or not os.path.isdir(ev):
+                    continue
+                for sess in os.listdir(ev):
+                    sdir = os.path.join(ev, sess)
+                    if not sess.startswith('mcp-') or not os.path.isdir(sdir):
+                        continue
+                    for b in os.listdir(sdir):
+                        bdir = os.path.join(sdir, b)
+                        if not b.startswith(('gate-', 'batch-')) or not os.path.isdir(bdir):
+                            continue
+                        for w in os.listdir(bdir):
+                            if os.path.isdir(os.path.join(bdir, w)):
+                                freed += drop_emu_copies(os.path.join(bdir, w), age)
+            emus = os.path.join(STATE, 'emulators')
+            busy = {'%s-%s' % (unit, sid[:8]) for (sid, unit), e in list(self.emulators.items())
+                    if e.get('proc') is not None and e['proc'].poll() is None}
+            if os.path.isdir(emus):
+                for w in os.listdir(emus):
+                    if w not in busy and os.path.isdir(os.path.join(emus, w)):
+                        freed += drop_emu_copies(os.path.join(emus, w), age)
+            if freed:
+                self.log_line({'session': 'daemon', 'daemon': 'removed emulator copies over %d days old: %.1f GB'
+                               % (EMU_COPY_DAYS, freed / 1e9)})
+            return freed
+        except OSError:
+            return 0
+        finally:
+            self.prune_guard.release()
+
+    def prune_emu_copies_soon(self):
+        """prune_emu_copies in a thread of its own: a sweep over the evidence folders takes a while."""
+        threading.Thread(target=self.prune_emu_copies, daemon=True).start()
 
     def emu_help(self, unit):
         """This unit's analog-emu --help text ('' without one), read once per binary."""
@@ -4077,6 +4382,7 @@ class Daemon:
         job = Job(s, 'batch', unit, 'emulator', desc)
         folder = os.path.join(s.folder(unit), ('gate-' if gate else 'batch-') + job.id)
         os.makedirs(folder)
+        self.prune_emu_copies_soon()
         write_json(os.path.join(folder, 'batch.json'), dict(
             unit=unit, kind='gate' if gate else 'flash' if flash else 'plan', runs=runs, parallel=parallel,
             seed=seed, minutes=minutes, snapshot=snapshot, kept=kept,
@@ -4322,6 +4628,7 @@ class Daemon:
         work = os.path.join(folder, 'setup-%s' % re.sub(r'\W+', '-', v['name']))
         os.makedirs(work)
         live = os.path.join(work, 'setup.snap')
+        stored = False
         proc, addr, why, din = self.batch_emulator(unit, v['build'], work, minutes, snapshot=None if digi else live,
                                                    din=info['din'], setup_key=key if digi else None)
         try:
@@ -4330,6 +4637,7 @@ class Daemon:
             if digi and proc.get('resumed'):           # digiemu had it, this daemon had lost its .json
                 write_json(store + '.json', {'plan': info['path'], 'setup_until': info['steps'][cut - 1][0],
                                              'run_dir': None, 'time': time.time()})
+                stored = True
                 return None
             plan = self.batch_plan(info, work, 'its setup', sections=info['steps'][:cut])
             guard = v.get('gate') and guards_projects(unit)
@@ -4359,6 +4667,7 @@ class Daemon:
                 os.replace(store + '.tmp', store)
             write_json(store + '.json', {'plan': info['path'], 'setup_until': info['steps'][cut - 1][0],
                                          'run_dir': m.group(1).strip() if m else None, 'time': time.time()})
+            stored = True
             return None
         except subprocess.TimeoutExpired:
             return 'variant %s: its setup had no end after %d min (%s)' % (v['name'], minutes, work)
@@ -4366,6 +4675,8 @@ class Daemon:
             return 'variant %s: could not read its saved projects: %s (%s)' % (v['name'], e, work)
         finally:
             self.end_emulator(proc)
+            if stored:                                 # the store has it: the work folder keeps its logs only
+                drop_emu_copies(work)
 
     def start_key(self, unit, build, chain):
         """What a built-in start's snapshot vouches for: the unit, the emulator binary, the build
@@ -4443,6 +4754,7 @@ class Daemon:
         work = os.path.join(folder, 'start-%s-%s' % (st, key[:8]))
         os.makedirs(work, exist_ok=True)
         live = os.path.join(work, 'start.snap')
+        stored = False
         proc, addr, why, _ = self.batch_emulator(unit, v['build'], work, minutes, snapshot=live)
         try:
             if why:
@@ -4464,11 +4776,14 @@ class Daemon:
             os.replace(store + '.tmp', store)
             write_json(store + '.json', {'start': st, 'plan': v['start_plan'], 'run_dir': work,
                                          'time': time.time()})
+            stored = True
             return None
         except subprocess.TimeoutExpired:
             return 'start %s had no end after %d min (%s)' % (st, minutes, work)
         finally:
             self.end_emulator(proc)
+            if stored:                                 # the store has it: the work folder keeps start.log
+                drop_emu_copies(work)
 
     def batch_run(self, s, unit, flash, minutes, folder, n, v):
         """One run of a batch in its own folder: a fresh emulator of v['build'] on a port of its
@@ -4631,7 +4946,9 @@ TOOLS = [
     ('release', 'Release units: writes the elklock handoff note and a test-log row in the unit\'s runs folder. '
                 'Asks for the stock OS back first. Where the unit sets clear_at_release, backs up and erases '
                 'those test slots first and lists them empty; removes the +Drive ~T items this session\'s '
-                'goes named (drive_items) and lists the +Drive root.',
+                'goes named (drive_items): +Drive root items by samplegate, then the root listed; /mods items '
+                'by modsgate, then /mods listed by the Drive Loader (stock cannot list /mods, so a run '
+                'removes those before its stock restore).',
      S(unit={'type': ['string', 'array'], 'items': {'type': 'string'}, 'req': True},
        note={'type': 'string', 'req': True, 'description': 'state left: OS, project, menus'},
        accept_non_stock={'type': 'boolean', 'description': 'leave a non-stock OS on purpose (say why in note)'},
@@ -4651,7 +4968,7 @@ TOOLS = [
            'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
        recall_restores=RESTORES(),
        drive_items={'type': 'array', 'items': {'type': 'object', 'properties': {
-           'unit': {'type': 'string'}, 'path': {'type': 'string', 'description': '/~T NAME at the +Drive root'}}},
+           'unit': {'type': 'string'}, 'path': {'type': 'string', 'description': '/~T NAME at the +Drive root, or a ~T folder or file below /mods'}}},
            'description': 'the +Drive ~T folders and files the run creates (Rytm); the release removes them'},
        text_id={'type': 'string', 'description': 'from approval_text: refuse if the request changed since'})),
     ('approval_text', 'The go request approve_plan would make for the same arguments, word for word, and '
@@ -4662,7 +4979,7 @@ TOOLS = [
            'unit': {'type': 'string'}, 'image': {'type': 'string'}, 'over': OVER()}}},
        recall_restores=RESTORES(),
        drive_items={'type': 'array', 'items': {'type': 'object', 'properties': {
-           'unit': {'type': 'string'}, 'path': {'type': 'string', 'description': '/~T NAME at the +Drive root'}}},
+           'unit': {'type': 'string'}, 'path': {'type': 'string', 'description': '/~T NAME at the +Drive root, or a ~T folder or file below /mods'}}},
            'description': 'the +Drive ~T folders and files the run creates (Rytm); the release removes them'})),
     ('check_plan', 'The plan checker, in seconds and without an emulator: a start check, what each section '
                    'proves (`say proves KIND`), listen format, build and reference rules; and whether a go '
@@ -4975,6 +5292,7 @@ def main():
     D.log_line({'session': 'daemon', 'daemon': 'started', 'pid': os.getpid(), 'version': VERSION,
                 'approvals_kept': len(D.open_goes())})
     threading.Thread(target=idle_watch, daemon=True).start()
+    D.prune_emu_copies_soon()
     if CFG['keep_awake']:
         threading.Thread(target=awake_watch, daemon=True).start()
     try:

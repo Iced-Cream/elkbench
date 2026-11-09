@@ -57,6 +57,12 @@ person = "the person at this PC"
 # A +Drive sample-store tool (samplegate.py: ls, rm, rmdir PATH, --port P, exit 3 when the write
 # policy refuses) for the Rytm: release removes the ~T folders a go named in drive_items with it.
 # samplegate = 'C:\tools\samplegate.py'
+# A +Drive /mods tool (modsgate.py: ls [FOLDER], rm NAME, --port P, exit 3 when the write policy
+# refuses) for the Rytm: release removes the ~T folders and files below /mods a go named in
+# drive_items with it, deepest first; modsgate_elekloader is the elekloader tree it runs (for
+# folders: drive-loader e37adef or later).
+# modsgate = 'C:\tools\modsgate.py'
+# modsgate_elekloader = 'C:\src\elekloader'
 # elkflash checkout to run `python -m elkflash` in; leave out if elkflash is pip-installed.
 # elkflash = 'C:\src\elkflash'
 # The audio scripts (asio_rec.py, asio_tone.py, audiocheck.py: audio_record, audio_check) are
