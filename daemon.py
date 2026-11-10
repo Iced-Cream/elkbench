@@ -31,6 +31,7 @@ Stdlib only. Windows and Linux (no Overbridge Total Recall on Linux: there is no
 import base64
 import ctypes as C
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -867,6 +868,10 @@ class Session:
         self.os_left = {}                 # unit -> (image name, stock?) after a hardware flash
         self.mods_saved = {}              # (unit, target) -> the /mods/active a mods-active step saved (file, or None:
                                           # there was none), until written back
+        self.mods_gone = {}               # unit -> {'/mods/~T X': (step no, time, /mods after)}: a hardware
+                                          # mods-remove removed it and listed /mods without it
+        self.flashed_at = {}              # unit -> step no of this session's last hardware flash
+        self.steps = itertools.count(1)   # orders the two above
 
     def folder(self, unit):
         """This session's evidence folder in the unit's evidence folder."""
@@ -2122,7 +2127,12 @@ class Daemon:
             paths += [p for p in folders if p not in paths]
             if not paths and not files:
                 continue
-            ok, lines = self.remove_drive_items(s, u, paths) if paths else (True, [])
+            # on stock, a /mods folder this session's mods-remove showed gone before the stock flash
+            # is proved gone by that record (stock cannot list /mods); without one, release still lists
+            proved, lines = self.mods_gone_proof(s, u, paths)
+            left = [p for p in paths if p not in proved]
+            ok, more = self.remove_drive_items(s, u, left) if left else (True, [])
+            lines += more
             if files:
                 k, more = self.remove_manifest_files(s, u, files)
                 ok, lines, paths = ok and k, lines + more, paths + files
@@ -2130,7 +2140,7 @@ class Daemon:
                 raise Refused('%s: the run\'s +Drive items are not all removed, so the claim is kept: %s. Fix '
                               'it and release again, or say why in the note and pass accept_drive_left'
                               % (u, '; '.join(lines)))
-            drive[u] = (ok, paths, lines)
+            drive[u] = (ok, paths, lines, proved)
         out = ['ok: released %s' % ', '.join(mine)]
         for u in mine:
             if u in cleared:
@@ -2144,9 +2154,11 @@ class Daemon:
                 out.append('%s: %s' % (u, restored[u]))
                 note_u += '; ' + restored[u]
             if u in drive:
-                ok, paths, lines = drive[u]
+                ok, paths, lines, proved = drive[u]
                 out += ['%s: %s' % (u, l) for l in lines]
-                note_u += '; +Drive %s %s' % (', '.join(paths), 'removed (ls)' if ok else
+                how = '; '.join((['ls'] if len(proved) < len(paths) else []) +
+                                (['mods-remove listed gone before the stock flash'] if proved else []))
+                note_u += '; +Drive %s %s' % (', '.join(paths), 'removed (%s)' % how if ok else
                                               'NOT ALL REMOVED: ' + '; '.join(lines))
                 self.drive_removed(s, u)
             done = s.done.get(u, [])
@@ -2176,7 +2188,30 @@ class Daemon:
             s.done.pop(u, None)
             s.purpose.pop(u, None)
             s.os_left.pop(u, None)
+            s.flashed_at.pop(u, None)
+            s.mods_gone.pop(u, None)
         return out
+
+    def mods_gone_proof(self, s, u, paths):
+        """The /mods items in `paths` that a hardware mods-remove of this session removed (the item, or
+        the folder holding it) and then listed /mods without, before this session's last flash, when
+        that flash left `u` on stock. Stock cannot list /mods, so release counts that record instead
+        of a listing. -> ([proved paths], [lines])"""
+        left = s.os_left.get(u)
+        flashed = s.flashed_at.get(u)
+        gone = s.mods_gone.get(u) or {}
+        if not left or not left[1] or flashed is None or not gone:
+            return [], []
+        proved, lines = [], []
+        for p in paths:
+            for f, (n, at, after) in sorted(gone.items()):
+                if n < flashed and (p == f or p.startswith(f + '/')):
+                    proved.append(p)
+                    lines.append('%s gone: removed by mods-remove %s at %s and /mods listed without it (%s) '
+                                 'before the flash of %s; stock cannot list /mods, so not listed again'
+                                 % (p, f, at, after, left[0]))
+                    break
+        return proved, lines
 
     def drive_to_remove(self, s, u):
         """The +Drive items this session's goes named on `u` (drive_items) that no release removed yet."""
@@ -3637,6 +3672,8 @@ class Daemon:
                         return 1, 'fail mods-put: /mods/%s lists %s, not all of %s\n' % (
                             step['folder'], ', '.join(sorted(have)), ', '.join(sorted(want)))
                     said.append('ok mods-put %d files into /mods/%s (listed)' % (len(want), step['folder']))
+                    if tgt == 'hardware':           # on the unit again: an earlier removal proves nothing now
+                        s.mods_gone.get(unit, {}).pop('/mods/' + step['folder'], None)
                 elif step['op'] == 'mods-active' and step['what'] == 'restore':
                     ok, l = self.mods_restore(s, unit, tgt, log)
                     if not ok:
@@ -3695,6 +3732,10 @@ class Daemon:
                             step['folder'] in {n for n, _d in rows} else 'the listing may be cut')
                     said.append('ok mods-remove /mods/%s: %d file(s) and the folder removed, gone from /mods (ls)'
                                 % (step['folder'], removed))
+                    if tgt == 'hardware':           # release's proof once stock, which cannot list /mods, is back
+                        s.mods_gone.setdefault(unit, {})['/mods/' + step['folder']] = (
+                            next(s.steps), time.strftime('%H:%M:%S'),
+                            ', '.join(n + ('/' if d else '') for n, d in rows) or 'empty')
                 else:                                       # expect-mods
                     got = os.path.join(folder, 'mods-status-%s.txt' % time.strftime('%H%M%S'))
                     rc, _ = self.modsgate(s, unit, tgt, log, 'get', '.status', '--out', got, timeout=120)
@@ -3915,6 +3956,7 @@ class Daemon:
                 if summ.get('flash_sha256'):
                     s.os_left[unit] = (os.path.basename(info['flash']),
                                        self.is_stock(unit, summ['flash_sha256']), summ['flash_sha256'])
+                    s.flashed_at[unit] = next(s.steps)
             else:
                 self.note_emu(s, unit, ('emulator plan ' if info['emulator'] else 'plan ') + info['name'],
                               info['emulator'] and info['writes'])
@@ -4034,6 +4076,7 @@ class Daemon:
                     s.os_left[a['unit']] = (os.path.basename(img), self.is_stock(a['unit'], d), d)
                 else:
                     s.os_left[a['unit']] = ('unknown after a failed flash of %s' % os.path.basename(img), False)
+                s.flashed_at[a['unit']] = next(s.steps)
                 s.done.setdefault(a['unit'], []).append('flash %s %s' % (os.path.basename(img), job.state.upper()))
             elif rc == 0 and over:
                 self.record_pass(flash_key(a['unit'], d, over), {'image': img, 'unit': a['unit'], 'over': over})
@@ -5316,7 +5359,8 @@ TOOLS = [
                 'those test slots first and lists them empty; removes the +Drive ~T items this session\'s '
                 'goes named (drive_items): +Drive root items by samplegate, then the root listed; /mods items '
                 'by modsgate, then /mods listed by the Drive Loader (stock cannot list /mods, so a run '
-                'removes those before its stock restore).',
+                'removes those before its stock restore: a /mods folder this session\'s mods-remove removed '
+                'and listed gone before its last flash, onto stock, counts as removed without a new listing).',
      S(unit={'type': ['string', 'array'], 'items': {'type': 'string'}, 'req': True},
        note={'type': 'string', 'req': True, 'description': 'state left: OS, project, menus'},
        accept_non_stock={'type': 'boolean', 'description': 'leave a non-stock OS on purpose (say why in note)'},

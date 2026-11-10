@@ -2276,6 +2276,117 @@ class InProcess(unittest.TestCase):
         subprocess.run([sys.executable, daemon.ELKLOCK, 'release', 'rytm', '--note', 'test', '--no-snapshot'],
                        env=self.s.env(), capture_output=True)
 
+    def release_after_mods_remove(self, flash_after=True, put_again=False, stock=True):
+        """A hardware mods-put and mods-remove of "~T BASE" through the stand-in modsgate (a go named
+        it in drive_items), then a flash (onto stock, or the rest OS) before or after the removal,
+        then release with a modsgate that cannot list /mods, as on stock. -> (release result or the
+        Refused text, the modsgate calls release made, the handoff note)"""
+        d = tempfile.mkdtemp(dir=TMP)
+        os.environ['FAKE_MODS'] = os.path.join(d, 'mods.json')
+        with open(os.environ['FAKE_MODS'], 'w') as fh:
+            json.dump({'active': 'OWNER.elemod', 'OWNER.elemod': '00'}, fh)
+        with open(os.path.join(d, 'a.elemod'), 'wb') as fh:
+            fh.write(b'mod')
+        real_cmd = self.d.mods_cmd
+        self.d.mods_cmd = lambda s, unit, tgt, *args: real_cmd(s, unit, 'emulator', *args)  # the stand-in
+        self.d.emu_port = lambda s, unit: 'tcp:127.0.0.1:1'
+        self.d.approvals['ap-test'] = dict(session=self.s.sid, items=[], created=time.time(),
+                                           expires=time.time() + 60, text='', drive={'rytm': ['/mods/~T BASE']})
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+                       env=self.s.env(), capture_output=True)
+        os_file = 'stock.syx' if stock else 'test-build.syx'
+        sha = daemon.sha256(os.path.join(TMP, 'os', os_file))
+
+        def flash():
+            self.s.os_left['rytm'] = (os_file, stock, sha)
+            self.s.flashed_at['rytm'] = next(self.s.steps)
+        step = lambda line: self.d.mods_stage(self.s, 'rytm', 'hardware', line, d)(0, '')  # noqa: E731
+        try:
+            if not flash_after:
+                flash()
+            self.assertEqual(step('mods-put "~T BASE" a.elemod')[0], 0)
+            rc, out = step('mods-remove "~T BASE"')
+            self.assertEqual(rc, 0, out)
+            if put_again:
+                self.assertEqual(step('mods-put "~T BASE" a.elemod')[0], 0)
+            if flash_after:
+                flash()
+        finally:
+            self.d.mods_cmd = real_cmd
+            del self.d.emu_port
+        ran = []
+
+        def fake(cmd, **kw):                    # stock: no Drive Loader to answer a /mods listing
+            ran.append(tuple(cmd[cmd.index(daemon.MODSGATE) + 3:]))
+            return subprocess.CompletedProcess(cmd, 1, '', 'no reply from the Drive Loader\n')
+        saved = daemon.MODSGATE, daemon.subprocess.run
+        daemon.MODSGATE = os.path.join(TMP, 'modsgate.py')
+        with open(daemon.MODSGATE, 'w') as fh:
+            fh.write('# stand-in\n')
+        self.d.check_connected = lambda unit, target: None
+        real_run = daemon.subprocess.run
+        daemon.subprocess.run = lambda cmd, **kw: (fake(cmd, **kw) if daemon.MODSGATE in cmd
+                                                   else real_run(cmd, **kw))
+        try:
+            try:
+                res = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'x'})
+            except daemon.Refused as e:
+                res = str(e)
+        finally:
+            daemon.MODSGATE, daemon.subprocess.run = saved
+            del self.d.check_connected
+        try:
+            note = json.loads(read(os.path.join(daemon.elklock.DIR, 'rytm.handoff.json')))['note']
+        except (OSError, ValueError):
+            note = ''
+        return res, ran, note
+
+    def test_release_on_stock_counts_mods_remove(self):
+        """On stock, which cannot list /mods, a hardware mods-remove that listed the folder gone
+        before the stock flash is the release's proof: no new listing, the claim released."""
+        res, ran, note = self.release_after_mods_remove()
+        self.assertEqual(ran, [])
+        self.assertTrue(res[0].startswith('ok: released rytm'), res)
+        self.assertTrue(any('/mods/~T BASE gone: removed by mods-remove /mods/~T BASE' in l and
+                            'before the flash of stock.syx' in l for l in res), res)
+        self.assertIn('+Drive /mods/~T BASE removed (mods-remove listed gone before the stock flash)', note)
+        self.assertEqual(self.d.drive_to_remove(self.s, 'rytm'), [])
+        self.assertNotIn('rytm', self.s.mods_gone)
+
+    def test_release_on_stock_without_record_refuses(self):
+        """A removal before an earlier flash, not the last one, proves nothing: release lists /mods,
+        which stock cannot, and keeps the claim."""
+        res, ran, _note = self.release_after_mods_remove(flash_after=False)
+        self.assertIn(('ls',), ran)
+        self.assertIn('claim is kept', res)
+        self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
+
+    def test_release_mods_put_after_remove_voids_record(self):
+        res, ran, _note = self.release_after_mods_remove(put_again=True)
+        self.assertIn(('ls',), ran)
+        self.assertIn('claim is kept', res)
+
+    def test_release_on_loader_os_still_lists(self):
+        """Left on the rest OS (a loader build), release lists /mods itself as before."""
+        res, ran, _note = self.release_after_mods_remove(stock=False)
+        self.assertIn(('ls',), ran)
+        self.assertIn('claim is kept', res)
+
+    def test_emulator_mods_remove_is_no_record(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        os.environ['FAKE_MODS'] = os.path.join(d, 'mods.json')
+        with open(os.environ['FAKE_MODS'], 'w') as fh:
+            json.dump({}, fh)
+        with open(os.path.join(d, 'a.elemod'), 'wb') as fh:
+            fh.write(b'mod')
+        self.d.emu_port = lambda s, unit: 'tcp:127.0.0.1:1'
+        try:
+            for line in ('mods-put "~T BASE" a.elemod', 'mods-remove "~T BASE"'):
+                self.assertEqual(self.d.mods_stage(self.s, 'rytm', 'emulator', line, d)(0, '')[0], 0)
+        finally:
+            del self.d.emu_port
+        self.assertEqual(self.s.mods_gone, {})
+
     def test_claim_mods_items_without_claim(self):
         self.assertEqual(daemon.claim_mods_items('a4'), ([], []))
 
