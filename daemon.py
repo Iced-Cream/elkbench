@@ -4424,7 +4424,9 @@ class Daemon:
             raise Refused('no file %s' % path)
         msgs = analogrun.load_syx(path)
         # sidecar-check's own commands (F0 7D 53 43 ...) are not dumps either; the 0.11 unit run sends them
-        if not msgs or not all(analogrun.is_dump(m) or bytes(m).startswith(b'\xf0\x7d\x53\x43') for m in msgs):
+        # the Sidecar companion's 5F DIAG request (F0 7D 52 54 5F ...) only, not other companion commands (T158, 2026-11-07)
+        if not msgs or not all(analogrun.is_dump(m) or bytes(m).startswith(b'\xf0\x7d\x53\x43')
+                                    or bytes(m).startswith(b'\xf0\x7d\x52\x54\x5f') for m in msgs):
             raise Refused('%s holds messages other than Elektron dumps; send refuses it' % path)
 
     def t_shot(self, s, a):
