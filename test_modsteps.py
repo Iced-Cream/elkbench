@@ -89,6 +89,23 @@ class Expect(unittest.TestCase):
     def test_no_boot_line(self):
         self.assertFalse(modsteps.expect(STATUS.replace('boot:', 'xboot:'), 2)[0])
 
+    def test_v2_store_and_sites(self):
+        text = STATUS + 'store: id 0xf3ef8186, 5 fields, 0 parked, written\n' + \
+            ''.join('site dl256-002 0x401c55%02x 4\n' % (i * 4) for i in range(3))
+        ok, lines = modsteps.expect(text, 2, ['dl256-001', 'dl256-002=3'])
+        self.assertTrue(ok, lines)
+        self.assertTrue(any(l.startswith('store: id 0xf3ef8186') for l in lines))
+        self.assertFalse(modsteps.expect(text, 2, ['dl256-002=4'])[0])
+        self.assertFalse(modsteps.expect(text, 2, ['dl256-001=1'])[0])
+        self.assertFalse(modsteps.expect(text.replace('written', 'write failed'), 2)[0])
+        stray = text.replace('dl256-002 loaded 0 0', 'dl256-002 refused 7 0 sites')
+        self.assertFalse(modsteps.expect(stray, 1)[0])
+
+    def test_v2_expect_parse(self):
+        self.assertEqual(modsteps.parse('expect-mods 2 loaded a duck=18', '.')['ids'], ['a', 'duck=18'])
+        with self.assertRaises(ValueError):
+            modsteps.parse('expect-mods 1 loaded duck=x', '.')
+
 
 class Rules(unittest.TestCase):
     def setUp(self):

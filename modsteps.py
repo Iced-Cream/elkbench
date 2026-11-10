@@ -10,7 +10,10 @@ build per test (decided 2026-11-09).
     mods-active none               an empty /mods/active: the next boot links nothing
     mods-active restore            write the saved active back now (before a stock flash, say)
     expect-mods N loaded [ID...]   read /mods/.status: the last boot linked exactly N mods, all
-                                   `loaded`, the IDs among them, nothing skipped, and a boot line
+                                   `loaded`, the IDs among them, nothing skipped, and a boot line.
+                                   ID=K: that mod loaded with exactly K boot-linked sites applied
+                                   (+Drive v2 `site` lines). A v2 `store:` line must not say
+                                   `write failed`
     mods-remove "~T NAME"          remove a ~T folder this session's mods-put made, with the files
                                    it put there, and list /mods to show it gone: before a stock
                                    flash, so stock never boots with a run's .elemod on /mods
@@ -97,6 +100,10 @@ def parse(line, here):
     if op == 'expect-mods':
         if len(w) < 3 or not w[1].isdigit() or w[2].lower() != 'loaded':
             raise ValueError('expect-mods N loaded [ID...]')
+        for i in w[3:]:
+            name, eq, k = i.partition('=')
+            if not name or (eq and not k.isdigit()):
+                raise ValueError('expect-mods N loaded [ID...]: ID or ID=K (K sites applied)')
         return dict(op=op, n=int(w[1]), ids=w[3:])
     if op == 'mods-remove':
         folder = w[1].strip('/') if len(w) == 2 else ''
@@ -120,7 +127,7 @@ def put_files(steps, here):
 def status(text):
     """/mods/.status -> dict(records=[(id, state, code, arg, detail)], boot=str|None,
     skipped=str|None, check=str|None)."""
-    out = dict(records=[], boot=None, skipped=None, check=None)
+    out = dict(records=[], boot=None, skipped=None, check=None, store=None, sites={})
     head = ('drive-loader route', 'folder ', 'last:', 'io:')
     for l in text.splitlines():
         l = l.rstrip()
@@ -132,6 +139,11 @@ def status(text):
             out['boot'] = l[5:].strip()
         elif l.startswith('skipped:'):
             out['skipped'] = l[8:].strip()
+        elif l.startswith('store:'):              # +Drive v2 storage: id, fields, parked, kept|written|write failed
+            out['store'] = l[6:].strip()
+        elif l.startswith('site ') and len(l.split()) == 4:   # +Drive v2: site ID 0xADDR LEN, one per applied site
+            sid = l.split()[1]
+            out['sites'][sid] = out['sites'].get(sid, 0) + 1
         else:
             p = l.split(None, 4)
             if len(p) >= 2:
@@ -143,10 +155,33 @@ def status(text):
 def expect(text, n, ids=()):
     """expect-mods's verdict on /mods/.status text -> (ok, lines)."""
     st = status(text)
+    want_sites = {}
+    plain = []
+    for i in ids:
+        name, eq, k = i.partition('=')
+        if eq:
+            want_sites[name] = int(k)
+        plain.append(name)
+    ids = plain
     loaded = [r[0] for r in st['records'] if r[1] == 'loaded']
     other = ['%s %s %s %s %s' % r for r in st['records'] if r[1] != 'loaded']
     lines = ['boot: %s' % (st['boot'] or 'none'), '%d records, %d loaded' % (len(st['records']), len(loaded))]
+    if st['store']:
+        lines.append('store: %s' % st['store'])
+    if st['sites']:
+        lines.append('sites applied: %s' % ', '.join('%s %d' % kv for kv in sorted(st['sites'].items())))
     ok = True
+    if st['store'] and st['store'].endswith('write failed'):
+        lines.append('FAIL: /mods/.store write failed')
+        ok = False
+    stray = sorted(i for i in st['sites'] if i not in loaded)
+    if stray:
+        lines.append('FAIL: sites applied for a mod not loaded: %s' % ', '.join(stray))
+        ok = False
+    for i, k in sorted(want_sites.items()):
+        if st['sites'].get(i, 0) != k:
+            lines.append('FAIL: %s has %d sites applied, expected %d' % (i, st['sites'].get(i, 0), k))
+            ok = False
     if st['skipped']:
         lines.append('FAIL: the boot skipped every mod: %s' % st['skipped'])
         ok = False
