@@ -279,5 +279,23 @@ class Templates(unittest.TestCase):
                     shlex.split(l, comments=True)
 
 
+class BootState(unittest.TestCase):
+    def test_what_a_plan_leaves_for_the_next_boot(self):
+        m1 = [('mods', ['mods-put "~T BASE" a.elemod', 'mods-active "~T BASE/a.elemod"']),
+              ('settings', ['say settings-changed: CLOCK SOURCE'])]
+        left = plancheck.boot_state(m1)
+        self.assertEqual(left, ['/mods/active', 'SETTINGS: CLOCK SOURCE', '~T BASE in /mods'])
+        m2 = [('back', ['expect-mods 1 loaded a', 'mods-active restore', 'mods-remove "~T BASE"',
+                        'say settings-back: CLOCK SOURCE'])]
+        self.assertEqual(plancheck.boot_state(m2, left), [])
+        self.assertEqual(plancheck.boot_state([('x', ['mods-active restore', 'mods-active none'])]), ['/mods/active'])
+
+    def test_the_checker_flags_it(self):
+        steps = parse(GOOD) + [('mods', ['say proves setup: a mod set', 'mods-active none'])]
+        flags = plancheck.check(steps)['flags']
+        self.assertTrue(any('leaves boot state changed (/mods/active)' in f for f in flags), flags)
+        self.assertFalse(any('boot state' in f for f in plancheck.check(parse(GOOD))['flags']))
+
+
 if __name__ == '__main__':
     unittest.main()

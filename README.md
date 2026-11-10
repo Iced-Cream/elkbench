@@ -159,6 +159,21 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
 - **Flash plans on hardware**: run_plan writes a hardware twin with `emulator-run =` the
   recorded emulator pass, so testplan's flash gate passes without editing the plan; a pass
   whose OS file differs is refused before the person is asked.
+- **Cached flash gates** (fixed plans, F3a): a flash between two fixed OS files of a unit (its
+  `stock` and `rest` files), whether a plan's `flash =` or a bare flash, is also recorded under
+  a cached key when it passed on a fresh emulator booted on the old OS, on a fresh copy of the
+  configured `emu_card`, with nothing run before it (run_plan with `build`, flash on such an
+  emulator, or a gate batch). That pass stores what it ran on: the analog-emu binary, elkflash
+  (its package's .py files) and the card, by sha256, and `FLASH_GATE` (raised only when the
+  flash or boot check code changes). It counts while all four are the same. The go request
+  says for each such flash `gate: cached pass RUN (date), key matches` or `gate: gated in this
+  run's order (why not cached)`. A cached pass counts at a run's first flash and after plans
+  that put back what they change for the next boot (`plancheck.boot_state`: `mods-active`
+  until `mods-active restore`, `mods-put "~T X"` until `mods-remove "~T X"`, and `say
+  settings-changed: WHAT` until `say settings-back`); after a plan that leaves any of it
+  changed, the flash's own emulator pass must have run after that plan, or the go is refused.
+  A gate batch reruns a fixed flash plan whose cached pass no longer counts. Fixed plans are
+  ordinary plan files kept wherever the PC keeps them; tests name them instead of copying them.
 - **Stock or rest OS last**: release asks for it; a hardware flash records stock or not by sha256
   against the unit's `stock` files. A unit's `rest` files (config.toml, empty by default) are
   other OSes release accepts, such as the Rytm's base build for Drive Loader tests; the handoff

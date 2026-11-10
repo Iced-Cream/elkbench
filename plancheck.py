@@ -151,6 +151,10 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
     contrasts = contrasts_of(steps)
     if emulator:
         return dict(errors=errors, flags=flags, proves=proves, contrasts=contrasts)
+    left = boot_state(steps)
+    if left:
+        flags.append('leaves boot state changed (%s): a flash after this plan gates in the run\'s order, '
+                     'not from a cached pass' % '; '.join(left))
     all_words = [(name, words(l)) for name, lines in steps for l in lines]
     asserts = [w for _, w in all_words if is_assert(w)]
     writes = [w for _, w in all_words if w and w[0].lower() in WRITE_OPS]
@@ -341,6 +345,39 @@ def shared_refs(infos):
                         out.append('%s and %s both compare %s: give each plan its own references'
                                    % (other, info['name'], os.path.basename(p)))
     return sorted(set(out))
+
+
+def boot_state(steps, left=()):
+    """What a plan leaves changed that the next boot reads, folded over its steps from `left`
+    (what earlier plans of the same run left): '/mods/active' after a mods-active until a
+    `mods-active restore`; '~T NAME in /mods' after a mods-put until its mods-remove; and
+    'SETTINGS: WHAT' after a `say settings-changed: WHAT` until a `say settings-back` (SETTINGS
+    are changed by keys, which say nothing a checker can read, so the plan says so). -> sorted
+    list. A cached flash gate counts only where this is empty (proposed F3a)."""
+    state = set(left)
+    for _, lines in steps:
+        for l in lines:
+            w = words(l)
+            if not w:
+                continue
+            op = w[0].lower()
+            if op == 'mods-active':
+                if len(w) == 2 and w[1].lower() == 'restore':
+                    state.discard('/mods/active')
+                else:
+                    state.add('/mods/active')
+            elif op == 'mods-put' and len(w) > 1:
+                state.add('%s in /mods' % w[1].strip('/'))
+            elif op == 'mods-remove' and len(w) > 1:
+                state.discard('%s in /mods' % w[1].strip('/'))
+            elif op == 'say' and len(w) > 1:
+                kind = w[1].lower().rstrip(':')
+                if kind == 'settings-changed':
+                    what = l.split(':', 1)[1].strip() if ':' in l else ' '.join(w[2:])
+                    state.add('SETTINGS: %s' % (what or 'changed'))
+                elif kind == 'settings-back':
+                    state = {x for x in state if not x.startswith('SETTINGS:')}
+    return sorted(state)
 
 
 def go_lines(result):
