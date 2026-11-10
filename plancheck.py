@@ -38,7 +38,7 @@ PROVES = ('setup', 'set-and-kept', 'works', 'evidence')
 ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping', 'expect-mods')
 # steps that change what the unit holds or a value on it (keys only move through the UI)
 WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', 'at', 'turn', 'pad', 'padplay',
-             'mods-put', 'mods-active')
+             'mods-put', 'mods-active', 'mods-remove')
 # steps that need a remote-key path in the OS (analoghealth, or a remote-only build)
 KEY_OPS = ('tap', 'hold', 'release', 'keys', 'turn', 'pad', 'padplay')
 # steps that only move through menus or look: nothing between a save and a check but these

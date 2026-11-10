@@ -11,6 +11,9 @@ build per test (decided 2026-11-09).
     mods-active restore            write the saved active back now (before a stock flash, say)
     expect-mods N loaded [ID...]   read /mods/.status: the last boot linked exactly N mods, all
                                    `loaded`, the IDs among them, nothing skipped, and a boot line
+    mods-remove "~T NAME"          remove a ~T folder this session's mods-put made, with the files
+                                   it put there, and list /mods to show it gone: before a stock
+                                   flash, so stock never boots with a run's .elemod on /mods
 
 The loader links mods only at boot, so a new active takes effect after a reboot: a `power-cycle`
 step, or the base build flashed over itself in a plan of its own. The steps run through
@@ -22,7 +25,7 @@ import os
 import re
 import shlex
 
-OPS = ('mods-put', 'mods-active', 'expect-mods')
+OPS = ('mods-put', 'mods-active', 'expect-mods', 'mods-remove')
 MAX_FILE = 512 * 1024                 # the loader's staging buffer (DL_STAGING_SIZE)
 MAX_ACTIVE = 256                      # DL_MAX_MODS
 NAME_CHARS = re.compile(r"[A-Z0-9 +\-=&/#@?%$~]*")
@@ -95,6 +98,11 @@ def parse(line, here):
         if len(w) < 3 or not w[1].isdigit() or w[2].lower() != 'loaded':
             raise ValueError('expect-mods N loaded [ID...]')
         return dict(op=op, n=int(w[1]), ids=w[3:])
+    if op == 'mods-remove':
+        folder = w[1].strip('/') if len(w) == 2 else ''
+        if not folder or '/' in folder or not tname_ok(folder):
+            raise ValueError('mods-remove "~T NAME": one ~T folder below /mods that a mods-put made')
+        return dict(op=op, folder=folder)
     raise ValueError('%s is not a mods step' % w[0])
 
 
@@ -164,22 +172,33 @@ def plan_rules(steps, stock_flash=False, here='.'):
     """The plan checker's rules for mods steps -> (errors, flags). steps: [(section, [lines])]."""
     errors, flags = [], []
     seen_active, rebooted, expected = False, False, True
+    put, active = {}, set()          # ~T folders put and not removed (-> section); folders the active names
     for name, lines in steps:
         for l in lines:
             w = words(l)
             if not w:
                 continue
             op = w[0].lower()
+            step = None
             if op in OPS:
                 try:
-                    parse(l, here)
+                    step = parse(l, here)
                 except ValueError as e:
                     errors.append('[%s] %s' % (name, e))
                 if stock_flash:
                     errors.append('[%s] %s after a stock flash: stock has no /mods route' % (name, op))
             if op == 'mods-active' and len(w) > 1 and w[1].lower() != 'restore':
                 seen_active = True
-            elif op == 'power-cycle' and seen_active:
+            if step and step['op'] == 'mods-put':
+                put.setdefault(step['folder'], name)
+            elif step and step['op'] == 'mods-active':
+                active = set() if step['what'] in ('restore', 'none') else {p.split('/')[0] for p in step['paths']}
+            elif step and step['op'] == 'mods-remove':
+                if step['folder'] in active:
+                    errors.append('[%s] mods-remove %s while /mods/active names it: mods-active restore (or none) '
+                                  'first, so the next boot does not look for a removed mod' % (name, step['folder']))
+                put.pop(step['folder'], None)
+            if op == 'power-cycle' and seen_active:
                 rebooted, expected = True, False
             elif op == 'expect-mods':
                 expected = True
@@ -191,4 +210,8 @@ def plan_rules(steps, stock_flash=False, here='.'):
         flags.append('mods-active with no power-cycle after it in this plan: the new active loads at the next '
                      'boot (the base flashed over itself in its own plan), and the plan after that boot starts '
                      'with expect-mods')
+    for folder, name in sorted(put.items()):
+        flags.append('mods-put %s [%s] with no mods-remove after it in this plan: a later plan removes it '
+                     '(mods-remove "%s") before the stock flash, or stock boots with the .elemod on /mods'
+                     % (folder, name, folder))
     return errors, flags

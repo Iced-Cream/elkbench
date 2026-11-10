@@ -85,7 +85,8 @@ if op == 'ls':
     pre = rest[0] + '/' if rest else ''
     names = sorted({k[len(pre):].split('/')[0] + ('/' if '/' in k[len(pre):] else '') for k in m if k.startswith(pre)})
     for n in names:
-        print('%s %d' % (n, 0 if n.endswith('/') else len(m[pre + n])))
+        if n != '.dir':
+            print('%s %d' % (n, 0 if n.endswith('/') else len(m[pre + n])))
 elif op == 'mkdir':
     m[rest[0] + '/.dir'] = ''; save()
 elif op == 'put':
@@ -101,7 +102,14 @@ elif op == 'get':
 elif op == 'restore-active':
     m['active'] = open(rest[0]).read(); save()
 elif op == 'rm':
-    m.pop(rest[0]); save()
+    if rest[0] in m:
+        m.pop(rest[0])
+    else:
+        under = [k for k in m if k.startswith(rest[0] + '/')]
+        if not under or any(k != rest[0] + '/.dir' for k in under):
+            sys.exit(2)                 # no such item, or a folder that is not empty
+        m.pop(rest[0] + '/.dir')
+    save()
 ''')
 os.environ['ELKBENCH_CONFIG'] = os.path.join(TMP, 'config.toml')
 os.environ['ELKBENCH_DIR'] = os.path.join(TMP, 'state')
@@ -152,7 +160,27 @@ class ModsSteps(unittest.TestCase):
         rc, out = self.run_step('mods-active restore')
         self.assertEqual(rc, 0, out)
         self.assertEqual(self.mods()['active'], 'OWNER.elemod')
-        self.assertNotIn('rytm', self.s.mods_saved)
+        self.assertNotIn(('rytm', 'emulator'), self.s.mods_saved)
+
+    def test_remove(self):
+        self.assertEqual(self.run_step('mods-put "~T BASE" a.elemod')[0], 0)
+        rc, out = self.run_step('mods-remove "~T BASE"')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('1 file(s)', out)
+        self.assertFalse([k for k in self.mods() if k.startswith('~T BASE')])
+        self.assertIn('OWNER.elemod', self.mods())             # nothing else touched
+        rc, out = self.run_step('mods-remove "~T BASE"')         # gone: says so, removes nothing
+        self.assertEqual(rc, 1)
+        self.assertIn('not there', out)
+
+    def test_emulator_backup_never_reaches_the_unit(self):
+        self.assertEqual(self.run_step('mods-active none')[0], 0)
+        self.assertIn(('rytm', 'emulator'), self.s.mods_saved)
+        self.assertNotIn(('rytm', 'hardware'), self.s.mods_saved)
+        log = []
+        self.assertEqual(self.d.mods_restore(self.s, 'rytm', 'hardware', log),
+                         (True, 'no /mods/active saved: nothing to write back'))
+        self.assertEqual(log, [])
 
     def test_no_active_before_is_removed(self):
         with open(os.environ['FAKE_MODS'], 'w') as fh:
