@@ -744,6 +744,65 @@ def flash_key(unit, digest, over=None):
     return 'flash:%s:%s' % (unit, digest) + (':over:%s' % over if over else '')
 
 
+# The version of the flash and boot checks a cached flash gate stands on (elkflash's commit ack,
+# the reboot on the expected version, how elkbench reads them). Raise it only when that code
+# changes: it is not the git HEAD, which would throw every cached gate away on any commit.
+FLASH_GATE = 1
+
+
+def fixed_key(unit, plan, digest, over):
+    """The key of a cached flash gate (proposed F3a): `digest` flashed over `over` (sha256s), both
+    fixed OS files of the unit (stock or its `rest`), by the plan whose pass key is `plan` (None:
+    a bare flash). The pass stored under it carries the gate environment it ran in (gate_env),
+    which has to match the one now for it to count."""
+    return 'fixed:%s:%s:%s:over:%s' % (unit, plan or 'flash', digest, over)
+
+
+_memo = {}
+
+
+def sha256_memo(path):
+    """sha256 of a file, kept while its size and time do not change (emulator cards are large)."""
+    try:
+        st = os.stat(path)
+    except OSError:
+        return None
+    k = (os.path.abspath(path), st.st_size, st.st_mtime_ns)
+    if k not in _memo:
+        _memo[k] = sha256(path)
+    return _memo[k]
+
+
+def tree_sha(folder):
+    """sha256 over a Python package's .py files (relative names and contents, in order)."""
+    h = hashlib.sha256()
+    for root, dirs, files in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if d not in ('__pycache__', '.git', 'tests', 'test'))
+        for f in sorted(files):
+            if f.endswith('.py'):
+                full = os.path.join(root, f)
+                h.update(os.path.relpath(full, folder).replace(os.sep, '/').encode() + b'\0')
+                h.update((sha256_memo(full) or '').encode() + b'\0')
+    return h.hexdigest()
+
+
+def elkflash_sha():
+    """sha256 of the elkflash that flashes (tools.elkflash's package, else the installed one), or None."""
+    folder = None
+    if ELKFLASH:
+        folder = os.path.join(ELKFLASH, 'elkflash')
+        if not os.path.isdir(folder):
+            folder = ELKFLASH
+    else:
+        try:
+            import importlib.util
+            spec = importlib.util.find_spec('elkflash')
+            folder = spec and spec.submodule_search_locations and list(spec.submodule_search_locations)[0]
+        except (ImportError, ValueError):
+            folder = None
+    return tree_sha(folder) if folder and os.path.isdir(folder) else None
+
+
 def take_name(name):
     """A recall_take name as its file is called: a bare file name, .bin added."""
     if not name or re.search(r'[\\/:]', name):
@@ -1427,6 +1486,70 @@ class Daemon:
                     and e.get('run_dir') and self.find_pass(k, digest)):
                 return e
         return None
+
+    # -- cached flash gates (proposed F3a) --
+
+    def is_fixed(self, unit, digest):
+        """Whether `digest` is one of the unit's fixed OS files: stock, or a `rest` file."""
+        return bool(digest) and (self.is_stock(unit, digest) or self.is_rest(unit, digest))
+
+    def gate_env(self, unit):
+        """-> (env, None), or (None, why) when a part is unknown: what a cached flash gate ran
+        on, which must be the same now for it to count: the emulator binary, elkflash, the
+        emulator's card as config.toml names it, and FLASH_GATE."""
+        u = UNITS[unit]
+        if u.get('emulator') == 'digiemu':
+            emulator = 'digiemu ' + (git_head(DIGIEMU) or 'unknown') if DIGIEMU else None
+        else:
+            exe = os.path.join(ANALOG_EMU or '', u.get('emu_exe') or '')
+            emulator = sha256_memo(exe) if ANALOG_EMU and u.get('emu_exe') and os.path.isfile(exe) else None
+        if not emulator:
+            return None, 'the emulator binary is unknown'
+        flasher = elkflash_sha()
+        if not flasher:
+            return None, 'elkflash is not found'
+        card = u.get('emu_card')
+        card_sha = sha256_memo(card) if card else 'none'
+        if not card_sha:
+            return None, 'the emulator card %s is missing' % card
+        return dict(emulator=emulator, elkflash=flasher, card=card_sha, flash_gate=FLASH_GATE), None
+
+    def record_fixed(self, unit, plan, digest, over, entry, clean, lines=None):
+        """Records a passing flash of `digest` over `over` as a cached gate, when both are fixed OS
+        files and it ran `clean`: on a fresh emulator booted on `over`, on a fresh copy of the
+        card config.toml names, with nothing run on it before (no taint)."""
+        if not (self.is_fixed(unit, digest) and self.is_fixed(unit, over)):
+            return
+        why = None if clean else 'it did not run on a fresh emulator and card with nothing before it'
+        env = None
+        if not why:
+            env, why = self.gate_env(unit)
+        if why:
+            if lines is not None:
+                lines.append('not recorded as a cached flash gate: %s' % why)
+            return
+        self.record_pass(fixed_key(unit, plan, digest, over), dict(entry, env=env))
+        if lines is not None:
+            lines.append('recorded as the cached flash gate of this transition (fixed OS files)')
+
+    def fixed_pass(self, unit, plan, digest, over):
+        """-> (pass, None) when a cached flash gate stands for this transition, else (None, why),
+        or (None, None) when it is not between fixed OS files."""
+        if not (self.is_fixed(unit, digest) and self.is_fixed(unit, over)):
+            return None, None
+        e = self.find_pass(fixed_key(unit, plan, digest, over), digest if plan else None)
+        if not e:
+            return None, 'no cached pass of this transition'
+        env, why = self.gate_env(unit)
+        if why:
+            return None, why
+        changed = [k for k in ('emulator', 'elkflash', 'card', 'flash_gate') if (e.get('env') or {}).get(k) != env[k]]
+        if changed:
+            return None, 'cached pass %s no longer counts: %s changed' % (
+                e.get('run_dir') or stamp(e['time']), ', '.join(
+                    {'emulator': 'the emulator binary', 'elkflash': 'elkflash', 'card': 'the emulator card',
+                     'flash_gate': 'FLASH_GATE'}[k] for k in changed))
+        return e, None
 
     def os_on_unit(self, s, unit, over=None):
         """-> sha256 of the OS on the unit now: the file `over` names, else what this session
@@ -2547,6 +2670,7 @@ class Daemon:
         """-> (items, body): what approve_plan would ask for these plans, flashes and recall
         restores, word for word, or Refused with the reason it would refuse. Asks nobody."""
         items, text, infos = [], [], []
+        boot = {}                     # unit -> (what the plans so far leave changed for the next boot, by whom)
         for p in a.get('plans') or []:
             info = self.plan_info(p)
             if info['emulator']:
@@ -2563,6 +2687,13 @@ class Daemon:
             if missing:
                 raise Refused('%s has no emulator run from start %s on the build of its pass: batch gate '
                               'true with this plan runs them' % (info['name'], ', '.join(missing)))
+            gate_line = ''
+            if info['flash_sha']:
+                gate_line = self.gate_line(info['unit'], info['key'], info['flash_sha'], info['os_sha'],
+                                           ep, boot, info['name'])
+            left, by = boot.get(info['unit'], ([], None))
+            now = plancheck.boot_state(info['steps'], left)
+            boot[info['unit']] = (now, info['name'] if set(now) - set(left) else by if now else None)
             items.append(dict(item=('plan', info['key']), label='plan ' + info['name'], used=False))
             hand = hand_steps(info['steps'])
             text.append('PLAN %s on %s\n  %s\n  steps: %s%s%s\n  emulator pass: %s%s%s%s%s' % (
@@ -2574,7 +2705,7 @@ class Daemon:
                  if info['os_file'] else '') +
                 ('\n  writes: ' + '; '.join(info['writes']) if info['writes'] else ''),
                 ep.get('run_dir') or stamp(ep['time']),
-                ' (from %s)' % ep['start'] if ep.get('start') else '',
+                (' (from %s)' % ep['start'] if ep.get('start') else '') + gate_line,
                 '\n  ran after: ' + ', '.join(ep['after']) if ep.get('after') else '',
                 ''.join('\n' + l for l in start_lines + plancheck.go_lines(info['check'])),
                 ''.join('\n  NOT TESTED IN THE EMULATOR: ' + h for h in hand) +
@@ -2613,17 +2744,18 @@ class Daemon:
                 d = sha256(img)
                 if kind == 'flashes':
                     over = self.os_on_unit(s, f['unit'], f.get('over'))
-                    if not self.flash_pass(f['unit'], d, over):
+                    fep = self.flash_pass(f['unit'], d, over)
+                    if not fep:
                         raise Refused('%s has not flashed over %s and booted in the %s emulator: flash target '
                                       'emulator first, on an emulator booted on that OS' % (
                                           os.path.basename(img), os.path.basename(f['over']) if f.get('over')
                                           else 'the OS this session flashed last', f['unit']))
                     items.append(dict(item=('flash', f['unit'], d), used=False,
                                       label='flash %s on %s' % (os.path.basename(img), f['unit'])))
-                    text.append('FLASH %s on %s\n  sha256 %s%s\n  over %s (sha256 %s)' % (
+                    text.append('FLASH %s on %s\n  sha256 %s%s\n  over %s (sha256 %s)%s' % (
                         os.path.basename(img), f['unit'], d, ' (stock)' if self.is_stock(f['unit'], d) else '',
                         os.path.basename(f['over']) if f.get('over') else 'the OS this session flashed last',
-                        over))
+                        over, self.gate_line(f['unit'], None, d, over, fep, boot, os.path.basename(img))))
                 else:
                     items.append(dict(item=('restore', f['unit'], d), used=False,
                                       label='recall restore %s on %s' % (os.path.basename(img), f['unit'])))
@@ -2657,6 +2789,27 @@ class Daemon:
                 'Purpose: %s\n\n%s\n\nEach item runs once; the go expires in %d h.\n'
                 'Approve?' % (s.sid[:8], s.cwd, purpose, '\n\n'.join(text), APPROVAL_TTL // 3600))
         return items, body
+
+    def gate_line(self, unit, plan, digest, over, ep, boot, name):
+        """The go request's line on how a flash between fixed OS files is gated ('' for any other
+        flash, which gates in the run's order as before), or Refused. A cached pass counts at the
+        run's first flash and after plans that put back all they changed for the next boot
+        (/mods/active, ~T items in /mods, SETTINGS); after a plan that leaves any of it changed,
+        the flash's own pass must have run after that plan (proposed F3a)."""
+        if not (self.is_fixed(unit, digest) and self.is_fixed(unit, over)):
+            return ''
+        left, by = boot.get(unit, ([], None))
+        if left:
+            if 'plan ' + by not in (ep.get('after') or []):
+                raise Refused('%s flashes after %s, which leaves %s changed for the next boot: a cached flash '
+                              'gate does not count there; gate it in the run\'s order (run_plan target emulator '
+                              'on the emulator that ran %s, then this)' % (name, by, '; '.join(left), by))
+            return '\n  gate: gated in this run\'s order, after %s (it leaves %s changed)' % (by, '; '.join(left))
+        fp, why = self.fixed_pass(unit, plan, digest, over)
+        if fp:
+            return '\n  gate: cached pass %s (%s), key matches' % (
+                fp.get('run_dir') or fp.get('log') or 'of a bare flash', stamp(fp['time']))
+        return '\n  gate: gated in this run\'s order (%s)' % why
 
     def idle_units(self, s):
         """Units this session holds with nothing going on them (no run, nobody listening)."""
@@ -3034,8 +3187,11 @@ class Daemon:
             write_json(flashed, {'image': label, 'sha': sha})
         card = os.path.join(work, 'card.img')
         src = a.get('card') or u.get('emu_card')
+        card_clean = False                           # a fresh copy of the card config.toml names
         if src and (a.get('fresh_card', not keep) or not os.path.exists(card)):
             shutil.copyfile(src, card)               # a copy: the emulator writes to its card
+            card_clean = not a.get('card') or (u.get('emu_card') and os.path.abspath(a['card']) ==
+                                               os.path.abspath(u['emu_card']))
         with socket.socket() as probe:               # a free local port for its USB MIDI
             probe.bind(('127.0.0.1', 0))
             tcp = probe.getsockname()[1]
@@ -3067,7 +3223,7 @@ class Daemon:
                                                  snapshot=snapshot, log=log_path,
                                                  din='tcp:127.0.0.1:%d' % din if din else None,
                                                  cmd=cmd, work=work, power_off=power_off, boots=1,
-                                                 boot_os=build)
+                                                 boot_os=build, card_clean=bool(card_clean and not keep))
         for _ in range(30):                           # until it listens (an older build never does)
             time.sleep(0.2)
             with open(log_path, encoding='utf-8', errors='replace') as fh:
@@ -3902,6 +4058,7 @@ class Daemon:
         record = not info['emulator'] or info['settings'].get('record-refs', 'no') != 'yes'
         record = record and not a.get('record_refs')
         tainted = [h['what'] for h in before if h['taints']] if tgt == 'emulator' else []
+        fresh_card = tgt == 'emulator' and bool((self.emulators.get((s.sid, unit)) or {}).get('card_clean'))
 
         def done(job, rc, out):
             lines = [l.strip() for l in out.splitlines() if l.strip()]
@@ -3999,6 +4156,10 @@ class Daemon:
                     self.record_pass(flash_key(unit, info['flash_sha'], booted),
                                      {'image': info['flash'], 'unit': unit, 'run_dir': run_dir, 'over': booted})
                 job.lines.append('recorded as the emulator pass for this plan')
+                if info['flash_sha'] and booted:
+                    self.record_fixed(unit, info['key'], info['flash_sha'], booted, {
+                        'plan': info['path'], 'run_dir': run_dir, 'unit': unit, 'over': booted,
+                        'via': 'run_plan'}, began == 'a fresh emulator' and not before and fresh_card, job.lines)
             elif ok:
                 job.lines.append('references recorded; run again without record_refs for the pass')
 
@@ -4011,7 +4172,7 @@ class Daemon:
         if not os.path.isfile(img) or not img.lower().endswith('.syx'):
             raise Refused('no OS .syx file %s' % img)
         d = sha256(img)
-        over = None
+        over, ran_before, clean = None, [], False
         folder = s.folder(a['unit'])
         stamp = time.strftime('%H%M%S')
         # --verbose: every request and reply goes to the log too (--quiet sends all output there)
@@ -4040,6 +4201,8 @@ class Daemon:
             port = self.busy_port('%s@%s' % (a['unit'], addr), tgt, 'flash %s' % os.path.basename(img))
             emu = self.emulators[(s.sid, a['unit'])]
             over = emu.get('sha')                   # what this flash goes over: its pass is of that transition
+            ran_before = [h['what'] for h in emu.get('history') or []]
+            clean = not ran_before and bool(emu.get('card_clean'))
             if emu.get('firmware'):                 # digiemu reboots from the file the flash was written from
                 shutil.copyfile(img, os.path.join(emu['firmware'], os.path.basename(img)))
                 tail = tail + ['--wait-timeout', '400']       # a reboot is a cold boot and a settle
@@ -4079,8 +4242,11 @@ class Daemon:
                 s.flashed_at[a['unit']] = next(s.steps)
                 s.done.setdefault(a['unit'], []).append('flash %s %s' % (os.path.basename(img), job.state.upper()))
             elif rc == 0 and over:
-                self.record_pass(flash_key(a['unit'], d, over), {'image': img, 'unit': a['unit'], 'over': over})
+                self.record_pass(flash_key(a['unit'], d, over), {'image': img, 'unit': a['unit'], 'over': over,
+                                                                 'after': ran_before})
                 job.lines.append('recorded as the emulator pass for this file over the OS the emulator ran')
+                self.record_fixed(a['unit'], None, d, over, {'image': img, 'unit': a['unit'], 'over': over,
+                                                            'via': 'flash', 'log': flog}, clean, job.lines)
             elif rc == 0:
                 job.lines.append('not recorded as an emulator pass: which OS the emulator ran before is unknown')
             if tgt == 'emulator' and rc == 0:
@@ -4744,7 +4910,11 @@ class Daemon:
                     continue
                 ep = self.plan_pass(v['info'])
                 known = ('built-in start ' + v['home'],) if v.get('home') else KNOWN_STARTS
-                if ep and ep.get('os') == v['os'] and ep.get('start') in known:
+                stale = None
+                if v['info']['flash_sha'] and not v.get('home'):
+                    # a flash between fixed OS files: kept only while its cached gate stands
+                    _fp, stale = self.fixed_pass(v['info']['unit'], v['info']['key'], v['info']['flash_sha'], v['os'])
+                if ep and ep.get('os') == v['os'] and ep.get('start') in known and not stale:
                     kept.append('kept: %s, unchanged since its pass (%s)' % (
                         v['name'], ep.get('run_dir') or stamp(ep['time'])))
                     variants.remove(v)
@@ -5300,6 +5470,11 @@ class Daemon:
             if info['flash_sha']:
                 self.record_pass(flash_key(unit, info['flash_sha'], v['os']),
                                  {'image': info['flash'], 'unit': unit, 'run_dir': run_dir, 'over': v['os']})
+                # a gate run boots a fresh emulator on a fresh copy of config.toml's card
+                self.record_fixed(unit, info['key'], info['flash_sha'], v['os'], {
+                    'plan': info['path'], 'run_dir': run_dir, 'unit': unit, 'over': v['os'],
+                    'via': 'gate batch %s' % os.path.basename(folder)},
+                    not snap and not v.get('home') and not isinstance(proc, dict))
         if ok:
             shutil.rmtree(work, ignore_errors=True)
             return dict(outcome='pass', line=line, run_dir=run_dir)

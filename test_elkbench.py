@@ -2847,6 +2847,141 @@ class InProcess(unittest.TestCase):
         self.assertTrue(self.d.flash_pass(unit, sb, d))
         self.assertFalse(self.d.flash_pass(unit, sb, sa))
 
+    def gate_tools(self):
+        """A stand-in analog-emu binary, elkflash package and emulator card, so gate_env knows all
+        of them; -> (exe, elkflash file, card)."""
+        folder = os.path.join(TMP, 'gate-tools')
+        os.makedirs(os.path.join(folder, 'elkflash'), exist_ok=True)
+        exe, ef, card = (os.path.join(folder, 'rytm-emu'), os.path.join(folder, 'elkflash', '__init__.py'),
+                         os.path.join(folder, 'card.img'))
+        for f, body in ((exe, 'emu v1'), (ef, '# elkflash v1'), (card, 'card v1')):
+            with open(f, 'w') as fh:
+                fh.write(body)
+        saved = daemon.ANALOG_EMU, daemon.ELKFLASH
+        daemon.ANALOG_EMU, daemon.ELKFLASH = folder, folder
+        before = {k: daemon.UNITS['rytm'][k] for k in ('emu_exe', 'emu_card') if k in daemon.UNITS['rytm']}
+        daemon.UNITS['rytm'].update(emu_exe='rytm-emu', emu_card=card)
+
+        def back():
+            daemon.ANALOG_EMU, daemon.ELKFLASH = saved
+            for k in ('emu_exe', 'emu_card'):
+                daemon.UNITS['rytm'].pop(k, None)
+            daemon.UNITS['rytm'].update(before)
+        self.addCleanup(back)
+        return exe, ef, card
+
+    def test_a_cached_flash_gate_is_keyed_by_what_it_ran_on(self):
+        os.makedirs(daemon.STATE, exist_ok=True)
+        exe, ef, card = self.gate_tools()
+        unit = 'rytm'
+        stock = daemon.sha256(self.saved['stock'][0])
+        base = daemon.sha256(os.path.join(TMP, 'os', 'test-build.syx'))           # the rest OS
+        other = daemon.sha256(os.path.join(TMP, 'os', 'remote-only.syx'))
+        # only between fixed OS files (stock, rest)
+        self.assertEqual(self.d.fixed_pass(unit, None, stock, other), (None, None))
+        self.assertEqual(self.d.fixed_pass(unit, None, stock, base), (None, 'no cached pass of this transition'))
+        lines = []
+        self.d.record_fixed(unit, None, stock, base, {'image': 'stock.syx'}, False, lines)
+        self.assertIn('not recorded as a cached flash gate', lines[-1])
+        self.assertEqual(self.d.fixed_pass(unit, None, stock, base)[0], None)
+        self.d.record_fixed(unit, None, stock, base, {'image': 'stock.syx'}, True, lines)
+        self.assertIn('recorded as the cached flash gate', lines[-1])
+        self.assertTrue(self.d.fixed_pass(unit, None, stock, base)[0])
+        self.assertEqual(self.d.fixed_pass(unit, None, base, stock), (None, 'no cached pass of this transition'))
+        # each part of what it ran on: changed, the pass no longer counts
+        for f, what in ((exe, 'the emulator binary'), (ef, 'elkflash'), (card, 'the emulator card')):
+            with open(f, 'a') as fh:
+                fh.write(' and a change')
+            e, why = self.d.fixed_pass(unit, None, stock, base)
+            self.assertIsNone(e)
+            self.assertIn('no longer counts: %s changed' % what, why)
+            self.d.record_fixed(unit, None, stock, base, {'image': 'stock.syx'}, True)
+            self.assertTrue(self.d.fixed_pass(unit, None, stock, base)[0])
+        saved = daemon.FLASH_GATE
+        daemon.FLASH_GATE = saved + 1
+        self.addCleanup(setattr, daemon, 'FLASH_GATE', saved)
+        self.assertIn('FLASH_GATE changed', self.d.fixed_pass(unit, None, stock, base)[1])
+        # with no elkflash to hash, nothing is cached
+        daemon.ELKFLASH = os.path.join(TMP, 'no-such-elkflash')
+        self.assertIn('elkflash is not found', self.d.fixed_pass(unit, None, stock, base)[1])
+
+    def test_an_emulator_flash_is_cached_only_on_a_clean_emulator(self):
+        os.makedirs(daemon.STATE, exist_ok=True)
+        self.gate_tools()
+        unit, img = 'rytm', self.saved['stock'][0]
+        d, base = daemon.sha256(img), daemon.sha256(os.path.join(TMP, 'os', 'test-build.syx'))
+        self.d.emu_ready = lambda s, unit, build, snap=None: ('tcp:127.0.0.1:7399', [])
+        proc = type('P', (), {'poll': lambda self: None, 'pid': 99})()
+        self.addCleanup(self.d.emulators.pop, (self.s.sid, unit), None)
+        for history, card_clean, cached in (([dict(what='plan M1', taints=False)], True, False),
+                                            ([], False, False), ([], True, True)):
+            forget_passes()
+            ran = [h['what'] for h in history]
+            self.d.emulators[(self.s.sid, unit)] = dict(proc=proc, build='test-build.syx', sha=base, history=history,
+                                                        card_clean=card_clean, address='tcp:127.0.0.1:7399')
+            self.d.t_flash(self.s, {'unit': unit, 'image': img, 'target': 'emulator'})
+            self.done(self.started[-1][0], 0, 'ok\n')
+            self.assertTrue(self.d.flash_pass(unit, d, base))                 # the plain pass, as before
+            self.assertEqual(self.d.flash_pass(unit, d, base)['after'], ran)
+            self.assertEqual(bool(self.d.fixed_pass(unit, None, d, base)[0]), cached, (history, card_clean))
+
+    def test_the_go_says_how_each_fixed_flash_is_gated(self):
+        os.makedirs(daemon.STATE, exist_ok=True)
+        self.gate_tools()
+        unit, img, build = 'rytm', self.saved['stock'][0], os.path.join(TMP, 'os', 'test-build.syx')
+        d, base = daemon.sha256(img), daemon.sha256(build)
+        self.d.record_pass(daemon.flash_key(unit, d, base), {'image': img, 'unit': unit, 'over': base, 'after': []})
+        go = {'flashes': [{'unit': unit, 'image': img, 'over': build}], 'purpose': 't'}
+        body = '\n'.join(self.d.t_approval_text(self.s, go))
+        self.assertIn("gate: gated in this run's order (no cached pass of this transition)", body)
+        self.d.record_fixed(unit, None, d, base, {'image': img, 'log': 'elkflash.log'}, True)
+        body = '\n'.join(self.d.t_approval_text(self.s, go))
+        self.assertRegex(body, r'gate: cached pass elkflash.log \(.+\), key matches')
+        # a flash that is not between fixed OS files says nothing new
+        other = os.path.join(TMP, 'os', 'remote-only.syx')
+        self.d.record_pass(daemon.flash_key(unit, d, daemon.sha256(other)), {'image': img, 'unit': unit})
+        body = '\n'.join(self.d.t_approval_text(self.s, {'flashes': [{'unit': unit, 'image': img, 'over': other}],
+                                                         'purpose': 't'}))
+        self.assertNotIn('gate:', body)
+        # after a plan that leaves boot state changed, only a pass run after that plan counts
+        boot = {unit: (['/mods/active'], 'M1')}
+        with self.assertRaisesRegex(daemon.Refused, 'flashes after M1, which leaves /mods/active changed'):
+            self.d.gate_line(unit, None, d, base, {'after': []}, boot, 'stock.syx')
+        self.assertIn("gated in this run's order, after M1",
+                      self.d.gate_line(unit, None, d, base, {'after': ['plan M1']}, boot, 'stock.syx'))
+        self.assertIn('cached pass', self.d.gate_line(unit, None, d, base, {'after': []}, {unit: ([], None)}, 'x'))
+
+    @needs_runner
+    def test_a_fixed_flash_plan_after_a_mods_plan_gates_in_run_order(self):
+        os.makedirs(daemon.STATE, exist_ok=True)
+        self.gate_tools()
+        folder = tempfile.mkdtemp(dir=TMP)
+        with open(os.path.join(folder, 'a.elemod'), 'wb') as fh:
+            fh.write(b'mod')
+        m1, m2 = os.path.join(folder, 'm1.txt'), os.path.join(folder, 'm2.txt')
+        for path, name, body in ((m1, 'M1', 'mods-put "~T BASE" a.elemod\nmods-active "~T BASE/a.elemod"\n'),
+                                 (m2, 'M2', 'mods-active restore\nmods-remove "~T BASE"\n')):
+            with open(path, 'w') as fh:
+                fh.write('format = 1\nname = %s\nunit = rytm\nrefs = %s\n\n[start]\nexpect-screen %s-s\n\n'
+                         '[mods]\nsay proves setup: mods\n%s' % (name, os.path.join(folder, name), name, body))
+        flash = os.path.join(PLANS, 'menus-flash.txt')
+        infos = [self.d.plan_info(p) for p in (m1, m2, flash)]
+        for info in infos:
+            self.fake_pass(info)
+        fi = infos[2]
+        with self.assertRaisesRegex(daemon.Refused, 'flashes after M1, which leaves /mods/active; ~T BASE in /mods'):
+            self.d.go_request(self.s, {'plans': [m1, flash]})
+        run = self.d.passes()[fi['key']]['run_dir']
+        self.d.record_pass(fi['key'], {'run_dir': run, 'after': ['plan M1']})
+        _items, body = self.d.go_request(self.s, {'plans': [m1, flash]})
+        self.assertIn("gate: gated in this run's order, after M1", body)
+        # M2 puts back what M1 changed: a cached pass counts again after it
+        _items, body = self.d.go_request(self.s, {'plans': [m1, m2, flash]})
+        self.assertIn("gate: gated in this run's order (no cached pass of this transition)", body)
+        self.d.record_fixed('rytm', fi['key'], fi['flash_sha'], fi['os_sha'], {'run_dir': run}, True)
+        _items, body = self.d.go_request(self.s, {'plans': [m1, m2, flash]})
+        self.assertRegex(body, r'gate: cached pass %s \(.+\), key matches' % re.escape(run))
+
     @needs_runner
     def test_the_plan_key_names_the_os_it_runs_on(self):
         plan = os.path.join(PLANS, 'stock-restore.txt')
