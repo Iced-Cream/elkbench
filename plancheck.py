@@ -31,11 +31,14 @@ What a plan must carry (see docs/testing-practices.md, "Plan checker and templat
 import os
 import shlex
 
+import modsteps
+
 PROVES = ('setup', 'set-and-kept', 'works', 'evidence')
 # steps whose failure stops the run: machine assertions
-ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping')
+ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping', 'expect-mods')
 # steps that change what the unit holds or a value on it (keys only move through the UI)
-WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', 'at', 'turn', 'pad', 'padplay')
+WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', 'at', 'turn', 'pad', 'padplay',
+             'mods-put', 'mods-active', 'mods-remove')
 # steps that need a remote-key path in the OS (analoghealth, or a remote-only build)
 KEY_OPS = ('tap', 'hold', 'release', 'keys', 'turn', 'pad', 'padplay')
 # steps that only move through menus or look: nothing between a save and a check but these
@@ -139,7 +142,7 @@ def rows_of(w):
 
 
 def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False, starts=('fresh',),
-          os_file=None):
+          os_file=None, here=None):
     """steps: [(section name, [step lines])]. flash: the OS file the plan flashes, or None;
     stock: whether that file is the unit's stock OS; starts: the starts this unit's emulator
     runs (`fresh` and its built-in ones); os_file: the OS the plan runs on (`os =`).
@@ -190,7 +193,7 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
             errors.append('[%s] proves %r: KIND is one of %s' % (name, kind, ', '.join(PROVES)))
         elif kind in ('set-and-kept', 'works') and not has:
             errors.append('[%s] says it proves %s but has no machine assertion (expect-screen, '
-                          'capture any/none, audio-compare, audio-dropouts, stats, ping): a shot alone is '
+                          'capture any/none, audio-compare, audio-dropouts, stats, ping, expect-mods): a shot alone is '
                           'judged by eye, so mark it evidence or add a check' % (name, kind))
         elif kind == 'evidence' and not flash_only:
             flags.append('[%s] judged by eye (evidence: shots only)' % name)
@@ -238,6 +241,12 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
         if bad:
             errors.append('the plan flashes the stock OS and then uses %s: stock has no remote keys or '
                           'reads; flash a build with analoghealth, or a remote-only build' % ', '.join(bad))
+    # 5b. Drive Loader steps (modsteps.py): parse, none after a stock flash, expect-mods after a reboot
+    if any(w and w[0].lower() in modsteps.OPS for _, w in all_words):
+        e, f = modsteps.plan_rules(steps, stock_flash=bool(flash and stock),
+                                   here=here or (os.path.dirname(refs) if refs else '.'))
+        errors += e
+        flags += f
     if not flash and any(w and w[0].lower() in KEY_OPS + ('dump',) for _, w in all_words):
         flags.append('key or dump steps on the OS the unit has: check with unit_state that it has a '
                      'remote-key path (analoghealth or a remote-only build)')

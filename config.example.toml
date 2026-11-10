@@ -84,6 +84,8 @@ person = "the person at this PC"
 # evidence = 'C:\tests\rytm\runs'          # run folders and test-log.md
 # refs = 'C:\tests\rytm\refs'              # default folder for expect_screen references
 # stock = ['C:\os\Analog-Rytm_MKII_OS1.74.syx']   # what counts as "stock" at release
+# rest = ['C:\tests\base\BASE1.syx']      # other OSes release accepts the unit being left on
+#                                          # (a base build for Drive Loader tests); empty: stock only
 # clear_at_release = '121-128'           # project slots release backs up, erases and lists empty, so
 #                                        # every run finds them so (Rytm, A4 and Digitone; the example
 #                                        # policy's test slots); the go request names it

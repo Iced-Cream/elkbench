@@ -31,6 +31,7 @@ Stdlib only. Windows and Linux (no Overbridge Total Recall on Linux: there is no
 import base64
 import ctypes as C
 import hashlib
+import itertools
 import json
 import os
 import re
@@ -48,6 +49,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import batch
 import plancheck
+import modsteps
 
 WINDOWS = os.name == 'nt'
 if WINDOWS:
@@ -273,19 +275,38 @@ def boot_from_flash(e):
     return True
 
 
-def power_cycle_parts(steps):
+def is_stage_step(line):
+    """A step elkbench runs itself between parts of a plan: `power-cycle`, or a Drive Loader
+    step (modsteps.py: mods-put, mods-active, expect-mods)."""
+    return is_power_cycle(line) or modsteps.is_mods_step(line)
+
+
+def stage_steps(steps):
+    """-> the plan's stage steps (is_stage_step) in order, one per gap between its parts."""
+    return [l for _, lines in steps for l in lines if is_stage_step(l)]
+
+
+def stage_parts(steps):
+    """power_cycle_parts, split at every stage step (power cycles and mods steps)."""
+    return power_cycle_parts(steps, is_stage_step)
+
+
+def power_cycle_parts(steps, split=None):
     """A plan's sections -> its parts between `power-cycle` steps (a list of section lists, one
     more than there are power cycles; the first may be empty). A section a power cycle splits
-    goes on in the next part as 'NAME, after the power cycle'."""
+    goes on in the next part as 'NAME, after the power cycle'. `split` (stage_parts) splits at
+    other steps too."""
+    split = split or is_power_cycle
     parts, cur = [], []
     for name, lines in steps:
         body, piece = [], name
         for l in lines:
-            if is_power_cycle(l):
+            if split(l):
                 if any(x.strip() and not x.strip().startswith('#') for x in body):
                     cur.append((piece, body))
                 parts.append(cur)
-                cur, body, piece = [], [], name + ', after the power cycle'
+                cur, body, piece = [], [], name + (', after the power cycle' if is_power_cycle(l) else
+                                                   ', after %s' % l.split('#')[0].strip()[:40])
             else:
                 body.append(l)
         if any(x.strip() and not x.strip().startswith('#') for x in body) or piece == name:
@@ -566,6 +587,26 @@ def start_verdict(expect, rc, run_dir):
     return True, 'stopped in [%s] as its contrast says: %s' % (expect, first.get('detail', ''))
 
 
+def start_run_verdict(expect, passed, summs):
+    """-> (as expected, line) for a run_plan start run in parts (summs: each part's summary, in
+    order): it passes, or its first failure is in section `expect` (or that section's part after
+    a power cycle or mods step)."""
+    first = next((x for sm in summs for x in sm.get('steps') or [] if x.get('result') == 'FAIL'), None)
+    if expect is None:
+        if passed:
+            return True, 'passed'
+        return False, 'stopped in [%s]: %s' % (first['step'], first.get('detail', '')) if first else \
+            'failed before any part gave a verdict (the start or a step between parts)'
+    if not first:
+        return False, ('passed, so [%s] cannot tell this start apart: its contrast is not seen to fail' % expect
+                       if passed else 'failed with no step failure in a part: the start or a step between parts')
+    name = first['step']
+    if name != expect and not name.startswith(expect + ', after'):
+        return False, 'stopped in [%s] before [%s] (%s): the contrast never reached its section' % (
+            name, expect, first.get('detail', ''))
+    return True, 'stopped in [%s] as its contrast says: %s' % (expect, first.get('detail', ''))
+
+
 def project_changes(before, after, allowed):
     """{slot: (name, sha256)} before and after a run -> lines naming every saved project that
     was added, removed or changed outside `allowed`."""
@@ -825,6 +866,12 @@ class Session:
         self.purpose = {}                 # unit -> claim purpose
         self.done = {}                    # unit -> ['plan X PASS (dir)', ...] since the claim
         self.os_left = {}                 # unit -> (image name, stock?) after a hardware flash
+        self.mods_saved = {}              # (unit, target) -> the /mods/active a mods-active step saved (file, or None:
+                                          # there was none), until written back
+        self.mods_gone = {}               # unit -> {'/mods/~T X': (step no, time, /mods after)}: a hardware
+                                          # mods-remove removed it and listed /mods without it
+        self.flashed_at = {}              # unit -> step no of this session's last hardware flash
+        self.steps = itertools.count(1)   # orders the two above
 
     def folder(self, unit):
         """This session's evidence folder in the unit's evidence folder."""
@@ -1308,6 +1355,21 @@ class Daemon:
                 return True
         return False
 
+    def is_rest(self, unit, digest):
+        """Whether `digest` (sha256) is one of the unit's `rest` files (config.toml): an OS
+        besides stock that release accepts the unit being left on, such as the Rytm's base build
+        for Drive Loader tests (decided 2026-11-09). Empty by default."""
+        return bool(digest) and any(os.path.exists(p) and sha256(p) == digest
+                                    for p in UNITS[unit].get('rest') or [])
+
+    def os_label(self, unit, left):
+        """An os_left entry -> 'stock', 'rest' or 'NOT STOCK'."""
+        if left[1]:
+            return 'stock'
+        if len(left) > 2 and self.is_rest(unit, left[2]):
+            return 'rest OS'
+        return 'NOT STOCK'
+
     def check_stats(self, unit, digest, ops, where):
         """Refuses a `stats` step on an OS file listed in the unit's no_stats (builds whose
         channel answers "unknown command" to it)."""
@@ -1510,6 +1572,15 @@ class Daemon:
         vouched = {'unit': unit, 'steps': steps, 'flash': flash_sha, 'refs': ref_sums}
         if send_sums:                 # left out otherwise, so earlier passes still count
             vouched['sends'] = send_sums
+        # mods-put: the files a plan uploads to /mods are part of what its pass vouches for
+        mods_lines = [l for _, lines in steps for l in lines if modsteps.is_mods_step(l)]
+        mods_files = []
+        if mods_lines:
+            try:
+                mods_files = [(f, sha256(f), os.path.getsize(f)) for f in modsteps.put_files(steps, here)]
+            except ValueError as e:
+                raise Refused(str(e))
+            vouched['mods'] = [(os.path.basename(f), d) for f, d, _n in mods_files]
         if home:
             vouched['start'] = home
         old_key = hashlib.sha256(json.dumps(vouched, sort_keys=True).encode()).hexdigest()
@@ -1538,14 +1609,17 @@ class Daemon:
         cycles = power_cycles(steps)
         if cycles:
             self.check_power_cycles(unit, steps, flash, setup)
+        if mods_lines:
+            self.check_mods_steps(unit, steps, flash, setup, here)
         # the plan checker's rules (plancheck.py): errors refuse the go, flags go into it
         check = plancheck.check(steps, unit=unit, refs=refs, flash=flash,
                                 stock=bool(flash_sha) and self.is_stock(unit, flash_sha), os_file=os_file,
                                 emulator=settings.get('emulator', 'no').lower() == 'yes',
-                                starts=tuple(unit_starts(unit)))
+                                starts=tuple(unit_starts(unit)), here=here)
         return dict(path=path, here=here, settings=settings, steps=steps, unit=unit, key=key, check=check,
                     old_key=old_key, os_file=os_file, os_sha=os_sha, flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, setup=setup, din=bool(din),
                     audio_waits=audio_waits(steps), power_cycles=cycles, home=home,
+                    mods_steps=mods_lines, mods_files=mods_files, stages=stage_steps(steps),
                     name=settings.get('name') or os.path.splitext(os.path.basename(path))[0],
                     emulator=settings.get('emulator', 'no').lower() == 'yes', rel=rel)
 
@@ -1579,6 +1653,34 @@ class Daemon:
                 raise Refused('power cycle %d has no machine assertion after it (an expect-screen of what it '
                               'had to keep, before the next power cycle or the end): a readback judged by eye '
                               'proves nothing about the card' % n)
+
+    def check_mods_steps(self, unit, steps, flash, setup, here):
+        """Refused unless this plan's Drive Loader steps (modsteps.py) can run: on a unit with a
+        +Drive and modsgate set, alone on their line, outside (hardware) sections and the setup,
+        in a plan that flashes nothing (the base is flashed, or reflashed for a reboot, in a plan
+        of its own), each parsing."""
+        if not UNITS[unit].get('drive'):
+            raise Refused('mods steps run on the Rytm (its +Drive /mods, the Drive Loader); the %s has none' % unit)
+        need(MODSGATE, 'modsgate', 'the +Drive /mods tool (modsgate.py)')
+        if flash:
+            raise Refused('a plan with mods steps cannot flash: flash (or reflash the base to reboot) in a plan '
+                          'of its own, then run the mods steps')
+        for i, (name, lines) in enumerate(steps):
+            for l in lines:
+                if not modsteps.is_mods_step(l):
+                    continue
+                if ';' in l:
+                    raise Refused('[%s] %r: a mods step goes on a line of its own' % (name, l))
+                try:
+                    modsteps.parse(l, here)
+                except ValueError as e:
+                    raise Refused('[%s] %s' % (name, e))
+                if name.endswith('(hardware)'):
+                    raise Refused('[%s] %s in a (hardware) section: the emulator skips those, so its pass would '
+                                  'not cover it' % (name, modsteps.op_of(l)))
+                if setup and i < setup:
+                    raise Refused('[%s] %s in the setup (snapshot-after): a setup snapshot holds no /mods state; '
+                                  'put it after the setup' % (name, modsteps.op_of(l)))
 
     def snapshot_key(self, info, build):
         """What a setup snapshot vouches for: the unit, the emulator binary, the build and the
@@ -1977,10 +2079,34 @@ class Daemon:
         if any(j.sess is s and j.unit in mine and j.state == 'running' and j.target == 'hardware'
                for j in self.running()):
             raise Refused('a hardware run of yours is still going; release when it ends (status)')
-        off = [u for u in mine if s.os_left.get(u) and not s.os_left[u][1]]
+        off = [u for u in mine if s.os_left.get(u) and not s.os_left[u][1]
+               and not self.is_rest(u, s.os_left[u][2] if len(s.os_left[u]) > 2 else None)]
         if off and not a.get('accept_non_stock'):
-            raise Refused('%s is left on %s, not stock: run the stock-restore plan first, or say why '
-                          'in the note and pass accept_non_stock' % (off[0], s.os_left[off[0]][0]))
+            raise Refused('%s is left on %s, not stock%s: run the restore plan first, or say why '
+                          'in the note and pass accept_non_stock' % (
+                              off[0], s.os_left[off[0]][0],
+                              ' or its rest OS' if UNITS[off[0]].get('rest') else ''))
+        # A mods-active saved the owner's /mods/active: it goes back before anything else (E2b)
+        restored = {}
+        for u in mine:
+            if (u, 'hardware') not in s.mods_saved:
+                continue
+            log = []
+            try:
+                self.check_connected(u, 'hardware')
+                port = self.busy_port(u, 'hardware', 'release: write /mods/active back')
+                try:
+                    ok, line = self.mods_restore(s, u, 'hardware', log)
+                finally:
+                    port.release()
+            except Refused as e:
+                ok, line = False, '/mods/active NOT written back: %s' % e
+            with open(os.path.join(s.folder(u), 'release-mods-active.log'), 'a', encoding='utf-8') as fh:
+                fh.write('\n'.join(log) + '\n')
+            if not ok and not a.get('accept_drive_left'):
+                raise Refused('%s: %s, so the claim is kept. Write it back (mods-active restore on a loader OS) and '
+                              'release again, or say why in the note and pass accept_drive_left' % (u, line))
+            restored[u] = line
         # Every run leaves the test slots empty, so the next one finds them so (a plan still
         # checks): what they hold is backed up into the session's evidence folder, then erased.
         cleared = {}
@@ -2001,7 +2127,12 @@ class Daemon:
             paths += [p for p in folders if p not in paths]
             if not paths and not files:
                 continue
-            ok, lines = self.remove_drive_items(s, u, paths) if paths else (True, [])
+            # on stock, a /mods folder this session's mods-remove showed gone before the stock flash
+            # is proved gone by that record (stock cannot list /mods); without one, release still lists
+            proved, lines = self.mods_gone_proof(s, u, paths)
+            left = [p for p in paths if p not in proved]
+            ok, more = self.remove_drive_items(s, u, left) if left else (True, [])
+            lines += more
             if files:
                 k, more = self.remove_manifest_files(s, u, files)
                 ok, lines, paths = ok and k, lines + more, paths + files
@@ -2009,7 +2140,7 @@ class Daemon:
                 raise Refused('%s: the run\'s +Drive items are not all removed, so the claim is kept: %s. Fix '
                               'it and release again, or say why in the note and pass accept_drive_left'
                               % (u, '; '.join(lines)))
-            drive[u] = (ok, paths, lines)
+            drive[u] = (ok, paths, lines, proved)
         out = ['ok: released %s' % ', '.join(mine)]
         for u in mine:
             if u in cleared:
@@ -2019,14 +2150,19 @@ class Daemon:
                                                    'empty (data ls)' if ok else 'NOT EMPTY: ' + '; '.join(lines))
             else:
                 note_u = note
+            if u in restored:
+                out.append('%s: %s' % (u, restored[u]))
+                note_u += '; ' + restored[u]
             if u in drive:
-                ok, paths, lines = drive[u]
+                ok, paths, lines, proved = drive[u]
                 out += ['%s: %s' % (u, l) for l in lines]
-                note_u += '; +Drive %s %s' % (', '.join(paths), 'removed (ls)' if ok else
+                how = '; '.join((['ls'] if len(proved) < len(paths) else []) +
+                                (['mods-remove listed gone before the stock flash'] if proved else []))
+                note_u += '; +Drive %s %s' % (', '.join(paths), 'removed (%s)' % how if ok else
                                               'NOT ALL REMOVED: ' + '; '.join(lines))
                 self.drive_removed(s, u)
             done = s.done.get(u, [])
-            os_text = ('%s (%s)' % (s.os_left[u][0], 'stock' if s.os_left[u][1] else 'NOT STOCK')
+            os_text = ('%s (%s)' % (s.os_left[u][0], self.os_label(u, s.os_left[u]))
                        if u in s.os_left else 'not flashed by this session')
             full = '%s; runs: %s; OS: %s' % (note_u, '; '.join(done) or 'none', os_text)
             # a scratch ELKLOCK_DIR is a test: no device reads for the snapshot then
@@ -2052,7 +2188,30 @@ class Daemon:
             s.done.pop(u, None)
             s.purpose.pop(u, None)
             s.os_left.pop(u, None)
+            s.flashed_at.pop(u, None)
+            s.mods_gone.pop(u, None)
         return out
+
+    def mods_gone_proof(self, s, u, paths):
+        """The /mods items in `paths` that a hardware mods-remove of this session removed (the item, or
+        the folder holding it) and then listed /mods without, before this session's last flash, when
+        that flash left `u` on stock. Stock cannot list /mods, so release counts that record instead
+        of a listing. -> ([proved paths], [lines])"""
+        left = s.os_left.get(u)
+        flashed = s.flashed_at.get(u)
+        gone = s.mods_gone.get(u) or {}
+        if not left or not left[1] or flashed is None or not gone:
+            return [], []
+        proved, lines = [], []
+        for p in paths:
+            for f, (n, at, after) in sorted(gone.items()):
+                if n < flashed and (p == f or p.startswith(f + '/')):
+                    proved.append(p)
+                    lines.append('%s gone: removed by mods-remove %s at %s and /mods listed without it (%s) '
+                                 'before the flash of %s; stock cannot list /mods, so not listed again'
+                                 % (p, f, at, after, left[0]))
+                    break
+        return proved, lines
 
     def drive_to_remove(self, s, u):
         """The +Drive items this session's goes named on `u` (drive_items) that no release removed yet."""
@@ -2421,7 +2580,14 @@ class Daemon:
                 ''.join('\n  NOT TESTED IN THE EMULATOR: ' + h for h in hand) +
                 ''.join('\n  POWER CYCLE BY HAND (the run waits until you say it is done; the emulator pass '
                         'ran its power-off save and a cold boot): ' + c for c in info['power_cycles']) +
-                ''.join('\n  SHORT IN THE EMULATOR, IN FULL ON THE UNIT: ' + w for w in info['audio_waits'])))
+                ''.join('\n  SHORT IN THE EMULATOR, IN FULL ON THE UNIT: ' + w for w in info['audio_waits']) +
+                ''.join('\n  MODS FILE %s\n    sha256 %s, %d bytes' % (os.path.basename(f), d, n)
+                        for f, d, n in info['mods_files']) +
+                ''.join('\n  MODS STEP (through modsgate and the write policy): ' + l.split('#')[0].strip()
+                        for l in info['mods_steps']) +
+                ('\n  /mods/active: saved to the run folder before the first mods-active, written back by '
+                 'mods-active restore or at release' if any(modsteps.op_of(l) == 'mods-active'
+                                                           for l in info['mods_steps']) else '')))
         shared = plancheck.shared_refs(infos)
         if shared:
             raise Refused('; '.join(shared))
@@ -3387,10 +3553,16 @@ class Daemon:
         then runs on the emulator's ports of that moment); on the unit, the run waits until the
         person has power cycled it by hand and said so (listen_done), as at a listen step."""
         unit, stages = info['unit'], []
-        parts = power_cycle_parts(steps)
+        parts = stage_parts(steps)
+        between = stage_steps(steps)
+        cycles = sum(1 for l in between if is_power_cycle(l))
+        here, c = os.path.dirname(info['path']), 0
         for i, part in enumerate(parts):
-            if i:
-                stages.append(self.power_cycle_stage(s, unit, job, tgt, i, len(parts) - 1))
+            if i and is_power_cycle(between[i - 1]):
+                c += 1
+                stages.append(self.power_cycle_stage(s, unit, job, tgt, c, cycles))
+            elif i:
+                stages.append(self.mods_stage(s, unit, tgt, between[i - 1], here))
             if not part:
                 continue
             plan = self.twin(info, record_refs and tgt == 'emulator', s.sid, sections=part,
@@ -3415,6 +3587,186 @@ class Daemon:
         part.__name__ = 'part %d of the plan' % n
         return part
 
+    def mods_cmd(self, s, unit, tgt, *args):
+        """-> (command, env) running modsgate on the unit under the claim, or on this session's
+        emulator. An emulator's writes go into a scratch lock folder, never into the unit
+        claim's /mods manifest, which release removes items by."""
+        gate = need(MODSGATE, 'modsgate', 'the +Drive /mods tool (modsgate.py)')
+        env = dict(s.env())
+        env.setdefault('ELKLOCK', ELKLOCK)
+        if MODSGATE_ELEKLOADER:
+            env['ELEKLOADER'] = MODSGATE_ELEKLOADER
+        if tgt == 'hardware':
+            cmd = [sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, gate, '--port', UNITS[unit]['port']]
+        else:
+            env['ELKLOCK_DIR'] = os.path.join(STATE, 'emulator-locks', s.sid[:8])
+            os.makedirs(env['ELKLOCK_DIR'], exist_ok=True)
+            cmd = [sys.executable, gate, '--port', self.emu_port(s, unit)]
+        return cmd + list(args), env
+
+    def modsgate(self, s, unit, tgt, log, *args, timeout=900):
+        """One modsgate call -> (exit, stdout); the call and its output go into `log`."""
+        cmd, env = self.mods_cmd(s, unit, tgt, *args)
+        gate = cmd[cmd.index('--port') - 1]
+        r = subprocess.run(cmd, cwd=os.path.dirname(os.path.abspath(gate)), env=env, capture_output=True,
+                           text=True, encoding='utf-8', errors='replace', timeout=timeout, **NOWIN)
+        log.append('$ modsgate %s -> exit %d\n%s%s' % (' '.join(os.path.basename(x) if os.path.isabs(x) else x
+                                                               for x in args), r.returncode, r.stdout, r.stderr))
+        return r.returncode, r.stdout
+
+    def mods_restore(self, s, unit, tgt, log):
+        """Writes back the /mods/active the session's first mods-active saved (or removes the
+        one the run wrote, where there was none). -> (ok, line)"""
+        if (unit, tgt) not in s.mods_saved:
+            return True, 'no /mods/active saved: nothing to write back'
+        saved = s.mods_saved[(unit, tgt)]
+        if saved:
+            rc, _ = self.modsgate(s, unit, tgt, log, 'restore-active', saved)
+            if rc:
+                return False, '/mods/active NOT written back from %s (exit %d)' % (saved, rc)
+            back = saved + '.after'
+            rc, _ = self.modsgate(s, unit, tgt, log, 'get', 'active', '--out', back)
+            with open(saved, 'rb') as a:
+                want = a.read()
+            same = False
+            if not rc and os.path.isfile(back):
+                with open(back, 'rb') as b:
+                    same = b.read() == want
+            if not same:
+                return False, '/mods/active written back, but its readback differs (%s)' % back
+            line = '/mods/active written back, %d bytes, read back byte for byte' % len(want)
+        else:
+            rc, out = self.modsgate(s, unit, tgt, log, 'ls')
+            if not rc and ('active', False) in mods_rows(out):
+                rc, _ = self.modsgate(s, unit, tgt, log, 'rm', 'active')
+                if rc:
+                    return False, 'there was no /mods/active before the run, and the run\'s one was NOT removed'
+            line = 'there was no /mods/active before the run: the run\'s one removed'
+        del s.mods_saved[(unit, tgt)]
+        return True, line
+
+    def mods_stage(self, s, unit, tgt, line, here):
+        """A stage running one Drive Loader step (modsteps.py) through modsgate."""
+        step = modsteps.parse(line, here)
+        folder = s.folder(unit) if tgt == 'hardware' else os.path.join(s.folder(unit), 'emulator')
+
+        def run(rc, out):
+            os.makedirs(folder, exist_ok=True)
+            log, said = [], []
+            try:
+                if step['op'] == 'mods-put':
+                    rc, out = self.modsgate(s, unit, tgt, log, 'ls')
+                    if rc:
+                        return 1, 'fail mods-put: modsgate ls /mods exit %d\n' % rc
+                    if (step['folder'], True) not in mods_rows(out):
+                        rc, _ = self.modsgate(s, unit, tgt, log, 'mkdir', step['folder'])
+                        if rc:
+                            return 1, 'fail mods-put: mkdir %s exit %d\n' % (step['folder'], rc)
+                    rc, _ = self.modsgate(s, unit, tgt, log, 'put', '--into', step['folder'], *step['files'])
+                    if rc:
+                        return 1, 'fail mods-put: put into %s exit %d\n' % (step['folder'], rc)
+                    rc, out = self.modsgate(s, unit, tgt, log, 'ls', step['folder'])
+                    have = {n for n, d in mods_rows(out) if not d}
+                    want = {os.path.basename(f) for f in step['files']}
+                    if rc or not want <= have:
+                        return 1, 'fail mods-put: /mods/%s lists %s, not all of %s\n' % (
+                            step['folder'], ', '.join(sorted(have)), ', '.join(sorted(want)))
+                    said.append('ok mods-put %d files into /mods/%s (listed)' % (len(want), step['folder']))
+                    if tgt == 'hardware':           # on the unit again: an earlier removal proves nothing now
+                        s.mods_gone.get(unit, {}).pop('/mods/' + step['folder'], None)
+                elif step['op'] == 'mods-active' and step['what'] == 'restore':
+                    ok, l = self.mods_restore(s, unit, tgt, log)
+                    if not ok:
+                        return 1, 'fail mods-active restore: %s\n' % l
+                    said.append('ok mods-active restore: ' + l)
+                elif step['op'] == 'mods-active':
+                    if (unit, tgt) not in s.mods_saved:     # E2b: saved first, written back before release
+                        rc, out = self.modsgate(s, unit, tgt, log, 'ls')
+                        if rc:
+                            return 1, 'fail mods-active: modsgate ls /mods exit %d\n' % rc
+                        if ('active', False) in mods_rows(out):
+                            keep = os.path.join(folder, 'mods-active-saved-%s.bin' % time.strftime('%H%M%S'))
+                            rc, _ = self.modsgate(s, unit, tgt, log, 'get', 'active', '--out', keep)
+                            if rc or not os.path.isfile(keep):
+                                return 1, 'fail mods-active: /mods/active not saved (exit %d): nothing written\n' % rc
+                            s.mods_saved[(unit, tgt)] = keep
+                            said.append('saved /mods/active (%d bytes) to %s' % (os.path.getsize(keep), keep))
+                        else:
+                            s.mods_saved[(unit, tgt)] = None
+                            said.append('no /mods/active before the run (release removes the one written now)')
+                    rc, _ = self.modsgate(s, unit, tgt, log, 'active', *step['paths'])
+                    if rc:
+                        return 1, 'fail mods-active: exit %d\n' % rc
+                    said.append('ok mods-active: %s (loads at the next boot)' % (
+                        '%d mods' % len(step['paths']) if step['paths'] else 'none'))
+                elif step['op'] == 'mods-remove':
+                    # the files in it first (modsgate asks the write policy for each, which allows only
+                    # what this claim, or this emulator's scratch claim, put there), then the folder
+                    rc, out = self.modsgate(s, unit, tgt, log, 'ls')
+                    if rc:
+                        return 1, 'fail mods-remove: modsgate ls /mods exit %d\n' % rc
+                    if (step['folder'], True) not in mods_rows(out):
+                        return 1, 'fail mods-remove: /mods/%s is not there (ls)\n' % step['folder']
+                    rc, out = self.modsgate(s, unit, tgt, log, 'ls', step['folder'])
+                    if rc:
+                        return 1, 'fail mods-remove: modsgate ls /mods/%s exit %d\n' % (step['folder'], rc)
+                    rows = mods_rows(out)
+                    removed = len(rows)
+                    if any(d for _n, d in rows):
+                        return 1, 'fail mods-remove: /mods/%s holds folders (%s): nothing removed\n' % (
+                            step['folder'], ', '.join(n for n, d in rows if d))
+                    for n, _d in rows:
+                        rc, _ = self.modsgate(s, unit, tgt, log, 'rm', step['folder'] + '/' + n)
+                        if rc:
+                            return 1, 'fail mods-remove: /mods/%s/%s not removed (%s)\n' % (
+                                step['folder'], n, 'the write policy refused' if rc == 3 else 'exit %d' % rc)
+                    rc, _ = self.modsgate(s, unit, tgt, log, 'rm', step['folder'])
+                    if rc:
+                        return 1, 'fail mods-remove: /mods/%s not removed (%s)\n' % (
+                            step['folder'], 'the write policy refused' if rc == 3 else 'exit %d' % rc)
+                    rc, out = self.modsgate(s, unit, tgt, log, 'ls')
+                    rows = mods_rows(out) if not rc else None
+                    if rows is None or step['folder'] in {n for n, _d in rows} or len(rows) >= MODS_LIST_TRUST:
+                        return 1, 'fail mods-remove: /mods/%s not shown gone (%s)\n' % (
+                            step['folder'], 'ls exit %d' % rc if rc else 'still listed' if rows is not None and
+                            step['folder'] in {n for n, _d in rows} else 'the listing may be cut')
+                    said.append('ok mods-remove /mods/%s: %d file(s) and the folder removed, gone from /mods (ls)'
+                                % (step['folder'], removed))
+                    if tgt == 'hardware':           # release's proof once stock, which cannot list /mods, is back
+                        s.mods_gone.setdefault(unit, {})['/mods/' + step['folder']] = (
+                            next(s.steps), time.strftime('%H:%M:%S'),
+                            ', '.join(n + ('/' if d else '') for n, d in rows) or 'empty')
+                else:                                       # expect-mods
+                    got = os.path.join(folder, 'mods-status-%s.txt' % time.strftime('%H%M%S'))
+                    rc, _ = self.modsgate(s, unit, tgt, log, 'get', '.status', '--out', got, timeout=120)
+                    if rc or not os.path.isfile(got):
+                        return 1, 'fail expect-mods: /mods/.status not read (exit %d)\n' % rc
+                    with open(got, encoding='utf-8', errors='replace') as fh:
+                        ok, lines = modsteps.expect(fh.read(), step['n'], step['ids'])
+                    if not ok:
+                        return 1, '\n'.join(lines + ['fail expect-mods (%s)' % got]) + '\n'
+                    said += lines
+                return 0, '\n'.join(said) + '\n'
+            finally:
+                with open(os.path.join(folder, 'mods-steps.log'), 'a', encoding='utf-8') as fh:
+                    fh.write('\n'.join(log) + '\n')
+        run.__name__ = line.split('#')[0].strip()[:60]
+        return run
+
+    def start_stage(self, s, unit, st, job):
+        """A stage building built-in start `st` on this session's fresh emulator (start_steps)."""
+        work = os.path.join(s.folder(unit), 'emulator', 'start-%s-%s' % (st, job.id))
+
+        def build(rc, out):
+            why = self.start_steps(s, unit, dict(start=st, start_chain=start_chain(unit, st)),
+                                   self.emu_port(s, unit), work, 20)
+            if why:
+                return 1, 'fail: %s\n' % why
+            self.note_emu(s, unit, 'built-in start %s' % st, False)
+            return 0, 'ok built-in start %s built (%s)\n' % (st, work)
+        build.__name__ = 'build start %s' % st
+        return build
+
     def power_cycle_stage(self, s, unit, job, tgt, n, of):
         """A stage for the plan's power cycle n (of `of`)."""
         if tgt == 'emulator':
@@ -3437,6 +3789,33 @@ class Daemon:
         unit = info['unit']
         job = Job(s, 'plan', unit, tgt, 'plan ' + info['name'])
         cycles = info['power_cycles']
+        staged = bool(cycles or info['mods_steps'])       # run in parts, elkbench's own steps between
+        st, want = (a.get('start') or '').strip().lower() or None, None
+        if st:
+            # A start run outside a gate batch (proposal A): batches do not run power-cycle or mods
+            # steps, so a plan with them gets its start runs here. With build, a fresh emulator
+            # builds the start and runs the plan; without, the plan runs on the emulator a start
+            # run of the same start left (a sequence such as M1, the base over itself, M2).
+            if tgt != 'emulator':
+                raise Refused('start is for emulator runs: a start run is part of the gate')
+            if info['emulator']:
+                raise Refused('this is an emulator plan: start runs are of hardware plans')
+            want = starts_needed(info)
+            if st not in want:
+                raise Refused('%s needs no run from start %s (its go needs: %s)' % (
+                    info['name'], st, ', '.join(sorted(want)) or 'none'))
+            if info.get('home'):
+                raise Refused('%s has start = %s: a gate batch runs it' % (info['name'], info['home']))
+            if a.get('record_refs'):
+                raise Refused('references are recorded in a plain emulator run, not a start run')
+            if not a.get('build'):
+                e = self.emulators.get((s.sid, unit)) or {}
+                if e.get('from_start') != st or not e.get('proc') or e['proc'].poll() is not None:
+                    raise Refused('no emulator of this session built from start %s is running: give build, '
+                                  'so a fresh emulator builds the start first' % st)
+                if any(h['taints'] for h in e.get('history') or []):
+                    raise Refused('the emulator built from start %s has since run steps outside any gated plan: '
+                                  'give build to start again' % st)
         if tgt == 'hardware':
             if info['emulator']:
                 raise Refused('this is an emulator plan; give the hardware plan')
@@ -3466,7 +3845,7 @@ class Daemon:
             # A plan that flashes needs `emulator-run` for testplan's gate: the recorded pass.
             plan = self.twin(info, False, s.sid, emulator_run=ep['run_dir']) \
                 if info['flash'] and ep.get('run_dir') else info['path']
-            cmd = self.plan_stages(s, info, job, tgt, info['steps']) if cycles else [
+            cmd = self.plan_stages(s, info, job, tgt, info['steps']) if staged else [
                 sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + port_args(unit) + din + [
                 '--quiet', 'run', plan]
             started = []
@@ -3482,8 +3861,12 @@ class Daemon:
                                   '(tools.analog_emu needs a build with the power-off save)' % UNITS[unit]['emu_exe'])
             if info['din'] and not self.emu_has_din(unit):
                 raise Refused(self.no_emu_din(unit))
-            snap = self.setup_snapshot(s, info, a)
+            snap = None if st else self.setup_snapshot(s, info, a)
+            if a.get('build'):              # a fresh emulator: no /mods/active saved on it yet
+                s.mods_saved.pop((unit, 'emulator'), None)
             addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'], bool(cycles))
+            if a.get('build'):
+                (self.emulators.get((s.sid, unit)) or {})['from_start'] = st
             if snap and snap.get('digi'):           # digiemu says at its start whether it had it stored
                 snap['have'] = bool((self.emulators.get((s.sid, unit)) or {}).get('resumed'))
             booted = (self.emulators.get((s.sid, unit)) or {}).get('sha')
@@ -3501,14 +3884,21 @@ class Daemon:
             if snap:
                 began = 'a setup snapshot' if snap['have'] else began
                 cmd = self.snapshot_stages(s, info, snap, addr, started, din, job)
-            elif cycles:
+            elif staged:
                 cmd = self.plan_stages(s, info, job, tgt, info['steps'], bool(a.get('record_refs')))
             else:
                 plan = info['path'] if info['emulator'] else self.twin(info, bool(a.get('record_refs')), s.sid)
                 cmd = [sys.executable, RUNNER, '--port', addr] + din + ['--quiet', 'run', plan]
             if guards_projects(unit):
-                cmd = self.guard_projects(info, (lambda: self.emu_port(s, unit)) if cycles else addr, cmd, os.path.join(
+                cmd = self.guard_projects(info, (lambda: self.emu_port(s, unit)) if staged else addr, cmd, os.path.join(
                     s.folder(unit), 'projects-%s' % time.strftime('%H%M%S')))
+            if st and a.get('build') and unit_starts(unit).get(st):
+                # the start first, on this fresh emulator (outside the project guard: building a
+                # start writes projects, as a gate batch's start does before its run)
+                cmd = [self.start_stage(s, unit, st, job)] + (
+                    list(cmd) if cmd and (isinstance(cmd[0], (list, tuple)) or callable(cmd[0])) else [cmd])
+            if st:
+                began = 'built-in start %s' % st if unit_starts(unit).get(st) else 'a fresh emulator'
         record = not info['emulator'] or info['settings'].get('record-refs', 'no') != 'yes'
         record = record and not a.get('record_refs')
         tainted = [h['what'] for h in before if h['taints']] if tgt == 'emulator' else []
@@ -3521,7 +3911,7 @@ class Daemon:
             run_dir = run_dirs[-1] if run_dirs else None
             summs = [read_json(os.path.join(d, 'summary.json'), {}) for d in run_dirs]
             summ = summs[-1] if summs else {}
-            parts = sum(1 for p in power_cycle_parts(info['steps']) if p) if cycles else 1
+            parts = sum(1 for p in stage_parts(info['steps']) if p) if staged else 1
             ok = rc == 0 and len(summs) >= parts and all(x.get('pass') for x in summs)
             job.state = 'pass' if ok else 'fail'
             kept = [l for l in lines if not l.startswith(('claimed', 'already yours', 'last handoff',
@@ -3566,11 +3956,30 @@ class Daemon:
                 if summ.get('flash_sha256'):
                     s.os_left[unit] = (os.path.basename(info['flash']),
                                        self.is_stock(unit, summ['flash_sha256']), summ['flash_sha256'])
+                    s.flashed_at[unit] = next(s.steps)
             else:
                 self.note_emu(s, unit, ('emulator plan ' if info['emulator'] else 'plan ') + info['name'],
                               info['emulator'] and info['writes'])
             if tgt == 'hardware':
                 pass
+            elif st:
+                ok_st, line = start_run_verdict(want[st], ok, summs)
+                e = self.emulators.get((s.sid, unit)) or {}
+                if ok_st and not any(h['taints'] for h in e.get('history') or []):
+                    self.record_start(info['key'], booted, st, {
+                        'plan': info['path'], 'expect': want[st], 'ok': True, 'line': line, 'run_dir': run_dir,
+                        'via': 'run_plan start %s' % st, 'after': [h['what'] for h in before]})
+                    job.lines.append('recorded as the run from start %s (%s)' % (st, line))
+                else:
+                    job.lines.append('not recorded as the run from start %s: %s' % (st, line if not ok_st else
+                                     'the emulator ran steps outside any gated plan'))
+                # as a start run, it went as expected: the job passes when the start run is recorded
+                job.state = 'pass' if ok_st else 'fail'
+            elif ok and record and (self.emulators.get((s.sid, unit)) or {}).get('from_start'):
+                fs = self.emulators[(s.sid, unit)]['from_start']
+                job.lines.append('not recorded as the emulator pass: this emulator was built from start %s; '
+                                 'give start = %s to record this plan\'s run from it, or build for a plain pass'
+                                 % (fs, fs))
             elif ok and record and info.get('home'):
                 job.lines.append('not recorded as the emulator pass: the plan starts from built-in start %s '
                                  '(start = %s), which a gate batch builds; run it with batch gate true'
@@ -3667,6 +4076,7 @@ class Daemon:
                     s.os_left[a['unit']] = (os.path.basename(img), self.is_stock(a['unit'], d), d)
                 else:
                     s.os_left[a['unit']] = ('unknown after a failed flash of %s' % os.path.basename(img), False)
+                s.flashed_at[a['unit']] = next(s.steps)
                 s.done.setdefault(a['unit'], []).append('flash %s %s' % (os.path.basename(img), job.state.upper()))
             elif rc == 0 and over:
                 self.record_pass(flash_key(a['unit'], d, over), {'image': img, 'unit': a['unit'], 'over': over})
@@ -4225,8 +4635,8 @@ class Daemon:
                 units.add(a.get('unit'))
             else:
                 x['info'] = info
-                if info['power_cycles'] and not gate:
-                    raise Refused('%s has power-cycle steps: batches do not power cycle yet, run it with '
+                if info['stages'] and not gate:
+                    raise Refused('%s has power-cycle or mods steps: batches do not run those yet, run it with '
                                   'run_plan target emulator (a gate batch runs only its start runs)'
                                   % info['name'])
                 units.add(info['unit'])
@@ -4262,28 +4672,29 @@ class Daemon:
             for v in variants:
                 u_, home = v['info']['unit'], v['info'].get('home')
                 want, have = starts_needed(v['info']), unit_starts(u_)
-                if v['info']['power_cycles']:
+                if v['info']['stages']:
                     name = v['info']['name']
                     if home:
-                        raise Refused('%s has power-cycle steps and start = %s: its own pass needs a gate batch, '
-                                      'and batches do not power cycle yet' % (name, home))
-                    before = set()           # the sections wholly before the first power cycle
+                        raise Refused('%s has power-cycle or mods steps and start = %s: its own pass needs a gate '
+                                      'batch, and batches do not run those yet' % (name, home))
+                    before = set()           # the sections wholly before the first power cycle or mods step
                     for n, ls in v['info']['steps']:
-                        if any(is_power_cycle(l) for l in ls):
+                        if any(is_stage_step(l) for l in ls):
                             break
                         before.add(n)
-                    late = ['%s (must %s)' % (st, 'pass' if e is None else 'stop in [%s]' % e)
-                            for st, e in sorted(want.items()) if e not in before]
+                    late = {st for st, e in want.items() if e not in before}
                     if late:
-                        raise Refused('%s: its run from start %s would reach the power cycle, and batches do not '
-                                      'power cycle yet: only start runs that stop before its first power cycle '
-                                      'can be gated' % (name, ', '.join(late)))
-                    notes.append('%s: start runs only, each up to its first power cycle; its own pass comes '
-                                 'from run_plan target emulator (batches do not power cycle yet)' % name)
+                        notes.append('%s: its runs from start %s reach a power cycle or mods step, which batches do '
+                                     'not run yet: run_plan target emulator with start = START and build runs each'
+                                     % (name, ', '.join(sorted(late))))
+                    if len(late) < len(want):
+                        notes.append('%s: start runs %s only, each up to its first power cycle or mods step; its own '
+                                     'pass comes from run_plan target emulator' % (
+                                         name, ', '.join(sorted(set(want) - late))))
                     runs_of += [dict(v, name='%s @%s' % (v['name'], st), start=st, expect=expect, power_cut=True,
                                      start_plan=have.get(st),
                                      start_chain=start_chain(u_, st) if have.get(st) else None)
-                                for st, expect in sorted(want.items())]
+                                for st, expect in sorted(want.items()) if st not in late]
                     continue
                 if home:                 # start = START: its own run (and pass) from that start
                     runs_of.append(dict(v, name='%s (from %s)' % (v['name'], home), home=home,
@@ -4842,7 +5253,7 @@ class Daemon:
                 info = v['info']
                 secs = None
                 if v.get('power_cut'):             # a start run of a power-cycle plan: up to its first power cycle
-                    secs = power_cycle_parts(info['steps'])[0]
+                    secs = stage_parts(info['steps'])[0]
                 if v.get('store') and resumed:     # resumed after its setup
                     secs = (secs or info['steps'])[info['setup']:]
                 plan = self.batch_plan(info, work, '%s run %d' % ('gate' if v.get('gate') else 'batch', n),
@@ -4948,7 +5359,8 @@ TOOLS = [
                 'those test slots first and lists them empty; removes the +Drive ~T items this session\'s '
                 'goes named (drive_items): +Drive root items by samplegate, then the root listed; /mods items '
                 'by modsgate, then /mods listed by the Drive Loader (stock cannot list /mods, so a run '
-                'removes those before its stock restore).',
+                'removes those before its stock restore: a /mods folder this session\'s mods-remove removed '
+                'and listed gone before its last flash, onto stock, counts as removed without a new listing).',
      S(unit={'type': ['string', 'array'], 'items': {'type': 'string'}, 'req': True},
        note={'type': 'string', 'req': True, 'description': 'state left: OS, project, menus'},
        accept_non_stock={'type': 'boolean', 'description': 'leave a non-stock OS on purpose (say why in note)'},
@@ -5031,7 +5443,12 @@ TOOLS = [
                  'on the unit the run waits at each until the person has done it by hand (status says so).',
      S(plan={'type': 'string', 'req': True, 'description': 'the hardware plan file (an emulator twin is made for you)'},
        target=TARGET(), approval={'type': 'string'}, build=EMU_BUILD(),
-       record_refs={'type': 'boolean', 'description': 'emulator only: save the reference screens'})),
+       record_refs={'type': 'boolean', 'description': 'emulator only: save the reference screens'},
+       start={'type': 'string', 'description': 'emulator only: record this run as the plan\'s run from built-in '
+                                               'start START (or fresh), for a plan whose start runs a gate batch '
+                                               'cannot run (power-cycle or mods steps). With build, a fresh emulator '
+                                               'builds the start first; without, the plan runs on the emulator a '
+                                               'start run of the same start left (M1, the base over itself, M2)'})),
     ('flash', 'Flash an OS .syx with elkflash (--no-confirm --wait) in the background; returns a run_id. '
               'Hardware: claim, a passing emulator flash of the same file over the same OS, and an approval token.',
      S(unit=UNIT(), image={'type': 'string', 'req': True}, target=TARGET(), approval={'type': 'string'},
@@ -5149,7 +5566,7 @@ D = None
 SECRET = None
 STARTED = time.time()                     # main() sets it again
 GATE = threading.Lock()                   # one hello at a time decides on a restart
-CODE = [os.path.abspath(f) for f in (__file__, batch.__file__, plancheck.__file__, elklock.__file__)]
+CODE = [os.path.abspath(f) for f in (__file__, batch.__file__, plancheck.__file__, modsteps.__file__, elklock.__file__)]
 
 
 class Handler(socketserver.StreamRequestHandler):
