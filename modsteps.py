@@ -128,7 +128,8 @@ def status(text):
     """/mods/.status -> dict(records=[(id, state, code, arg, detail)], boot=str|None,
     skipped=str|None, check=str|None)."""
     out = dict(records=[], boot=None, skipped=None, check=None, store=None, sites={})
-    head = ('drive-loader route', 'folder ', 'last:', 'io:')
+    # `stage:` (top-staging loaders): the live stage, `stage: N bytes at 0xADDR, free tail|floor`
+    head = ('drive-loader route', 'folder ', 'last:', 'io:', 'stage:')
     for l in text.splitlines():
         l = l.rstrip()
         if not l or l.startswith(head):
