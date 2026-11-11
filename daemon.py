@@ -48,6 +48,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 import batch
+import headroom
 import plancheck
 import modsteps
 
@@ -667,6 +668,8 @@ def load_config(path=CONFIG):
         obtr=os.path.join(HERE, 'obtr.py'), audio_python=t.get('audio_python') or [sys.executable],
         approval_fallback=c.get('approval_fallback') or 'popup',
         batch_slots=int(c.get('batch_max_emulators') or batch.SLOTS_DEFAULT),
+        headroom=headroom.Limits.from_config(c),
+        headroom_wait=float((c.get('emulator_headroom') or {}).get('start_wait_secs', 120)),
         write_policy=(policy or '(ANALOGHEALTH_POLICY is empty)') if c.get('require_write_policy') else None,
         starts=c.get('starts') or os.path.join(HERE, 'starts'),
         keep_awake=c.get('keep_awake', True) is not False,
@@ -701,6 +704,8 @@ WRITE_POLICY = CFG['write_policy']      # must exist before hardware calls, or N
 MIDI_CLIENT_NAMES = CFG['midi_clients']
 STARTS = CFG['starts']                    # <folder>/<unit>/<start>.txt: the built-in emulator starts
 batch.set_slots(CFG['batch_slots'])      # emulators all batches on this PC may run at once
+HEADROOM = CFG['headroom']               # headroom.Limits, or None: no CPU/RAM check before starts
+batch.HEADROOM = HEADROOM                # each batch run waits for it too
 
 sys.path[:0] = [os.path.dirname(ELKLOCK)] + ([os.path.join(ANALOGHEALTH, 'tools')] if ANALOGHEALTH else [])
 import elklock    # noqa: E402
@@ -3156,6 +3161,11 @@ class Daemon:
         # power_off: started with --power-off, so that a later plan with power-cycle steps runs on
         # it as it is (after the plans that set up its state) instead of on a fresh boot
         power_off = power_off or bool(a.get('power_off'))
+        if HEADROOM:                                 # room on the PC for one more emulator
+            ok, r = headroom.acquire(HEADROOM, CFG['headroom_wait'])
+            if not ok:
+                raise Refused('no room on this PC for another emulator after %.0f s: %s (%s)'
+                              % (CFG['headroom_wait'], r['why'], HEADROOM.text()))
         if u.get('emulator') == 'digiemu':           # snapshot: a setup snapshot's key
             if power_off and not self.digiemu_has_power_off():
                 raise Refused('power_off needs a digiemu whose tools/usbrun.py has --power-off')
