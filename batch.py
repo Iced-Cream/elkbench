@@ -5,7 +5,8 @@ an outcome); this file orders the runs, runs them a few at a time and sums them 
 - order: round by round (every variant once per round), shuffled within each round by a
   recorded seed, so whatever else loads the PC lands on every variant alike;
 - a cap per batch (parallel) and one for the whole PC (SLOTS), so two sessions' batches share
-  the emulators rather than pile up;
+  the emulators rather than pile up; with HEADROOM set (config [emulator_headroom]), each run
+  also waits until the PC's CPU, free RAM and emulator count leave room for one more;
 - outcomes: pass, fail, hang (the run's time ran out) or error (the run never got going: the
   emulator did not start). Errors are counted but left out of the comparison;
 - summary: each variant's pass count with a 95% Wilson interval, and every variant against the
@@ -23,10 +24,13 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import headroom
+
 SLOTS_DEFAULT = 8                       # emulators batches may run at once on this PC
 PARALLEL_DEFAULT = 4                    # at once within one batch
 OUTCOMES = ('pass', 'fail', 'hang', 'error')
 SLOTS = threading.BoundedSemaphore(SLOTS_DEFAULT)
+HEADROOM = None                         # headroom.Limits: each run waits for room on the PC
 
 
 def set_slots(n):
@@ -148,6 +152,10 @@ class Batch:
         with SLOTS:
             if self.stopped.is_set():
                 return
+            if HEADROOM is not None:
+                ok, _ = headroom.acquire(HEADROOM, None, self.stopped)
+                if not ok:                    # stopped while waiting
+                    return
             v = next(x for x in self.variants if x['name'] == name)
             t0 = time.time()
             try:

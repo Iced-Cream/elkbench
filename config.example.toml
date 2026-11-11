@@ -73,6 +73,19 @@ person = "the person at this PC"
 # Overbridge Total Recall (recall_take, recall_restore) is built in: obtr.py in this folder.
 
 # elklock reads this file too: tools.elkflash and tools.analoghealth for its handoff snapshot.
+# Emulator headroom (off unless this table is here): every emulator start (the emulator tool and
+# each batch run) waits until the PC has room: whole-PC CPU under max_cpu percent (a few seconds'
+# average), min_free_gb of RAM free, and fewer than max_emulators emulator processes running
+# (anyone's, by image name). The emulator tool waits up to start_wait_secs, then refuses; batch
+# runs wait as long as it takes. `python headroom.py --wait 600` makes the same check for a sweep
+# run outside elkbench. A busy analog-emu takes about one core. The values shown are the defaults.
+# [emulator_headroom]
+# max_cpu = 60
+# min_free_gb = 4
+# max_emulators = 10
+# start_wait_secs = 120
+# images = ['rytm.exe', 'a4.exe', 'vskip.exe', 'dtboot.exe', 'dtpeek.exe']
+
 # [elklock]
 # More command names its Bash hook treats as device tools, beside the built-in analogusb,
 # analogrun, digiusb, digirun, elkflash and obtr (for example your own scripts).
