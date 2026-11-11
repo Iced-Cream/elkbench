@@ -1090,6 +1090,42 @@ class InProcess(unittest.TestCase):
         before(0, '')
         self.assertEqual(after(0, '')[0], 0)
 
+    def test_writes_header_lets_stock_write_listed_test_slots_only(self):
+        # writes = 128 (decided 2026-11-11): stock's own write into 128 passes, one into 127 fails
+        self.assertEqual(daemon.stock_write_slots('128'), {128})
+        self.assertEqual(daemon.stock_write_slots('121-122, 128'), {121, 122, 128})
+        self.assertEqual(daemon.stock_write_slots(None), set())
+        for bad in ('5', '120-121', '129', 'all', '128-127'):
+            with self.assertRaises(ValueError):
+                daemon.stock_write_slots(bad)
+        info = {'steps': [('s', ['save-project 121 "~T X" YES'])], 'stock_writes': {128}}
+        self.assertEqual(daemon.plan_slots(info), {121, 128})
+        reads = [{121: ('~T X', 'a')}, {121: ('~T X', 'b'), 128: ('NEW PROJECT', 'c')}]
+        self.d.saved_projects = lambda addr, folder: reads.pop(0)
+        before, run, after = self.d.guard_projects(info, 'tcp:127.0.0.1:7399', ['run'], TMP)
+        before(0, '')
+        self.assertEqual(after(0, '')[0], 0)
+        reads[:] = [{121: ('~T X', 'a')}, {121: ('~T X', 'a'), 127: ('NEW PROJECT', 'c')}]
+        before(0, '')
+        rc, out = after(0, '')
+        self.assertEqual(rc, 1)
+        self.assertIn("project 127 added ('NEW PROJECT')", out)
+
+    @needs_runner
+    def test_plan_info_reads_the_writes_header(self):
+        text = read(os.path.join(PLANS, 'menus.txt'))
+        plan = os.path.join(PLANS, 'writes-hdr.txt')
+        self.addCleanup(lambda: os.path.exists(plan) and os.remove(plan))
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write('writes = 128' + chr(10) + text)
+        info = self.d.plan_info(plan)
+        self.assertEqual(info['stock_writes'], {128})
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write('writes = 5' + chr(10) + text)
+        with self.assertRaises(daemon.Refused) as e:
+            self.d.plan_info(plan)
+        self.assertIn('only the test slots 121-128', str(e.exception))
+
     def test_every_unit_with_a_runner_guards_its_saved_projects(self):
         for unit in ('rytm', 'a4', 'digitone', 'digitakt'):
             if unit in daemon.UNITS:

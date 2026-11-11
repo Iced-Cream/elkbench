@@ -327,6 +327,34 @@ def saved_slots(steps):
     return out
 
 
+TEST_SLOTS = range(121, 129)            # the project slots tests may write (TSG 3)
+
+
+def stock_write_slots(spec):
+    """A plan's `writes = SLOTS` header (decided 2026-11-11) -> the set of test slots (121-128)
+    stock itself may write during the plan, such as the slot a load job saves a new project
+    into; ValueError for anything else."""
+    out = set()
+    for part in str(spec or '').split(','):
+        part = part.strip()
+        if not part:
+            continue
+        m = re.fullmatch(r'(\d+)(?:\s*-\s*(\d+))?', part)
+        if not m:
+            raise ValueError('writes = takes slot numbers or ranges such as 128 or 121-124, not %r' % part)
+        lo, hi = int(m.group(1)), int(m.group(2) or m.group(1))
+        if lo > hi or lo not in TEST_SLOTS or hi not in TEST_SLOTS:
+            raise ValueError('writes = %s: only the test slots %d-%d' % (part, TEST_SLOTS[0], TEST_SLOTS[-1]))
+        out.update(range(lo, hi + 1))
+    return out
+
+
+def plan_slots(info):
+    """The saved projects an emulator run of a plan may change: the slots it saves into
+    (save-project N) and the ones its `writes =` header lets stock write."""
+    return saved_slots(info['steps']) | set(info.get('stock_writes') or ())
+
+
 def guards_projects(unit):
     """Whether an emulator run of a plan on `unit` reads its saved projects before and after:
     every unit with a runner. The data store RPC is the same on the Rytm, A4, Digitone and
@@ -1658,6 +1686,11 @@ class Daemon:
         if os_file and not os.path.isfile(os_file):
             raise Refused('the plan runs on %s (os =), which does not exist' % os_file)
         os_sha = sha256(os_file) if os_file else None
+        # writes = SLOTS: test slots stock itself writes during the plan (no save-project step)
+        try:
+            stock_writes = stock_write_slots(settings.get('writes'))
+        except ValueError as e:
+            raise Refused(str(e))
         refs = rel(settings.get('refs', 'refs'))
         ref_files = sorted(f for f in os.listdir(refs) if f.endswith('.bin')) if os.path.isdir(refs) else []
         ref_sums = [(f, sha256(os.path.join(refs, f))) for f in ref_files]
@@ -1706,6 +1739,8 @@ class Daemon:
             vouched['mods'] = [(os.path.basename(f), d) for f, d, _n in mods_files]
         if home:
             vouched['start'] = home
+        if stock_writes:              # left out otherwise, so earlier passes still count
+            vouched['writes'] = sorted(stock_writes)
         old_key = hashlib.sha256(json.dumps(vouched, sort_keys=True).encode()).hexdigest()
         if os_sha:                    # left out otherwise, so earlier passes still count
             vouched['os'] = os_sha
@@ -1740,7 +1775,7 @@ class Daemon:
                                 emulator=settings.get('emulator', 'no').lower() == 'yes',
                                 starts=tuple(unit_starts(unit)), here=here)
         return dict(path=path, here=here, settings=settings, steps=steps, unit=unit, key=key, check=check,
-                    old_key=old_key, os_file=os_file, os_sha=os_sha, flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, setup=setup, din=bool(din),
+                    old_key=old_key, os_file=os_file, os_sha=os_sha, flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, stock_writes=stock_writes, setup=setup, din=bool(din),
                     audio_waits=audio_waits(steps), power_cycles=cycles, home=home,
                     mods_steps=mods_lines, mods_files=mods_files, stages=stage_steps(steps),
                     name=settings.get('name') or os.path.splitext(os.path.basename(path))[0],
@@ -3638,7 +3673,7 @@ class Daemon:
         where = addr if callable(addr) else (lambda: addr)
         stages = list(cmd) if cmd and (isinstance(cmd[0], (list, tuple)) or callable(cmd[0])) else [cmd]
         seen = {}
-        allowed = saved_slots(info['steps'])
+        allowed = plan_slots(info)
 
         def before(rc, out):
             try:
@@ -5236,7 +5271,7 @@ class Daemon:
                 return 'variant %s: its setup did not pass: %s (%s)' % (v['name'], line, work)
             if guard:
                 bad = project_changes(before, self.saved_projects(addr, os.path.join(work, 'projects', 'after')),
-                                      saved_slots(info['steps']))
+                                      plan_slots(info))
                 if bad:
                     return 'variant %s: its setup wrote outside the plan\'s slots: %s (%s)' % (
                         v['name'], '; '.join(bad), work)
@@ -5450,7 +5485,7 @@ class Daemon:
             if ok and before is not None:
                 try:
                     now = self.saved_projects(addr, os.path.join(work, 'projects', 'after'))
-                    bad = project_changes(before, now, saved_slots(v['info']['steps']))
+                    bad = project_changes(before, now, plan_slots(v['info']))
                 except (RuntimeError, OSError, subprocess.SubprocessError) as e:
                     bad = ['could not read the saved projects after the run: %s' % e]
                 if bad:
