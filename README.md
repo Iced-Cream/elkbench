@@ -210,7 +210,8 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   (`say proves setup|set-and-kept|works|evidence: how`), a `set-and-kept` or `works` section
   with no machine assertion, a `listen` without `allowed:` and `needs:` or without a screen check
   before it, key or read steps after a stock flash, anything but NO after a `save-before-load`
-  check, and plans in one go that compare the same
+  check, an `[on fail]` section (read-only steps run only after a failure) that is not last or
+  holds anything else, and plans in one go that compare the same
   reference file. `check_plan` gives the same answer before any emulator time.
 - **Messy starts and contrast runs**: a hardware plan's go also needs a run from each built-in
   start its unit has among `dirty` and `occupied` (`starts/<unit>/`: the Rytm MKII, A4 MKII and Digitone, not yet the Digitakt; not for

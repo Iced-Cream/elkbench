@@ -61,6 +61,21 @@ class Rules(unittest.TestCase):
         r = check('[start]\nnrpn 1 1 35 5376\nexpect-screen home 2\n' + GOOD.split('[set the value]')[1].join(['[set the value]', '']))
         self.assertTrue(any('before the first expect-screen' in e for e in r['errors']), r['errors'])
 
+    def test_an_on_fail_section_reads_last_and_needs_no_proves_line(self):
+        readout = '[on fail: hang readout]\ndump 0x40000000 4 a.bin\nshot hang.png\nstats\n'
+        r = check(GOOD + readout)
+        self.assertEqual(r['errors'], [])
+        self.assertEqual(r['proves'][-1], ('on fail: hang readout', 'readout'))
+        self.assertTrue(any('[on fail: hang readout] run only after a failure' in f for f in r['flags']), r['flags'])
+        self.assertIn('readout: [on fail: hang readout]', plancheck.go_lines(r)[0])
+        r = check(GOOD + '[on fail]\ntap NO\nnrpn 1 1 35 5376\n')
+        self.assertTrue(any('[on fail] has nrpn, tap: an [on fail] section reads only' in e for e in r['errors']),
+                        r['errors'])
+        r = check(GOOD + readout + '[later]\nsay proves evidence: x\nshot x.png\n')
+        self.assertTrue(any('[later] comes after an [on fail] section' in e for e in r['errors']), r['errors'])
+        self.assertFalse(plancheck.on_fail('on failure'))
+        self.assertTrue(plancheck.on_fail('On fail'))
+
     def test_a_section_must_say_what_it_proves(self):
         r = check(GOOD.replace('say proves evidence: a shot for the person\n', ''))
         self.assertTrue(any('[look] says nothing about what it proves' in e for e in r['errors']), r['errors'])

@@ -450,12 +450,18 @@ the plan meant, and that each check would have failed if the result were wrong.
 - **A flash names what it flashes over.** A flash plan sets `os = FILE`, the OS on the unit
   before the flash: two flashes of the same file over different builds are different
   transitions, each with its own emulator pass (stock back over each build in a run, say).
+- **A readout after a failure.** A plan that expects a hang may end in sections named
+  `[on fail ...]` (analoghealth's testplan): read-only steps (dump, stats, ping, shot, wait, say)
+  that run at once after a failure, while the unit is as the failure left it, and never change the
+  verdict. A passing run never runs them, so a failing control (a build that hangs where the plan
+  fears) shows in the emulator that they read what they should.
 
 *elkbench enforces*: `approve_plan` refuses a hardware plan that has no start check, a section
 that doesn't say what it proves (`say proves KIND: how`), a `set-and-kept` or `works` section
 without a machine assertion, a `listen` step without its three parts or a screen check before it,
 key or read steps after a stock flash, anything but NO after a `save-before-load` check, a flash
-plan without `os =`, and plans that compare the same reference file. It shows
+plan without `os =`, an `[on fail]` section that is not last or holds anything but read-only steps,
+and plans that compare the same reference file. It shows
 the rest in the go request: the sections judged by eye, checks right after the plan's own save,
 blank compared rows, Rytm notes outside 0-11. `check_plan` gives the same answer in seconds,
 before any emulator time. `templates/` holds plans that already follow these rules: a test

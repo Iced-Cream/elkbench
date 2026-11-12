@@ -27,6 +27,10 @@ What a plan must carry (see docs/testing-practices.md, "Plan checker and templat
   `dirty`, `testslot`, `occupied`). Where the unit has built-in starts, the first section needs
   one: a start check that has never been seen to fail is not yet a check. Each start is named
   in one section at most.
+- **A readout after a failure (`[on fail ...]`).** Sections whose name starts with `on fail`
+  come last and hold only read-only steps (dump, stats, ping, shot, wait, say). The runner runs
+  them only when an earlier section failed, at once, and they never change the verdict, so they
+  need no `say proves` line. A passing emulator run never runs them: a failing control does.
 """
 import os
 import shlex
@@ -43,6 +47,14 @@ WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', '
 KEY_OPS = ('tap', 'hold', 'release', 'keys', 'turn', 'pad', 'padplay')
 # steps that only move through menus or look: nothing between a save and a check but these
 LOOK_OPS = ('tap', 'keys', 'wait', 'shot', 'hold', 'release', 'say')
+# an [on fail] section's steps (analoghealth testplan's READOUT_OPS): they read and change nothing
+READOUT_OPS = ('dump', 'stats', 'ping', 'shot', 'wait', 'say')
+
+
+def on_fail(name):
+    """An [on fail ...] section, run by testplan only after a failure."""
+    w = name.lower()
+    return w == 'on fail' or (w.startswith('on fail') and not (w[7].isalnum() or w[7] == '_'))
 
 
 def words(line):
@@ -180,10 +192,29 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
                               'anything is written' % ' '.join(w[:3]))
                 break
 
-    # 2. what each section proves
+    # 2. what each section proves; [on fail] sections come last and only read
+    readouts = [i for i, (name, _) in enumerate(steps) if on_fail(name)]
+    if readouts and readouts != list(range(len(steps) - len(readouts), len(steps))):
+        errors.append('[%s] comes after an [on fail] section: those come last' % next(
+            steps[i][0] for i in range(readouts[0], len(steps)) if i not in readouts))
+    if readouts and readouts[0] == 0:
+        errors.append('[%s] is the first section: an [on fail] section reads after the steps before it'
+                      % steps[0][0])
+    for i in readouts:
+        name, lines = steps[i]
+        bad = sorted({words(l)[0].lower() for l in lines if words(l) and words(l)[0].lower() not in READOUT_OPS})
+        if bad:
+            errors.append('[%s] has %s: an [on fail] section reads only (%s)'
+                          % (name, ', '.join(bad), ', '.join(READOUT_OPS)))
+    if readouts and readouts[0] > 0:
+        flags.append('%s run only after a failure: a passing emulator run never runs them, so a control that '
+                     'fails before them shows they work' % ', '.join('[%s]' % steps[i][0] for i in readouts))
     for i, (name, lines) in enumerate(steps):
         if i == 0:
             proves.append((name, 'start'))
+            continue
+        if i in readouts:
+            proves.append((name, 'readout'))
             continue
         kind = proves_of(lines)
         if flash_only and not kind:
@@ -386,7 +417,7 @@ def go_lines(result):
     for name, kind in result['proves']:
         by.setdefault(kind, []).append(name)
     out = ['  proves: ' + '; '.join('%s: %s' % (k, ', '.join('[%s]' % n for n in by[k]))
-                                    for k in ('start',) + PROVES if k in by)] if by else []
+                                    for k in ('start',) + PROVES + ('readout',) if k in by)] if by else []
     out += ['  contrast: from %s it stops in [%s] (%s)' % (start, name, why)
             for name, start, why in result.get('contrasts') or []]
     return out + ['  CHECK: ' + f for f in result['flags']]
