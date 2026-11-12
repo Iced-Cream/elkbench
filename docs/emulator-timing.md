@@ -20,6 +20,11 @@ The call wins over the plan, and the plan wins over the config. With none of the
 starts as it always did. `DTEMU_TIMING` then comes from the daemon's own environment, so existing plans
 behave the same.
 
+Config values are defaults. One that does not fit is left aside quietly: `stream` on the A4, or `stream` and
+`cpu_gate` under `timing = off`. The same option named in a call or a plan is refused instead. Digitone
+and Digitakt emulators (digiemu) have no timing: config's timing does not apply to them, and a call's or
+plan's is refused.
+
 - **unit / exact.** The emulator starts with `DTEMU_TIMING` set. `unit` is the sampled mode and runs at
   about real time. `exact` costs every block and runs at about 0.6x real time; elkbench waits three times
   as long for its OS to answer.
@@ -50,14 +55,17 @@ behave the same.
 The gate runs on every emulator `run_plan` with `unit` or `exact` timing, unless `cpu_gate` is off. It
 starts once the plan has passed.
 
-1. **The plan's own readings.** It takes the analoghealth `stats` readings the plan's run log holds, from
-   second `cpu_settle` on. The second counted is the firmware's uptime, not wall time.
-2. **Its own readings.** It sends nothing for `cpu_quiet` s (10). The run's last steps and elkbench's
+1. **The plan's own readings.** It lists the analoghealth `stats` readings in the plan's run log, from
+   second `cpu_settle` on, as information only. They may be taken under load (notes playing), or in a flash
+   plan on the OS before the flash. The second counted is the firmware's uptime, not wall time.
+2. **Stream check.** With the stream on, the OS running now must have switched to it: the emulator log
+   must have a switch line after its last boot, an upgrade's reboot included. If not, the run fails
+   ("not read"), since a run without the stream reads about 14 points low.
+3. **Its own readings.** It sends nothing for `cpu_quiet` s (10). The run's last steps and elkbench's
    saved-project check after it load the CPU: in C11N's end-to-end run, the first `stats` after the
-   project listing read 100 %. It then reads `stats` itself on the emulator, as the plan left it, until
-   it has `cpu_readings` more, `cpu_gap` s apart. If the boot has not settled yet, it waits for that
-   first.
-3. **Verdict.** The highest CPU reading decides:
+   project listing read 100 %. It then reads `stats` `cpu_readings` times on the emulator, as the plan
+   left it, `cpu_gap` s apart. If the boot has not settled yet, it waits for that first.
+4. **Verdict.** The highest of its own readings decides:
 
    | highest CPU | result |
    |---|---|
@@ -69,10 +77,14 @@ starts once the plan has passed.
    - No reading at all fails the run ("not read"). A build without analoghealth cannot be gated, so run it
      with `cpu_gate = no`.
    - A plan that leaves the emulator on a stock or `no_stats` OS file is not gated, and the result says so.
-4. **Report.** The result lists the timing and every reading as `sSECOND CPU/DSP`. A failed gate records no
+5. **Report.** The result lists the timing and every reading as `sSECOND CPU/DSP`. A failed gate records no
    emulator pass.
 
 The readings are idle readings on the emulator's card project, with whatever the plan left on screen. They
 match the unit's Sidecar conditions for USB traffic, not the unit's project. Checked end to end on a scratch
 daemon (2026-11-12, `timing = unit`, stream on, CTL1 and C11N from `core-ar2-0.11\build`): see the
 branch's commit message for the readings (CTL1 80.9-81.6 %, gate PASS; C11N 89.9-90.5 %, PASS with a margin risk).
+A flash transition was also checked: CTL1 with `timing = unit`, C11N flashed in the emulator, then the C11N
+plan on it. The stream switched again after the upgrade's reboot, and the gate read 90.3-90.7 % (PASS
+with a margin risk). Only idle plans without key steps have run under timing so far. In the earlier
+calibration, a `tap YES` during a project load missed analogusb's 0.25 s answer window under unit timing.

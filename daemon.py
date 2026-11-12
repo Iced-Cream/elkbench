@@ -123,12 +123,18 @@ def emu_timing(unit, a, plan=None, conf=None):
     plan = plan or {}
 
     def pick(key, plan_key=None):
+        """-> (value, named): named when the call or the plan gave it (config.toml's values are
+        defaults: one that does not fit this unit or mode is left aside, never refused)."""
         if a.get(key) is not None:
-            return a[key]
+            return a[key], True
         if plan.get(plan_key or key) is not None:
-            return plan[plan_key or key]
-        return conf.get(key)
-    mode = pick('timing')
+            return plan[plan_key or key], True
+        return conf.get(key), False
+    mode, named = pick('timing')
+    if (UNITS.get(unit) or {}).get('emulator') in ('digiemu', 'fwcheck'):
+        if named:
+            raise Refused('timing is analog-emu\'s (Rytm, A4): the %s\'s emulator has none' % unit)
+        return None                         # config.toml's timing is for the analog-emu units
     if mode is None:
         named = [k for k in ('stream', 'cpu_gate', 'cpu_warn', 'cpu_fail') if a.get(k) is not None]
         named += [k for k in ('stream', 'cpu-gate') if plan.get(k) is not None]
@@ -138,20 +144,22 @@ def emu_timing(unit, a, plan=None, conf=None):
     mode = str(mode).strip().lower()
     if mode not in TIMING_MODES:
         raise Refused('timing is %s, not %r' % (', '.join(TIMING_MODES), mode))
-    stream = pick('stream')
-    stream = truth(stream, 'stream') if stream is not None else (unit == 'rytm' and mode != 'off')
-    if stream and mode == 'off':
+    stream, named = pick('stream')
+    stream = truth(stream, 'stream') if stream is not None else True
+    if named and stream and mode == 'off':
         raise Refused('stream = yes needs timing unit or exact: the stream is there for unit-like CPU readings')
-    if stream and unit != 'rytm':
+    if named and stream and unit != 'rytm':
         raise Refused('the Overbridge stream (the Sidecar Pi\'s, rytm --usb-overbridge) is the Rytm\'s only: '
                       'stream = no for the %s' % unit)
-    gate = pick('cpu_gate', 'cpu-gate')
-    gate = truth(gate, 'cpu_gate') if gate is not None else mode != 'off'
-    if gate and mode == 'off':
+    stream = stream and unit == 'rytm' and mode != 'off'
+    gate, named = pick('cpu_gate', 'cpu-gate')
+    gate = truth(gate, 'cpu_gate') if gate is not None else True
+    if named and gate and mode == 'off':
         raise Refused('the CPU gate reads unit-like CPU: it needs timing unit or exact')
+    gate = gate and mode != 'off'
 
     def num(k, f):
-        v = pick(k)
+        v = pick(k)[0]
         return f(TIMING_DEFAULTS[k] if v is None else v)
     try:
         warn, fail = num('cpu_warn', float), num('cpu_fail', float)
@@ -3295,10 +3303,6 @@ class Daemon:
                           % (a['unit'], mine['address']))
         minutes = min(max(int(a.get('minutes') or 60), 1), 240)
         timing = emu_timing(a['unit'], a, a.get('_plan'))
-        if timing and u.get('emulator') == 'digiemu':
-            if any(a.get(k) is not None for k in TIMING_OPTS) or (a.get('_plan') or {}).get('timing'):
-                raise Refused('timing is analog-emu\'s (Rytm, A4): digiemu has none')
-            timing = None                   # config.toml's default is for the analog-emu units
         # power_off: started with --power-off, so that a later plan with power-cycle steps runs on
         # it as it is (after the plans that set up its state) instead of on a fresh boot
         power_off = power_off or bool(a.get('power_off'))
@@ -4315,8 +4319,9 @@ class Daemon:
                     job.lines.append(timing_label(e_t) + ('' if e_t['gate'] else '; CPU gate off'))
                 gate = getattr(job, 'cpu_gate', None)
                 if gate:
-                    if gate['line'] not in job.lines:
-                        job.lines.append(gate['line'])
+                    for l in (gate.get('info'), gate['line']):
+                        if l and l not in job.lines:
+                            job.lines.append(l)
                     ok = ok and gate['verdict'] in ('pass', 'risk')
                     job.state = 'pass' if ok else 'fail'
                 job.lines += ['not tested here (skipped in the emulator): ' + h for h in hand_steps(info['steps'])]
@@ -4390,10 +4395,12 @@ class Daemon:
 
     def cpu_gate_stage(self, s, unit, info, timing, job):
         """The CPU gate after an emulator run with timing on, as a stage (rc, out) -> (rc, out) that
-        runs once the plan has passed: analoghealth stats from second cpu_settle on, the plan's own
-        (from its run logs) and cpu_readings of its own cpu_gap s apart on the emulator as the plan
-        left it (waiting for the boot to settle when the plan ended earlier). Fails at cpu_fail %
-        or more and when nothing could be read; passes with a risk line above cpu_warn %."""
+        runs once the plan has passed: after cpu_quiet s with nothing sent, cpu_readings analoghealth
+        stats of its own, cpu_gap s apart, from second cpu_settle on, on the emulator as the plan left
+        it (waiting for the boot to settle when the plan ended earlier). Only those are judged; the
+        plan's own readings from cpu_settle on are listed. Fails at cpu_fail % or more, when nothing
+        could be read, and (stream on) when the OS running now never switched to the stream; passes
+        with a risk line above cpu_warn %."""
         def gate(rc, out):
             ends_on = info['flash'] or info.get('os_file')
             if ends_on and os.path.isfile(ends_on) and any(
@@ -4403,14 +4410,33 @@ class Daemon:
                         % os.path.basename(ends_on))
                 job.cpu_gate = dict(verdict='pass', readings=[], line=line)
                 return 0, line + '\n'
-            readings = []
+            # the plan's own stats are shown, not judged: they may be taken under load (notes
+            # playing) or, in a flash plan, on the OS before the flash
+            plan_r = []
             for d in re.findall(r': (?:PASS|FAIL) \(.* - (.+)$', out, re.M):
                 try:
                     with open(os.path.join(d.strip(), 'log.txt'), encoding='utf-8', errors='replace') as fh:
-                        readings += stats_readings(fh.read(), timing['settle'])
+                        plan_r += stats_readings(fh.read(), timing['settle'])
                 except OSError:
                     pass
-            plan_n, own, misses, said = len(readings), [], 0, []
+            info_line = ('cpu gate: the plan\'s own readings (not judged): %s' % ', '.join(
+                's%d %.1f/%.1f' % r for r in plan_r)) if plan_r else None
+            if timing['stream']:
+                # the stream must be on in the OS that runs now: after an upgrade's reboot (a
+                # flash in the plan) analog-emu switches again; without that the CPU reads ~14 low
+                e = self.emulators.get((s.sid, unit)) or {}
+                try:
+                    with open(e.get('log') or '', encoding='utf-8', errors='replace') as fh:
+                        text = fh.read()
+                except OSError:
+                    text = ''
+                if STREAM_MARK not in text[text.rfind('reset: booting'):] if 'reset: booting' in text \
+                        else STREAM_MARK not in text:
+                    line = ('cpu gate: FAIL, not read: no Overbridge stream in the OS the emulator runs now '
+                            '(no "%s" line after its last boot in %s)' % (STREAM_MARK, e.get('log')))
+                    job.cpu_gate = dict(verdict='not read', readings=[], line=line)
+                    return 1, '\n'.join(filter(None, [info_line, line])) + '\n'
+            own, misses, said = [], 0, []
             slow = 3 if timing['mode'] == 'exact' else 1
             # nothing sent for cpu_quiet s first: the run's last steps and elkbench's saved-project
             # check after it load the CPU (a project listing read 100 % at the next stats in C11N's
@@ -4437,14 +4463,11 @@ class Daemon:
                     continue
                 own.append(got[-1])
                 time.sleep(timing['gap'])
-            readings = sorted(set(readings + own))
-            verdict, line = cpu_verdict(readings, timing['warn'], timing['fail'])
-            if verdict != 'not read':
-                line += ' (%d from the plan, %d read after it)' % (plan_n, len(own))
-            elif said:
+            verdict, line = cpu_verdict(own, timing['warn'], timing['fail'])
+            if verdict == 'not read' and said:
                 line += '; stats said: %s' % said[-1][:200]
-            job.cpu_gate = dict(verdict=verdict, readings=readings, line=line)
-            return (0 if verdict in ('pass', 'risk') else 1), line + '\n'
+            job.cpu_gate = dict(verdict=verdict, readings=own, plan_readings=plan_r, line=line, info=info_line)
+            return (0 if verdict in ('pass', 'risk') else 1), '\n'.join(filter(None, [info_line, line])) + '\n'
         gate.__name__ = 'cpu-gate'
         return gate
 

@@ -552,6 +552,19 @@ class Timing(unittest.TestCase):
         self.assertEqual((off['stream'], off['gate']), (False, False))
         # the A4 has no Sidecar: no stream unless asked, and refused when asked
         self.assertFalse(daemon.emu_timing('a4', {'timing': 'unit'}, {}, {})['stream'])
+        # config.toml's values are defaults: one that does not fit the unit or the mode is left aside
+        conf = {'timing': 'unit', 'stream': True, 'cpu_gate': True}
+        t = daemon.emu_timing('a4', {}, {}, conf)
+        self.assertEqual((t['mode'], t['stream'], t['gate']), ('unit', False, True))
+        t = daemon.emu_timing('rytm', {'timing': 'off'}, {}, conf)
+        self.assertEqual((t['mode'], t['stream'], t['gate']), ('off', False, False))
+        self.assertTrue(daemon.emu_timing('rytm', {}, {}, conf)['stream'])
+        # digiemu units have no timing: config.toml's is not theirs, a call's is refused
+        self.assertIsNone(daemon.emu_timing('digitone', {}, {}, conf))
+        with self.assertRaisesRegex(daemon.Refused, "analog-emu's"):
+            daemon.emu_timing('digitone', {'timing': 'unit'}, {}, {})
+        with self.assertRaisesRegex(daemon.Refused, "analog-emu's"):
+            daemon.emu_timing('digitone', {}, {'timing': 'unit'}, {})
 
     def test_refusals(self):
         bad = [({'timing': 'fast'}, 'timing is off, unit, exact'),
@@ -1495,9 +1508,10 @@ class InProcess(unittest.TestCase):
         replies = [(80, 87.0), (95, 89.0), (100, 90.5), (105, 89.5)]   # s80: before boot settled, waits
         rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, out)
         self.assertEqual((rc, job.cpu_gate['verdict']), (0, 'risk'))
-        self.assertEqual([r[0] for r in job.cpu_gate['readings']], [92, 95, 100, 105])   # not s6, not s80
+        self.assertEqual([r[0] for r in job.cpu_gate['readings']], [95, 100, 105])   # its own, not s80
+        self.assertEqual([r[0] for r in job.cpu_gate['plan_readings']], [92])           # shown: not s6
         self.assertIn('PASS with a margin risk, CPU max 90.5 %', line)
-        self.assertIn('(1 from the plan, 3 read after it)', line)
+        self.assertIn("the plan's own readings (not judged): s92 88.0/82.0", line)
         self.assertEqual(calls[0][-2:], ['do', 'stats'])
         replies = [(95, 95.0), (100, 94.0), (105, 94.0)]
         rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, out)
@@ -1506,6 +1520,18 @@ class InProcess(unittest.TestCase):
         rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, 'x: PASS (1 steps) - %s\n' % TMP)
         self.assertEqual((rc, job.cpu_gate['verdict']), (1, 'not read'))
         self.assertIn('no answer', line)
+        # an upgrade's reboot (a flash in the plan) without the stream's switch after it: never a pass
+        log = self.d.emulators[(self.s.sid, 'rytm')]['log']
+        with open(log, 'a', encoding='utf-8') as fh:
+            fh.write('reset: booting C11N.syx from the flash\n')
+        replies = [(95, 81.0), (100, 81.0), (105, 81.0)]
+        rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, out)
+        self.assertEqual((rc, job.cpu_gate['verdict']), (1, 'not read'))
+        self.assertIn('no Overbridge stream in the OS the emulator runs now', line)
+        with open(log, 'a', encoding='utf-8') as fh:
+            fh.write('usb overbridge: USB CONFIG = OVERBRIDGE at 9.10 s; the host re-enumerates\n')
+        rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, out)
+        self.assertEqual((rc, job.cpu_gate['verdict']), (0, 'pass'))
         # a plan that leaves the emulator on stock: no stats there, the gate says so and lets it be
         stock = os.path.join(TMP, 'os', 'stock.syx')
         daemon.UNITS['rytm']['stock'] = [stock]
