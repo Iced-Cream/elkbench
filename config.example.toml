@@ -80,6 +80,18 @@ person = "the person at this PC"
 
 # Per unit (rytm, a4, digitone, digitakt): any built-in fact (port, emu, asio, engine) can be
 # overridden too.
+# [emulator]                               # timing for analog-emu runs (docs/emulator-timing.md); unset:
+#                                          # as before (DTEMU_TIMING from the daemon's environment)
+# timing = 'unit'                          # off, unit (sampled, about real time) or exact (about 0.6x)
+# stream = true                            # Rytm: the Sidecar's Overbridge stream (--usb-overbridge)
+# stream_at = 9                            # s of emulated time at which USB CONFIG becomes OVERBRIDGE
+# cpu_gate = true                          # run_plan reads analoghealth stats after boot settles:
+# cpu_warn = 90                            #   passes with a margin risk above this CPU %
+# cpu_fail = 95                            #   fails at this CPU % or more, and when nothing is read
+# cpu_settle = 90                          #   readings from this second of uptime on
+# cpu_readings = 4                         #   readings it takes itself after the plan,
+# cpu_gap = 5                              #   this many s apart
+
 # [units.rytm]
 # evidence = 'C:\tests\rytm\runs'          # run folders and test-log.md
 # refs = 'C:\tests\rytm\refs'              # default folder for expect_screen references
