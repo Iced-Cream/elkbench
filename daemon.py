@@ -91,7 +91,10 @@ POWER_OFF_BUILD_MARK = b'power off: no --card, nothing kept'
 # and fail at cpu_fail % or more, pass with a risk warning above cpu_warn % ([emulator] in config.toml).
 TIMING_MODES = ('off', 'unit', 'exact')
 TIMING_OPTS = ('timing', 'stream', 'cpu_gate', 'cpu_warn', 'cpu_fail')
-TIMING_DEFAULTS = dict(cpu_warn=90.0, cpu_fail=95.0, cpu_settle=90, cpu_readings=4, cpu_gap=5.0, stream_at=9.0)
+TIMING_DEFAULTS = dict(cpu_warn=90.0, cpu_fail=95.0, cpu_settle=90, cpu_readings=4, cpu_gap=5.0, cpu_quiet=10.0,
+                       stream_at=9.0)
+STREAM_MARK = 'usb overbridge: USB CONFIG = OVERBRIDGE'   # analog-emu's line at the switch
+STREAM_WAIT = 60                                # s of emulated time it may take after stream_at
 TIMING_BUILD_MARK = b'DTEMU_TIMING'             # in the binary of an analog-emu with unit timing
 STATS_LINE = re.compile(r'second (\d+): CPU ([\d.]+) %, DSP ([\d.]+) %')
 
@@ -153,15 +156,15 @@ def emu_timing(unit, a, plan=None, conf=None):
     try:
         warn, fail = num('cpu_warn', float), num('cpu_fail', float)
         settle, readings, gap = num('cpu_settle', int), num('cpu_readings', int), num('cpu_gap', float)
-        stream_at = num('stream_at', float)
+        stream_at, quiet = num('stream_at', float), num('cpu_quiet', float)
     except (TypeError, ValueError) as e:
         raise Refused('a CPU gate number does not read: %s' % e)
     if not 0 < warn < fail <= 100:
         raise Refused('cpu_warn (%g) must be under cpu_fail (%g), both 0-100 %%' % (warn, fail))
-    if readings < 1 or settle < 0 or gap < 0 or stream_at < 0:
-        raise Refused('cpu_readings at least 1; cpu_settle, cpu_gap and stream_at not negative')
+    if readings < 1 or settle < 0 or gap < 0 or stream_at < 0 or quiet < 0:
+        raise Refused('cpu_readings at least 1; cpu_settle, cpu_gap, cpu_quiet and stream_at not negative')
     return dict(mode=mode, stream=stream, gate=gate, warn=warn, fail=fail, settle=settle,
-                readings=readings, gap=gap, stream_at=stream_at)
+                readings=readings, gap=gap, quiet=quiet, stream_at=stream_at)
 
 
 def timing_env(t, environ):
@@ -1467,6 +1470,9 @@ class Daemon:
                 break
         if proc.poll() is not None or 'usb midi tcp: listening' not in text:
             return 1, 'fail: power-cycle: the cold boot did not open its USB MIDI port (%s)\n' % log_path
+        why = self.wait_for_stream(proc, log_path, e.get('timing'))
+        if why:
+            return 1, 'fail: power-cycle: %s\n' % why
         if not self.wait_for_os(addr):
             return 1, 'fail: power-cycle: the OS did not answer after the cold boot (%s)\n' % log_path
         return 0, 'ok power-cycle: switched off (%s), cold boot on its card: up again at %s (%s)\n' % (
@@ -3378,6 +3384,10 @@ class Daemon:
             proc.terminate()
             raise Refused('the emulator did not open its USB MIDI port (needs an analog-emu with '
                           '--usb-midi-tcp): see %s' % log_path)
+        why = self.wait_for_stream(proc, log_path, timing)
+        if why:
+            self.stop_emulator(self.emulators[(s.sid, a['unit'])])
+            raise Refused(why)
         return ['ok: %s emulator running headless on %s%s, USB MIDI at tcp:127.0.0.1:%d%s (%s), ends by itself '
                 'after %d min' % (a['unit'], label, ' (from its flash)' if keep else '', tcp,
                                   ', DIN MIDI at tcp:127.0.0.1:%d' % din if din else '',
@@ -3684,6 +3694,29 @@ class Daemon:
             except OSError:
                 self.emu_help_text[stamp] = False
         return self.emu_help_text[stamp]
+
+    def wait_for_stream(self, proc, log_path, timing, seen=0):
+        """With the stream on: wait until analog-emu has switched USB CONFIG to OVERBRIDGE (its log
+        line after `seen` characters) and the host has enumerated again, so that nothing elkbench
+        sends meets the host's 0.2 s away (with --usb-midi-real the replies go through it). -> None,
+        or why not (the emulator ended, or the OS's USB layout was not OS 1.74's)."""
+        if not (timing and timing['stream']):
+            return None
+        slow = 3 if timing['mode'] == 'exact' else 1
+        deadline = time.time() + (timing['stream_at'] + STREAM_WAIT) * slow + 30
+        while time.time() < deadline:
+            with open(log_path, encoding='utf-8', errors='replace') as fh:
+                text = fh.read()[seen:]
+            if STREAM_MARK in text:
+                time.sleep(2)                 # the host's 0.2 s away and its enumeration, with room
+                return None
+            if 'usb overbridge: not OS 1.74' in text or 'usb overbridge: only on the Rytm' in text:
+                return 'the Overbridge stream did not start: %s (%s)' % (
+                    [l for l in text.splitlines() if l.startswith('usb overbridge:')][-1], log_path)
+            if proc.poll() is not None:
+                return 'the emulator ended before the Overbridge stream started (%s)' % log_path
+            time.sleep(0.5)
+        return 'no Overbridge stream within %d s (%s)' % ((timing['stream_at'] + STREAM_WAIT) * slow + 30, log_path)
 
     def emu_timing_args(self, unit, timing):
         """analog-emu arguments for `timing` (emu_timing), refused when this analog-emu cannot run
@@ -4379,6 +4412,10 @@ class Daemon:
                     pass
             plan_n, own, misses, said = len(readings), [], 0, []
             slow = 3 if timing['mode'] == 'exact' else 1
+            # nothing sent for cpu_quiet s first: the run's last steps and elkbench's saved-project
+            # check after it load the CPU (a project listing read 100 % at the next stats in C11N's
+            # end-to-end run), and the gate is about the idle margin
+            time.sleep(timing['quiet'] * slow)
             deadline = time.time() + (timing['settle'] + timing['readings'] * (timing['gap'] + 5) + 120) * slow
             while len(own) < timing['readings'] and time.time() < deadline and misses < 3:
                 try:

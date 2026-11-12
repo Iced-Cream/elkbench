@@ -1386,8 +1386,13 @@ class InProcess(unittest.TestCase):
         folder = self.fake_power_off_emulator('rytm')
         with open(os.path.join(folder, daemon.UNITS['rytm']['emu_exe']), 'a', encoding='utf-8') as fh:
             fh.write('@rem DTEMU_TIMING\r\n' if os.name == 'nt' else '')
-        with open(os.path.join(folder, 'fake-rytm.py'), 'a', encoding='utf-8') as fh:
-            fh.write('# DTEMU_TIMING\n')
+        script = os.path.join(folder, 'fake-rytm.py')
+        with open(script, encoding='utf-8') as fh:
+            text = fh.read()
+        with open(script, 'w', encoding='utf-8') as fh:     # its switch line, as rytm --usb-overbridge prints it
+            fh.write(text.replace('print("args", ', 'if "--usb-overbridge" in a: print("usb overbridge: USB CONFIG = '
+                                  'OVERBRIDGE at 9.00 s; the host re-enumerates", flush=True)\nprint("args", ')
+                     + '# DTEMU_TIMING\n')
         saved = self.d.emu_help
         self.addCleanup(lambda: setattr(self.d, 'emu_help', saved))
         self.d.emu_help = lambda unit: 'usage: rytm [--usb-midi-tcp ADDR] [--usb-overbridge [SECS]]'
@@ -1440,6 +1445,25 @@ class InProcess(unittest.TestCase):
         with self.assertRaisesRegex(daemon.Refused, 'needs an analog-emu with unit timing'):
             start(timing='unit', stream=False)
 
+    def test_wait_for_stream(self):
+        """Nothing is sent before the stream has switched on; an OS whose USB layout is not 1.74's, or an
+        emulator that ended, says why; without the stream there is nothing to wait for."""
+        log = os.path.join(TMP, 'stream.log')
+        proc = types.SimpleNamespace(poll=lambda: None)
+        t = daemon.emu_timing('rytm', {'timing': 'unit'}, {}, {})
+        for text, why in (('usb overbridge: USB CONFIG = OVERBRIDGE at 9.00 s; the host re-enumerates\n', None),
+                          ('usb overbridge: not OS 1.74\'s USB mode layout (mode 0x0, table 0x0); left as it is\n',
+                           'did not start: usb overbridge: not OS 1.74')):
+            with open(log, 'w', encoding='utf-8') as fh:
+                fh.write('usb midi tcp: listening\n' + text)
+            got = self.d.wait_for_stream(proc, log, t)
+            self.assertTrue(got is None if why is None else why in got, got)
+        with open(log, 'w', encoding='utf-8') as fh:
+            fh.write('usb midi tcp: listening\n')
+        self.assertIn('ended before', self.d.wait_for_stream(types.SimpleNamespace(poll=lambda: 1), log, t))
+        self.assertIsNone(self.d.wait_for_stream(proc, log, daemon.emu_timing('rytm', {'timing': 'unit', 'stream': False}, {}, {})))
+        self.assertIsNone(self.d.wait_for_stream(proc, log, None))
+
     def test_cpu_gate_stage(self):
         """The gate after a passing run: the plan's own stats from second cpu_settle on, then readings of
         its own until it has cpu_readings; fails at cpu_fail, passes with a risk line above cpu_warn,
@@ -1466,6 +1490,7 @@ class InProcess(unittest.TestCase):
                                             strftime=time.strftime)
         info = {'flash': None, 'os_file': None}
         t = daemon.emu_timing('rytm', {'timing': 'unit', 'cpu_readings': 3}, {}, {})
+        self.assertEqual(t['quiet'], 10.0)
         job = types.SimpleNamespace()
         replies = [(80, 87.0), (95, 89.0), (100, 90.5), (105, 89.5)]   # s80: before boot settled, waits
         rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, out)

@@ -90,7 +90,8 @@ person = "the person at this PC"
 # cpu_fail = 95                            #   fails at this CPU % or more, and when nothing is read
 # cpu_settle = 90                          #   readings from this second of uptime on
 # cpu_readings = 4                         #   readings it takes itself after the plan,
-# cpu_gap = 5                              #   this many s apart
+# cpu_gap = 5                              #   this many s apart,
+# cpu_quiet = 10                           #   after this many s with nothing sent
 
 # [units.rytm]
 # evidence = 'C:\tests\rytm\runs'          # run folders and test-log.md
