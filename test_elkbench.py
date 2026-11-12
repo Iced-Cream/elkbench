@@ -2557,10 +2557,12 @@ class InProcess(unittest.TestCase):
                                            'capture din 5', 'send din', 'send a.syx', 'cc 1 2 3']),
                          ['send a.syx din', 'capture k.syx 6 any din', 'capture k.syx 6 din'])
         self.assertEqual(daemon.din_steps(['cc 1 2 3 din', 'nrpn 1 0 112 9856 din', 'note 1 60 100 din',
-                                           'bend 1 0 din', 'at 1 70 din', 'at 1 din', 'bend 1 0']),
+                                           'bend 1 0 din', 'at 1 70 din', 'at 1 din', 'bend 1 0',
+                                           'pc 1 5 din', 'pc 1 5']),
                          ['cc 1 2 3 din', 'nrpn 1 0 112 9856 din', 'note 1 60 100 din', 'bend 1 0 din',
-                          'at 1 70 din'])
-        self.assertTrue({'bend', 'at'} <= daemon.STEP_OPS)
+                          'at 1 70 din', 'pc 1 5 din'])
+        self.assertTrue({'bend', 'at', 'pc'} <= daemon.STEP_OPS)
+        self.assertIn('pc', daemon.plancheck.WRITE_OPS)
 
     @needs_runner
     def test_din_on_hardware_needs_the_configured_interface(self):

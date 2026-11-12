@@ -186,11 +186,11 @@ def din_refusal(unit):
     return 'DIN steps (send/capture ... din) have no runner on the %s' % unit
 
 
-STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'bend', 'at', 'wait', 'stats',
-            'dump', 'send', 'capture', 'ping', 'save-project', 'save-kit', 'say'}
+STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'bend', 'at', 'pc', 'wait',
+            'stats', 'dump', 'send', 'capture', 'ping', 'save-project', 'save-kit', 'say'}
 
 
-SHORT_SEND_OPS = ('cc', 'nrpn', 'note', 'bend', 'at')     # analogrun's short-message steps
+SHORT_SEND_OPS = ('cc', 'nrpn', 'note', 'bend', 'at', 'pc')     # analogrun's short-message steps
 
 
 def din_steps(lines):
