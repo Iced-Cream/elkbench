@@ -28,9 +28,9 @@ What a plan must carry (see docs/testing-practices.md, "Plan checker and templat
   one: a start check that has never been seen to fail is not yet a check. Each start is named
   in one section at most.
 - **A readout after a failure (`[on fail ...]`).** Sections whose name starts with `on fail`
-  come last and hold only read-only steps (dump, stats, ping, shot, wait, say). The runner runs
-  them only when an earlier section failed, at once, and they never change the verdict, so they
-  need no `say proves` line. A passing emulator run never runs them: a failing control does.
+  come last and hold only read-only steps (dump, peek-set, stats, ping, shot, wait, say). The
+  runner runs them only when an earlier section failed, at once, and they never change the
+  verdict, so they need no `say proves` line. A passing emulator run never runs them: a failing control does.
 """
 import os
 import shlex
@@ -48,7 +48,7 @@ KEY_OPS = ('tap', 'hold', 'release', 'keys', 'turn', 'pad', 'padplay')
 # steps that only move through menus or look: nothing between a save and a check but these
 LOOK_OPS = ('tap', 'keys', 'wait', 'shot', 'hold', 'release', 'say')
 # an [on fail] section's steps (analoghealth testplan's READOUT_OPS): they read and change nothing
-READOUT_OPS = ('dump', 'stats', 'ping', 'shot', 'wait', 'say')
+READOUT_OPS = ('dump', 'peek-set', 'stats', 'ping', 'shot', 'wait', 'say')
 
 
 def on_fail(name):
@@ -272,7 +272,7 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
                       'before the flash; its emulator pass is of that transition, booted on that file)'
                       % os.path.basename(flash))
     if flash and stock:
-        bad = sorted({w[0].lower() for _, w in all_words if w and w[0].lower() in KEY_OPS + ('dump', 'stats')})
+        bad = sorted({w[0].lower() for _, w in all_words if w and w[0].lower() in KEY_OPS + ('dump', 'peek-set', 'stats')})
         if bad:
             errors.append('the plan flashes the stock OS and then uses %s: stock has no remote keys or '
                           'reads; flash a build with analoghealth, or a remote-only build' % ', '.join(bad))
@@ -282,7 +282,7 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
                                    here=here or (os.path.dirname(refs) if refs else '.'))
         errors += e
         flags += f
-    if not flash and any(w and w[0].lower() in KEY_OPS + ('dump',) for _, w in all_words):
+    if not flash and any(w and w[0].lower() in KEY_OPS + ('dump', 'peek-set') for _, w in all_words):
         flags.append('key or dump steps on the OS the unit has: check with unit_state that it has a '
                      'remote-key path (analoghealth or a remote-only build)')
     if unit == 'rytm':

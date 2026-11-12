@@ -451,9 +451,9 @@ the plan meant, and that each check would have failed if the result were wrong.
   before the flash: two flashes of the same file over different builds are different
   transitions, each with its own emulator pass (stock back over each build in a run, say).
 - **A readout after a failure.** A plan that expects a hang may end in sections named
-  `[on fail ...]` (analoghealth's testplan): read-only steps (dump, stats, ping, shot, wait, say)
-  that run at once after a failure, while the unit is as the failure left it, and never change the
-  verdict. A passing run never runs them, so a failing control (a build that hangs where the plan
+  `[on fail ...]` (analoghealth's testplan): read-only steps (dump, peek-set, stats, ping, shot,
+  wait, say) that run at once after a failure, while the unit is as the failure left it, and never
+  change the verdict. A passing run never runs them, so a failing control (a build that hangs where the plan
   fears) shows in the emulator that they read what they should.
 
 *elkbench enforces*: `approve_plan` refuses a hardware plan that has no start check, a section
