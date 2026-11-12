@@ -523,6 +523,103 @@ class MidiGuard(unittest.TestCase):
         self.assertIn('killed after 1 s', out)
 
 
+class Timing(unittest.TestCase):
+    """The emulator timing option (DTEMU_TIMING, the Sidecar's Overbridge stream) and the CPU gate's
+    thresholds: pure functions, no emulator."""
+
+    def test_not_set_is_none(self):
+        self.assertIsNone(daemon.emu_timing('rytm', {}, {}, {}))
+        with self.assertRaisesRegex(daemon.Refused, 'goes with timing'):
+            daemon.emu_timing('rytm', {'stream': False}, {}, {})
+        with self.assertRaisesRegex(daemon.Refused, 'goes with timing'):
+            daemon.emu_timing('rytm', {}, {'cpu-gate': 'no'}, {})
+
+    def test_defaults_and_order(self):
+        t = daemon.emu_timing('rytm', {}, {}, {'timing': 'unit'})
+        self.assertEqual((t['mode'], t['stream'], t['gate'], t['warn'], t['fail'], t['settle'], t['readings']),
+                         ('unit', True, True, 90.0, 95.0, 90, 4))
+        # the call over the plan over config.toml
+        self.assertEqual(daemon.emu_timing('rytm', {}, {'timing': 'exact'}, {'timing': 'unit'})['mode'], 'exact')
+        self.assertEqual(daemon.emu_timing('rytm', {'timing': 'off'}, {'timing': 'exact'}, {})['mode'], 'off')
+        t = daemon.emu_timing('rytm', {'timing': 'UNIT'}, {'stream': 'no'}, {'cpu_warn': 85, 'cpu_fail': 97})
+        self.assertEqual((t['mode'], t['stream'], t['warn'], t['fail']), ('unit', False, 85.0, 97.0))
+        t = daemon.emu_timing('rytm', {'timing': 'unit', 'cpu_gate': False, 'cpu_fail': 99}, {}, {})
+        self.assertEqual((t['gate'], t['fail']), (False, 99.0))
+        t = daemon.emu_timing('rytm', {}, {}, {'timing': 'unit', 'cpu_settle': 120, 'cpu_readings': 6,
+                                               'cpu_gap': 2, 'stream_at': 12})
+        self.assertEqual((t['settle'], t['readings'], t['gap'], t['stream_at']), (120, 6, 2.0, 12.0))
+        off = daemon.emu_timing('rytm', {'timing': 'off'}, {}, {})
+        self.assertEqual((off['stream'], off['gate']), (False, False))
+        # the A4 has no Sidecar: no stream unless asked, and refused when asked
+        self.assertFalse(daemon.emu_timing('a4', {'timing': 'unit'}, {}, {})['stream'])
+        # config.toml's values are defaults: one that does not fit the unit or the mode is left aside
+        conf = {'timing': 'unit', 'stream': True, 'cpu_gate': True}
+        t = daemon.emu_timing('a4', {}, {}, conf)
+        self.assertEqual((t['mode'], t['stream'], t['gate']), ('unit', False, True))
+        t = daemon.emu_timing('rytm', {'timing': 'off'}, {}, conf)
+        self.assertEqual((t['mode'], t['stream'], t['gate']), ('off', False, False))
+        self.assertTrue(daemon.emu_timing('rytm', {}, {}, conf)['stream'])
+        # digiemu units have no timing: config.toml's is not theirs, a call's is refused
+        self.assertIsNone(daemon.emu_timing('digitone', {}, {}, conf))
+        with self.assertRaisesRegex(daemon.Refused, "analog-emu's"):
+            daemon.emu_timing('digitone', {'timing': 'unit'}, {}, {})
+        with self.assertRaisesRegex(daemon.Refused, "analog-emu's"):
+            daemon.emu_timing('digitone', {}, {'timing': 'unit'}, {})
+
+    def test_refusals(self):
+        bad = [({'timing': 'fast'}, 'timing is off, unit, exact'),
+               ({'timing': 'off', 'stream': True}, 'needs timing unit or exact'),
+               ({'timing': 'off', 'cpu_gate': True}, 'needs timing unit or exact'),
+               ({'timing': 'unit', 'stream': 'maybe'}, 'yes or no'),
+               ({'timing': 'unit', 'cpu_warn': 95, 'cpu_fail': 95}, 'must be under'),
+               ({'timing': 'unit', 'cpu_warn': 90, 'cpu_fail': 101}, 'must be under'),
+               ({'timing': 'unit', 'cpu_fail': 'high'}, 'does not read')]
+        for a, why in bad:
+            with self.assertRaisesRegex(daemon.Refused, why, msg=a):
+                daemon.emu_timing('rytm', a, {}, {})
+        with self.assertRaisesRegex(daemon.Refused, "Rytm's only"):
+            daemon.emu_timing('a4', {'timing': 'unit', 'stream': True}, {}, {})
+
+    def test_launch_env_and_args(self):
+        self.assertIsNone(daemon.timing_env(None, {'DTEMU_TIMING': 'exact'}))
+        t = daemon.emu_timing('rytm', {'timing': 'unit'}, {}, {})
+        env = daemon.timing_env(t, {'PATH': 'x', 'DTEMU_TIMING': 'exact'})
+        self.assertEqual((env['DTEMU_TIMING'], env['PATH']), ('unit', 'x'))
+        self.assertEqual(daemon.timing_args(t), ['--usb-overbridge', '9'])
+        off = daemon.emu_timing('rytm', {'timing': 'off'}, {}, {})
+        self.assertNotIn('DTEMU_TIMING', daemon.timing_env(off, {'DTEMU_TIMING': 'unit'}))
+        self.assertEqual(daemon.timing_args(off), [])
+        self.assertEqual(daemon.timing_args(daemon.emu_timing('rytm', {'timing': 'exact', 'stream': False}, {}, {})), [])
+        self.assertEqual(daemon.timing_args(daemon.emu_timing('rytm', {'timing': 'unit'}, {}, {'stream_at': 12.5})),
+                         ['--usb-overbridge', '12.5'])
+        self.assertTrue(daemon.timing_same(t, daemon.emu_timing('rytm', {'timing': 'unit', 'cpu_fail': 99}, {}, {})))
+        self.assertFalse(daemon.timing_same(t, None))
+        self.assertFalse(daemon.timing_same(t, daemon.emu_timing('rytm', {'timing': 'unit', 'stream': False}, {}, {})))
+
+    def test_cpu_verdict_thresholds(self):
+        at = lambda *cpus: [(90 + 5 * i, c, c - 5) for i, c in enumerate(cpus)]
+        self.assertEqual(daemon.cpu_verdict(at(81.0, 80.8), 90, 95)[0], 'pass')
+        self.assertEqual(daemon.cpu_verdict(at(90.0), 90, 95)[0], 'pass')          # at warn: no risk yet
+        self.assertEqual(daemon.cpu_verdict(at(88.0, 90.1), 90, 95)[0], 'risk')    # the highest reading counts
+        self.assertEqual(daemon.cpu_verdict(at(94.9), 90, 95)[0], 'risk')
+        self.assertEqual(daemon.cpu_verdict(at(89.0, 95.0), 90, 95)[0], 'fail')    # at fail: fails
+        self.assertEqual(daemon.cpu_verdict(at(100.0), 90, 95)[0], 'fail')
+        self.assertEqual(daemon.cpu_verdict(at(92.0), 85, 91)[0], 'fail')          # configured thresholds
+        verdict, line = daemon.cpu_verdict([], 90, 95)
+        self.assertEqual(verdict, 'not read')
+        self.assertIn('FAIL, not read', line)
+        line = daemon.cpu_verdict(at(88.6, 89.3), 90, 95)[1]
+        self.assertIn('CPU max 89.3 %', line)
+        self.assertIn('s90 88.6/83.6, s95 89.3/84.3', line)
+        self.assertNotRegex(line, r': (PASS|FAIL) \(')     # never read as a plan's verdict line
+
+    def test_stats_readings(self):
+        text = ('  second 6: CPU 72.0 %, DSP 66.0 % (peak 80.0 %), heap free 1\n'
+                '  second 96: CPU 81.2 %, DSP 75.9 % (peak 81.4 %), heap free 1\nok stats\n')
+        self.assertEqual(daemon.stats_readings(text), [(6, 72.0, 66.0), (96, 81.2, 75.9)])
+        self.assertEqual(daemon.stats_readings(text, 90), [(96, 81.2, 75.9)])
+
+
 class InProcess(unittest.TestCase):
     def setUp(self):
         forget_passes()
@@ -1296,6 +1393,188 @@ class InProcess(unittest.TestCase):
                 'power-cycle\n', 'power-cycle\nsay contrast fresh, dirty, occupied, testslot: x\n'))
         with self.assertRaisesRegex(daemon.Refused, r'stop in \[kept\]\).* would reach'):
             self.d.t_batch(self.s, {'gate': True, 'plans': [late], 'build': build})
+
+    def fake_timing_emulator(self):
+        """fake_power_off_emulator, plus what an analog-emu with unit timing and --usb-overbridge has."""
+        folder = self.fake_power_off_emulator('rytm')
+        with open(os.path.join(folder, daemon.UNITS['rytm']['emu_exe']), 'a', encoding='utf-8') as fh:
+            fh.write('@rem DTEMU_TIMING\r\n' if os.name == 'nt' else '')
+        script = os.path.join(folder, 'fake-rytm.py')
+        with open(script, encoding='utf-8') as fh:
+            text = fh.read()
+        with open(script, 'w', encoding='utf-8') as fh:     # its switch line, as rytm --usb-overbridge prints it
+            fh.write(text.replace('print("args", ', 'if "--usb-overbridge" in a: print("usb overbridge: USB CONFIG = '
+                                  'OVERBRIDGE at 9.00 s; the host re-enumerates", flush=True)\nprint("args", ')
+                     + '# DTEMU_TIMING\n')
+        saved = self.d.emu_help
+        self.addCleanup(lambda: setattr(self.d, 'emu_help', saved))
+        self.d.emu_help = lambda unit: 'usage: rytm [--usb-midi-tcp ADDR] [--usb-overbridge [SECS]]'
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        return folder
+
+    def test_emulator_timing_launch(self):
+        """timing unit: DTEMU_TIMING in the emulator's environment and, on the Rytm, the Sidecar's
+        Overbridge stream (--usb-overbridge); nothing set: as before; refused by an analog-emu without them."""
+        self.fake_timing_emulator()
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        start = lambda **a: self.d.t_emulator(self.s, dict(a, action='start', unit='rytm', build=build))
+        start()
+        e = self.d.emulators[(self.s.sid, 'rytm')]
+        self.assertNotIn('--usb-overbridge', e['cmd'])
+        self.assertIsNone(e['env'])                          # not set: the daemon's own environment
+        self.d.stop_emulator(e)
+        lines = start(timing='unit')
+        e = self.d.emulators[(self.s.sid, 'rytm')]
+        self.assertEqual(e['cmd'][e['cmd'].index('--usb-overbridge'):][:2], ['--usb-overbridge', '9'])
+        self.assertEqual(e['env']['DTEMU_TIMING'], 'unit')
+        self.assertTrue(any('timing unit, Overbridge stream on' in l for l in lines), lines)
+        self.d.stop_emulator(e)
+        os.environ['DTEMU_TIMING'] = 'exact'
+        self.addCleanup(lambda: os.environ.pop('DTEMU_TIMING', None))
+        start(timing='off')
+        e = self.d.emulators[(self.s.sid, 'rytm')]
+        self.assertNotIn('DTEMU_TIMING', e['env'])            # off is off, whatever the daemon has
+        self.assertNotIn('--usb-overbridge', e['cmd'])
+        self.d.stop_emulator(e)
+        saved = daemon.EMU_CONF
+        self.addCleanup(lambda: setattr(daemon, 'EMU_CONF', saved))
+        daemon.EMU_CONF = {'timing': 'exact', 'stream': False}     # config.toml's [emulator]
+        start()
+        e = self.d.emulators[(self.s.sid, 'rytm')]
+        self.assertEqual((e['env']['DTEMU_TIMING'], '--usb-overbridge' in e['cmd']), ('exact', False))
+        self.d.stop_emulator(e)
+        daemon.EMU_CONF = {}
+        self.d.emu_help = lambda unit: 'usage: rytm [--usb-midi-tcp ADDR]'
+        with self.assertRaisesRegex(daemon.Refused, 'has none: build one, or stream = no'):
+            start(timing='unit')
+        start(timing='unit', stream=False)                     # no stream: no --usb-overbridge needed
+        self.d.stop_emulator(self.d.emulators[(self.s.sid, 'rytm')])
+        self.d.emu_help_text.clear()
+        exe = os.path.join(daemon.ANALOG_EMU, daemon.UNITS['rytm']['emu_exe'])
+        with open(exe, encoding='utf-8') as fh:
+            text = fh.read()
+        with open(exe, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('DTEMU_TIMING', 'no timing'))
+        with self.assertRaisesRegex(daemon.Refused, 'needs an analog-emu with unit timing'):
+            start(timing='unit', stream=False)
+
+    def test_wait_for_stream(self):
+        """Nothing is sent before the stream has switched on; an OS whose USB layout is not 1.74's, or an
+        emulator that ended, says why; without the stream there is nothing to wait for."""
+        log = os.path.join(TMP, 'stream.log')
+        proc = types.SimpleNamespace(poll=lambda: None)
+        t = daemon.emu_timing('rytm', {'timing': 'unit'}, {}, {})
+        for text, why in (('usb overbridge: USB CONFIG = OVERBRIDGE at 9.00 s; the host re-enumerates\n', None),
+                          ('usb overbridge: not OS 1.74\'s USB mode layout (mode 0x0, table 0x0); left as it is\n',
+                           'did not start: usb overbridge: not OS 1.74')):
+            with open(log, 'w', encoding='utf-8') as fh:
+                fh.write('usb midi tcp: listening\n' + text)
+            got = self.d.wait_for_stream(proc, log, t)
+            self.assertTrue(got is None if why is None else why in got, got)
+        with open(log, 'w', encoding='utf-8') as fh:
+            fh.write('usb midi tcp: listening\n')
+        self.assertIn('ended before', self.d.wait_for_stream(types.SimpleNamespace(poll=lambda: 1), log, t))
+        self.assertIsNone(self.d.wait_for_stream(proc, log, daemon.emu_timing('rytm', {'timing': 'unit', 'stream': False}, {}, {})))
+        self.assertIsNone(self.d.wait_for_stream(proc, log, None))
+
+    def test_cpu_gate_stage(self):
+        """The gate after a passing run: the plan's own stats from second cpu_settle on, then readings of
+        its own until it has cpu_readings; fails at cpu_fail, passes with a risk line above cpu_warn,
+        and fails when nothing answers."""
+        self.fake_timing_emulator()
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        self.d.t_emulator(self.s, {'action': 'start', 'unit': 'rytm', 'build': build, 'timing': 'unit'})
+        run = os.path.join(TMP, 'gate-run')
+        os.makedirs(run, exist_ok=True)
+        with open(os.path.join(run, 'log.txt'), 'w', encoding='utf-8') as fh:
+            fh.write('second 6: CPU 99.0 %, DSP 90.0 %\nsecond 92: CPU 88.0 %, DSP 82.0 %\n')
+        out = 'x: PASS (3 steps) - %s\n' % run
+        clock, calls = [1000.0], []
+
+        def fake_run(cmd, **kw):
+            calls.append(cmd)
+            second, cpu = replies.pop(0) if replies else (None, None)
+            text = '' if second is None else '  second %d: CPU %.1f %%, DSP 80.0 %%\ndone\n' % (second, cpu)
+            return types.SimpleNamespace(returncode=0 if text else 1, stdout=text, stderr='' if text else 'no answer')
+        saved = daemon.subprocess, daemon.time
+        self.addCleanup(lambda: (setattr(daemon, 'subprocess', saved[0]), setattr(daemon, 'time', saved[1])))
+        daemon.subprocess = types.SimpleNamespace(run=fake_run, TimeoutExpired=subprocess.TimeoutExpired)
+        daemon.time = types.SimpleNamespace(time=lambda: clock[0], sleep=lambda n: clock.__setitem__(0, clock[0] + n),
+                                            strftime=time.strftime)
+        info = {'flash': None, 'os_file': None}
+        t = daemon.emu_timing('rytm', {'timing': 'unit', 'cpu_readings': 3}, {}, {})
+        self.assertEqual(t['quiet'], 10.0)
+        job = types.SimpleNamespace()
+        replies = [(80, 87.0), (95, 89.0), (100, 90.5), (105, 89.5)]   # s80: before boot settled, waits
+        rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, out)
+        self.assertEqual((rc, job.cpu_gate['verdict']), (0, 'risk'))
+        self.assertEqual([r[0] for r in job.cpu_gate['readings']], [95, 100, 105])   # its own, not s80
+        self.assertEqual([r[0] for r in job.cpu_gate['plan_readings']], [92])           # shown: not s6
+        self.assertIn('PASS with a margin risk, CPU max 90.5 %', line)
+        self.assertIn("the plan's own readings (not judged): s92 88.0/82.0", line)
+        self.assertEqual(calls[0][-2:], ['do', 'stats'])
+        replies = [(95, 95.0), (100, 94.0), (105, 94.0)]
+        rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, out)
+        self.assertEqual((rc, job.cpu_gate['verdict']), (1, 'fail'))
+        replies = []                                                   # no analoghealth: never a pass
+        rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, 'x: PASS (1 steps) - %s\n' % TMP)
+        self.assertEqual((rc, job.cpu_gate['verdict']), (1, 'not read'))
+        self.assertIn('no answer', line)
+        # an upgrade's reboot (a flash in the plan) without the stream's switch after it: never a pass
+        log = self.d.emulators[(self.s.sid, 'rytm')]['log']
+        with open(log, 'a', encoding='utf-8') as fh:
+            fh.write('reset: booting C11N.syx from the flash\n')
+        replies = [(95, 81.0), (100, 81.0), (105, 81.0)]
+        rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, out)
+        self.assertEqual((rc, job.cpu_gate['verdict']), (1, 'not read'))
+        self.assertIn('no Overbridge stream in the OS the emulator runs now', line)
+        with open(log, 'a', encoding='utf-8') as fh:
+            fh.write('usb overbridge: USB CONFIG = OVERBRIDGE at 9.10 s; the host re-enumerates\n')
+        rc, line = self.d.cpu_gate_stage(self.s, 'rytm', info, t, job)(0, out)
+        self.assertEqual((rc, job.cpu_gate['verdict']), (0, 'pass'))
+        # a plan that leaves the emulator on stock: no stats there, the gate says so and lets it be
+        stock = os.path.join(TMP, 'os', 'stock.syx')
+        daemon.UNITS['rytm']['stock'] = [stock]
+        rc, line = self.d.cpu_gate_stage(self.s, 'rytm', {'flash': stock, 'os_file': None}, t, job)(0, out)
+        self.assertEqual(rc, 0)
+        self.assertIn('not taken', line)
+
+    @needs_runner
+    def test_run_plan_timing(self):
+        """run_plan with timing: the fresh emulator gets it, the CPU gate runs last, no setup snapshot;
+        without build, a running emulator of another timing is refused."""
+        self.fake_timing_emulator()
+        plan = self.sample('menus.txt', 'rytm')
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        self.d.guard_projects = lambda info, addr, cmd, folder: cmd
+        self.d.t_run_plan(self.s, {'plan': plan, 'target': 'emulator', 'build': build, 'timing': 'unit'})
+        job, cmd = self.started[-1]
+        e = self.d.emulators[(self.s.sid, 'rytm')]
+        self.assertEqual(e['env']['DTEMU_TIMING'], 'unit')
+        self.assertIn('--usb-overbridge', e['cmd'])
+        self.assertTrue(callable(cmd[-1]) and cmd[-1].__name__ == 'cpu-gate')
+        with self.assertRaisesRegex(daemon.Refused, 'runs with timing unit.*give build'):
+            self.d.t_run_plan(self.s, {'plan': plan, 'target': 'emulator', 'timing': 'unit', 'stream': False})
+        self.d.t_run_plan(self.s, {'plan': plan, 'target': 'emulator', 'timing': 'unit', 'cpu_gate': False})
+        job, cmd = self.started[-1]
+        self.assertFalse(callable(cmd[-1]) and getattr(cmd[-1], '__name__', '') == 'cpu-gate')
+        # the verdict: a failed gate fails the job and records no pass
+        run = os.path.join(TMP, 'timing-run')
+        os.makedirs(run, exist_ok=True)
+        with open(os.path.join(run, 'summary.json'), 'w') as fh:
+            json.dump({'emulator': True, 'pass': True}, fh)
+        job.cpu_gate = dict(verdict='risk', readings=[(96, 91.0, 85.0)], line='cpu gate: PASS with a margin risk')
+        self.done(job, 0, 'menus: PASS (3 steps) - %s\n' % run)
+        self.assertEqual(job.state, 'pass')                     # a risk passes, with its line
+        self.assertIn('cpu gate: PASS with a margin risk', job.lines)
+        forget_passes()
+        job.cpu_gate = dict(verdict='fail', readings=[(96, 96.0, 85.0)], line='cpu gate: FAIL, CPU max 96.0 %')
+        self.done(job, 0, 'menus: PASS (3 steps) - %s\n' % run)
+        self.assertEqual(job.state, 'fail')
+        self.assertIn('cpu gate: FAIL, CPU max 96.0 %', job.lines)
+        self.assertFalse(any('recorded as the emulator pass' in l for l in job.lines), job.lines)
+        with self.assertRaisesRegex(daemon.Refused, 'no timing option'):
+            self.d.t_batch(self.s, {'plans': [plan], 'build': build, 'timing': 'unit'})
 
     def test_emulator_usb_midi_real(self):
         """units.rytm.emu_usb_midi_real: the emulator starts with --usb-midi-real (the firmware's own

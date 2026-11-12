@@ -51,6 +51,12 @@ thing permanently and is meant for a unit that is always behind a host. Hardware
 elklock reads the same setting and its `release` takes `--port NAME` for one device. Unset, every
 command is as before.
 
+Emulator timing: `timing = "unit" | "exact" | "off"` (a `run_plan` or `emulator` argument, a plan
+setting, or `[emulator]` in config.toml; unset by default) starts analog-emu with `DTEMU_TIMING` and, on
+the Rytm, the Sidecar's Overbridge stream (`--usb-overbridge`), so its CPU reads like the unit's; an emulator
+`run_plan` with it then reads analoghealth `stats` after boot settles and fails at 95 % or more (a margin risk
+above 90 %). See [docs/emulator-timing.md](docs/emulator-timing.md).
+
 ## Tools (each answers in a few lines: `ok:`, `pass:`, `fail:`, `refused:`, `running:`, `waiting:`)
 | tool | what | needs |
 |---|---|---|

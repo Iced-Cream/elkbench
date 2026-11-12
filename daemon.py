@@ -85,6 +85,147 @@ POWER_OFF_WAIT = 60                             # s analog-emu has to save and e
 POWER_OFF_MARK = 'power off: working state saved'    # its log line after a power-off save
 # in the binary of an analog-emu that has --power-off (the line above is put together at run time)
 POWER_OFF_BUILD_MARK = b'power off: no --card, nothing kept'
+# Emulator timing: analog-emu's DTEMU_TIMING (unit = sampled unit timing, exact = every block costed)
+# and, on the Rytm, the Sidecar Pi's always-on Overbridge stream (rytm --usb-overbridge): the unit's
+# CPU readings are all taken behind it, and core 0.10/0.11's memcpy/memset wrappers only cost what
+# they cost on the unit with it on. Runs with timing on take analoghealth stats after boot settles
+# and fail at cpu_fail % or more, pass with a risk warning above cpu_warn % ([emulator] in config.toml).
+TIMING_MODES = ('off', 'unit', 'exact')
+TIMING_OPTS = ('timing', 'stream', 'cpu_gate', 'cpu_warn', 'cpu_fail')
+TIMING_DEFAULTS = dict(cpu_warn=90.0, cpu_fail=95.0, cpu_settle=90, cpu_readings=4, cpu_gap=5.0, cpu_quiet=10.0,
+                       stream_at=9.0)
+STREAM_MARK = 'usb overbridge: USB CONFIG = OVERBRIDGE'   # analog-emu's line at the switch
+STREAM_WAIT = 60                                # s of emulated time it may take after stream_at
+TIMING_BUILD_MARK = b'DTEMU_TIMING'             # in the binary of an analog-emu with unit timing
+STATS_LINE = re.compile(r'second (\d+): CPU ([\d.]+) %, DSP ([\d.]+) %')
+
+
+def truth(v, what):
+    """A yes/no option from a call (bool), a plan setting or config.toml (yes, no, true, false, on, off)."""
+    if isinstance(v, bool):
+        return v
+    t = str(v).strip().lower()
+    if t in ('yes', 'true', 'on', '1'):
+        return True
+    if t in ('no', 'false', 'off', '0'):
+        return False
+    raise Refused('%s is yes or no, not %r' % (what, v))
+
+
+def emu_timing(unit, a, plan=None, conf=None):
+    """The timing an emulator start runs with: the call's `timing` / `stream` / `cpu_gate` /
+    `cpu_warn` / `cpu_fail`, else the plan's settings (timing =, stream =, cpu-gate =), else
+    config.toml's [emulator] table. -> None when none of them names a timing: the emulator starts
+    as it always did (DTEMU_TIMING left as the daemon's own environment has it). Else dict(mode,
+    stream, gate, warn, fail, settle, readings, gap, stream_at). `off` runs without DTEMU_TIMING
+    even when the daemon's environment sets it. The stream defaults on with timing on the Rytm
+    (the unit's readings are taken behind the Sidecar's stream) and is the Rytm's only."""
+    conf = EMU_CONF if conf is None else conf
+    plan = plan or {}
+
+    def pick(key, plan_key=None):
+        """-> (value, named): named when the call or the plan gave it (config.toml's values are
+        defaults: one that does not fit this unit or mode is left aside, never refused)."""
+        if a.get(key) is not None:
+            return a[key], True
+        if plan.get(plan_key or key) is not None:
+            return plan[plan_key or key], True
+        return conf.get(key), False
+    mode, named = pick('timing')
+    if (UNITS.get(unit) or {}).get('emulator') in ('digiemu', 'fwcheck'):
+        if named:
+            raise Refused('timing is analog-emu\'s (Rytm, A4): the %s\'s emulator has none' % unit)
+        return None                         # config.toml's timing is for the analog-emu units
+    if mode is None:
+        named = [k for k in ('stream', 'cpu_gate', 'cpu_warn', 'cpu_fail') if a.get(k) is not None]
+        named += [k for k in ('stream', 'cpu-gate') if plan.get(k) is not None]
+        if named:
+            raise Refused('%s goes with timing (unit or exact): name timing too' % ', '.join(named))
+        return None
+    mode = str(mode).strip().lower()
+    if mode not in TIMING_MODES:
+        raise Refused('timing is %s, not %r' % (', '.join(TIMING_MODES), mode))
+    stream, named = pick('stream')
+    stream = truth(stream, 'stream') if stream is not None else True
+    if named and stream and mode == 'off':
+        raise Refused('stream = yes needs timing unit or exact: the stream is there for unit-like CPU readings')
+    if named and stream and unit != 'rytm':
+        raise Refused('the Overbridge stream (the Sidecar Pi\'s, rytm --usb-overbridge) is the Rytm\'s only: '
+                      'stream = no for the %s' % unit)
+    stream = stream and unit == 'rytm' and mode != 'off'
+    gate, named = pick('cpu_gate', 'cpu-gate')
+    gate = truth(gate, 'cpu_gate') if gate is not None else True
+    if named and gate and mode == 'off':
+        raise Refused('the CPU gate reads unit-like CPU: it needs timing unit or exact')
+    gate = gate and mode != 'off'
+
+    def num(k, f):
+        v = pick(k)[0]
+        return f(TIMING_DEFAULTS[k] if v is None else v)
+    try:
+        warn, fail = num('cpu_warn', float), num('cpu_fail', float)
+        settle, readings, gap = num('cpu_settle', int), num('cpu_readings', int), num('cpu_gap', float)
+        stream_at, quiet = num('stream_at', float), num('cpu_quiet', float)
+    except (TypeError, ValueError) as e:
+        raise Refused('a CPU gate number does not read: %s' % e)
+    if not 0 < warn < fail <= 100:
+        raise Refused('cpu_warn (%g) must be under cpu_fail (%g), both 0-100 %%' % (warn, fail))
+    if readings < 1 or settle < 0 or gap < 0 or stream_at < 0 or quiet < 0:
+        raise Refused('cpu_readings at least 1; cpu_settle, cpu_gap, cpu_quiet and stream_at not negative')
+    return dict(mode=mode, stream=stream, gate=gate, warn=warn, fail=fail, settle=settle,
+                readings=readings, gap=gap, quiet=quiet, stream_at=stream_at)
+
+
+def timing_env(t, environ):
+    """The environment an emulator with timing t starts in: None (inherit) without a timing."""
+    if t is None:
+        return None
+    env = dict(environ)
+    if t['mode'] == 'off':
+        env.pop('DTEMU_TIMING', None)
+    else:
+        env['DTEMU_TIMING'] = t['mode']
+    return env
+
+
+def timing_args(t):
+    """analog-emu arguments for timing t: the Sidecar's Overbridge stream from stream_at s on."""
+    return ['--usb-overbridge', '%g' % t['stream_at']] if t and t['stream'] else []
+
+
+def timing_same(t, u):
+    """Whether two timings start the same emulator (mode and stream; the gate's numbers aside)."""
+    pick = lambda x: (x['mode'], x['stream'], x['stream_at']) if x else None
+    return pick(t) == pick(u)
+
+
+def timing_label(t):
+    if t is None:
+        return 'timing not set (the daemon\'s environment)'
+    return 'timing %s, %s' % (t['mode'], 'Overbridge stream on (the Sidecar\'s, from %g s)' % t['stream_at']
+                              if t['stream'] else 'no Overbridge stream')
+
+
+def stats_readings(text, settle=0):
+    """analoghealth `stats` lines in text -> [(second, cpu, dsp)] at or after second `settle`."""
+    return [(int(m.group(1)), float(m.group(2)), float(m.group(3))) for m in STATS_LINE.finditer(text)
+            if int(m.group(1)) >= settle]
+
+
+def cpu_verdict(readings, warn, fail):
+    """The CPU gate on readings [(second, cpu, dsp)]: its highest CPU against the thresholds.
+    -> (verdict, line): verdict 'pass', 'risk' (above warn, under fail: passes with a warning),
+    'fail' (fail or more) or 'not read' (no readings: fails, never passes)."""
+    if not readings:
+        return 'not read', ('cpu gate: FAIL, not read: no analoghealth stats after boot settled '
+                            '(a build without analoghealth cannot be gated; cpu_gate = no runs it without)')
+    top = max(r[1] for r in readings)
+    verdict = 'fail' if top >= fail else 'risk' if top > warn else 'pass'
+    head = {'pass': 'PASS', 'risk': 'PASS with a margin risk', 'fail': 'FAIL'}[verdict]
+    return verdict, 'cpu gate: %s, CPU max %.1f %% (fails at %g %% or more, risk above %g %%); readings: %s' % (
+        head, top, fail, warn, ', '.join('s%d %.1f/%.1f' % r for r in readings))
+
+
 DIGIEMU_OFF_WAIT = 60                            # s digiemu has for its power-off save
 DIGIEMU_UP_WAIT = 300                            # s its boot on that card may take (cold boot, intro, settle)
 GATE_PLANS_MAX = 16                             # plans one gate batch may take
@@ -674,6 +815,7 @@ def load_config(path=CONFIG):
         starts=c.get('starts') or os.path.join(HERE, 'starts'),
         keep_awake=c.get('keep_awake', True) is not False,
         midi_clients=tuple(c['midi_clients']) if 'midi_clients' in c else MIDI_CLIENTS,
+        emulator=dict(c.get('emulator') or {}),
         units=units)
 
 
@@ -693,6 +835,7 @@ DIGIHEALTH = CFG['digihealth']            # a digihealth tree with tools/digirun
 SAMPLEGATE = CFG['samplegate']            # samplegate.py: the Rytm's +Drive sample store (drive_items)
 MODSGATE = CFG['modsgate']                # modsgate.py: the Rytm's +Drive /mods folder (drive_items)
 MODSGATE_ELEKLOADER = CFG['modsgate_elekloader']   # the elekloader tree modsgate runs (ELEKLOADER)
+EMU_CONF = CFG['emulator']                # [emulator]: timing, stream, the CPU gate's numbers
 ANALOG_EMU = CFG['analog_emu']            # folder with analog-emu's rytm.exe and a4.exe
 DIGIEMU = CFG['digiemu']                  # a digiemu checkout (emu.fwcheck)
 DIGIEMU_PY = CFG['digiemu_python']        # its Python; ['wsl', '~/venv/bin/python'] runs it in WSL
@@ -1235,10 +1378,11 @@ class Daemon:
         raise Refused('this session has no %s emulator: give build (the OS .syx to boot), or start '
                       'one with the emulator tool (emulators started by hand are not used)' % unit)
 
-    def emu_ready(self, s, unit, build, snapshot=None, power_off=False):
+    def emu_ready(self, s, unit, build, snapshot=None, power_off=False, timing=None):
         """-> (address, lines): with `build`, a fresh emulator of this session boots it first
         (any it runs is stopped), saving the separate emulator calls; else the running one.
-        power_off: it starts with --power-off, for a plan's power-cycle steps."""
+        power_off: it starts with --power-off, for a plan's power-cycle steps. timing: the call's
+        timing options (TIMING_OPTS) and the plan's settings, as {'call': {...}, 'plan': {...}}."""
         if not build:
             if power_off and not (self.emulators.get((s.sid, unit)) or {}).get('power_off'):
                 raise Refused('this plan has power-cycle steps: give build, so that its emulator starts '
@@ -1247,10 +1391,12 @@ class Daemon:
         mine = self.emulators.get((s.sid, unit))
         if mine and mine['proc'].poll() is None:
             self.stop_emulator(mine)
-        lines = self.t_emulator(s, {'action': 'start', 'unit': unit, 'build': build}, snapshot, power_off)
+        lines = self.t_emulator(s, dict((timing or {}).get('call') or {}, action='start', unit=unit, build=build,
+                                        _plan=(timing or {}).get('plan')), snapshot, power_off)
         addr = self.emu_port(s, unit)
         if UNITS[unit].get('emulator') != 'digiemu':   # digiemu_start waits for its OS itself
-            self.wait_for_os(addr)
+            exact = ((self.emulators.get((s.sid, unit)) or {}).get('timing') or {}).get('mode') == 'exact'
+            self.wait_for_os(addr, 90 if exact else 30)     # exact runs at about 0.6x real time
         return addr, lines[:1]
 
     def wait_for_os(self, addr, tries=30):
@@ -1323,7 +1469,7 @@ class Daemon:
         log_path = os.path.join(e['work'], 'emulator-boot%d.log' % n)
         with open(log_path, 'w', encoding='utf-8') as log:
             proc = subprocess.Popen(cmd, cwd=e['work'], stdout=log, stderr=subprocess.STDOUT,
-                                    stdin=subprocess.PIPE, **NOWIN)
+                                    stdin=subprocess.PIPE, env=e.get('env'), **NOWIN)
         addr = 'tcp:127.0.0.1:%d' % ports['--usb-midi-tcp']
         e.update(proc=proc, cmd=cmd, log=log_path, snapshot=None, boots=n, address=addr,
                  din='tcp:127.0.0.1:%d' % ports['--din-midi-tcp'] if '--din-midi-tcp' in ports else None)
@@ -1337,6 +1483,9 @@ class Daemon:
                 break
         if proc.poll() is not None or 'usb midi tcp: listening' not in text:
             return 1, 'fail: power-cycle: the cold boot did not open its USB MIDI port (%s)\n' % log_path
+        why = self.wait_for_stream(proc, log_path, e.get('timing'))
+        if why:
+            return 1, 'fail: power-cycle: %s\n' % why
         if not self.wait_for_os(addr):
             return 1, 'fail: power-cycle: the OS did not answer after the cold boot (%s)\n' % log_path
         return 0, 'ok power-cycle: switched off (%s), cold boot on its card: up again at %s (%s)\n' % (
@@ -3158,6 +3307,7 @@ class Daemon:
             raise Refused('this session already runs a %s emulator on %s; stop it first'
                           % (a['unit'], mine['address']))
         minutes = min(max(int(a.get('minutes') or 60), 1), 240)
+        timing = emu_timing(a['unit'], a, a.get('_plan'))
         # power_off: started with --power-off, so that a later plan with power-cycle steps runs on
         # it as it is (after the plans that set up its state) instead of on a fresh boot
         power_off = power_off or bool(a.get('power_off'))
@@ -3207,7 +3357,9 @@ class Daemon:
             tcp = probe.getsockname()[1]
         cmd = [exe] + ([build] if build else []) + [
             '--flash', flash, '--no-audio', '--headless', '--no-midi',
-            '--usb-midi-tcp', '127.0.0.1:%d' % tcp, '--after', str(minutes * 60)] + self.emu_usb_args(a['unit'])
+            '--usb-midi-tcp', '127.0.0.1:%d' % tcp, '--after', str(minutes * 60)] + self.emu_usb_args(a['unit']) + \
+            self.emu_timing_args(a['unit'], timing)
+        env = timing_env(timing, os.environ)
         din = None
         if self.emu_has_din(a['unit']):              # and its DIN MIDI, for send/capture ... din
             with socket.socket() as probe:
@@ -3223,7 +3375,7 @@ class Daemon:
         if power_off:                   # `quit` on stdin switches it off: the OS saves to the card
             cmd += ['--power-off'] + ([] if snapshot else ['--stdin-commands'])
         proc = subprocess.Popen(cmd, cwd=work, stdout=log, stderr=subprocess.STDOUT,
-                                stdin=subprocess.PIPE if snapshot or power_off else None, **NOWIN)
+                                stdin=subprocess.PIPE if snapshot or power_off else None, env=env, **NOWIN)
         # what ran on this card before: nothing on a fresh copy; the old list on a card kept
         history = list((mine or {}).get('history') or []) if keep and not a.get('fresh_card') else []
         if keep:
@@ -3233,6 +3385,7 @@ class Daemon:
                                                  snapshot=snapshot, log=log_path,
                                                  din='tcp:127.0.0.1:%d' % din if din else None,
                                                  cmd=cmd, work=work, power_off=power_off, boots=1,
+                                                 timing=timing, env=env,
                                                  boot_os=build, card_clean=bool(card_clean and not keep))
         for _ in range(30):                           # until it listens (an older build never does)
             time.sleep(0.2)
@@ -3245,11 +3398,17 @@ class Daemon:
             proc.terminate()
             raise Refused('the emulator did not open its USB MIDI port (needs an analog-emu with '
                           '--usb-midi-tcp): see %s' % log_path)
+        why = self.wait_for_stream(proc, log_path, timing)
+        if why:
+            self.stop_emulator(self.emulators[(s.sid, a['unit'])])
+            raise Refused(why)
         return ['ok: %s emulator running headless on %s%s, USB MIDI at tcp:127.0.0.1:%d%s (%s), ends by itself '
                 'after %d min' % (a['unit'], label, ' (from its flash)' if keep else '', tcp,
                                   ', DIN MIDI at tcp:127.0.0.1:%d' % din if din else '',
                                   ('its card as left' if keep and not a.get('fresh_card') else 'card copy')
                                   if os.path.exists(card) else 'blank card', minutes)] + (
+                ['%s; CPU gate %s' % (timing_label(timing), 'on (run_plan)' if timing['gate'] else 'off')]
+                if timing else []) + (
                 [] if keep else ['its first boot shows two prompts (missing calibration): answer NO twice, '
                                  'as the plans do'])
 
@@ -3419,6 +3578,8 @@ class Daemon:
             return None
         if not self.emu_has_snapshots(info['unit']):
             return None
+        if a.get('_timing'):            # set up under this run's own timing and stream, never resumed
+            return None
         key = self.snapshot_key(info, os.path.abspath(a['build']))
         if digi:
             # digiemu keeps the pair (machine, +Drive) in its own home, where WSL sees it: `live`
@@ -3547,6 +3708,51 @@ class Daemon:
             except OSError:
                 self.emu_help_text[stamp] = False
         return self.emu_help_text[stamp]
+
+    def wait_for_stream(self, proc, log_path, timing, seen=0):
+        """With the stream on: wait until analog-emu has switched USB CONFIG to OVERBRIDGE (its log
+        line after `seen` characters) and the host has enumerated again, so that nothing elkbench
+        sends meets the host's 0.2 s away (with --usb-midi-real the replies go through it). -> None,
+        or why not (the emulator ended, or the OS's USB layout was not OS 1.74's)."""
+        if not (timing and timing['stream']):
+            return None
+        slow = 3 if timing['mode'] == 'exact' else 1
+        deadline = time.time() + (timing['stream_at'] + STREAM_WAIT) * slow + 30
+        while time.time() < deadline:
+            with open(log_path, encoding='utf-8', errors='replace') as fh:
+                text = fh.read()[seen:]
+            if STREAM_MARK in text:
+                time.sleep(2)                 # the host's 0.2 s away and its enumeration, with room
+                return None
+            if 'usb overbridge: not OS 1.74' in text or 'usb overbridge: only on the Rytm' in text:
+                return 'the Overbridge stream did not start: %s (%s)' % (
+                    [l for l in text.splitlines() if l.startswith('usb overbridge:')][-1], log_path)
+            if proc.poll() is not None:
+                return 'the emulator ended before the Overbridge stream started (%s)' % log_path
+            time.sleep(0.5)
+        return 'no Overbridge stream within %d s (%s)' % ((timing['stream_at'] + STREAM_WAIT) * slow + 30, log_path)
+
+    def emu_timing_args(self, unit, timing):
+        """analog-emu arguments for `timing` (emu_timing), refused when this analog-emu cannot run
+        it: unit/exact need a build with DTEMU_TIMING, the stream one with --usb-overbridge."""
+        if not timing:
+            return []
+        exe = os.path.join(ANALOG_EMU or '', UNITS[unit].get('emu_exe') or '')
+        if timing['mode'] != 'off':
+            stamp = ('timing', exe, os.path.getmtime(exe) if os.path.isfile(exe) else None)
+            if stamp not in self.emu_help_text:
+                try:
+                    with open(exe, 'rb') as fh:
+                        self.emu_help_text[stamp] = TIMING_BUILD_MARK in fh.read()
+                except OSError:
+                    self.emu_help_text[stamp] = False
+            if not self.emu_help_text[stamp]:
+                raise Refused('timing %s needs an analog-emu with unit timing (DTEMU_TIMING); %s has none'
+                              % (timing['mode'], exe))
+        if timing['stream'] and '--usb-overbridge' not in self.emu_help(unit):
+            raise Refused('the Overbridge stream needs an analog-emu with --usb-overbridge (branch ob-stream-flag); '
+                          '%s has none: build one, or stream = no' % exe)
+        return timing_args(timing)
 
     def emu_usb_args(self, unit):
         """['--usb-midi-real'] when config.toml sets units.<unit>.emu_usb_midi_real (Rytm, A4):
@@ -4027,10 +4233,19 @@ class Daemon:
                                   '(tools.analog_emu needs a build with the power-off save)' % UNITS[unit]['emu_exe'])
             if info['din'] and not self.emu_has_din(unit):
                 raise Refused(self.no_emu_din(unit))
-            snap = None if st else self.setup_snapshot(s, info, a)
+            timing = emu_timing(unit, a, info['settings'])
+            if not a.get('build'):          # the running emulator: it must have started with this timing
+                e = self.emulators.get((s.sid, unit)) or {}
+                if e and not timing_same(timing, e.get('timing')):
+                    raise Refused('this run asks for %s, and the session\'s emulator runs with %s: give build'
+                                  % (timing_label(timing), timing_label(e.get('timing'))))
+            snap = None if st else self.setup_snapshot(s, info, dict(a, _timing=timing and timing['mode'] != 'off'))
             if a.get('build'):              # a fresh emulator: no /mods/active saved on it yet
                 s.mods_saved.pop((unit, 'emulator'), None)
-            addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'], bool(cycles))
+            addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'], bool(cycles),
+                                           {'call': {k: a[k] for k in TIMING_OPTS if a.get(k) is not None},
+                                            'plan': info['settings']})
+            timing = (self.emulators.get((s.sid, unit)) or {}).get('timing') if a.get('build') else timing
             if a.get('build'):
                 (self.emulators.get((s.sid, unit)) or {})['from_start'] = st
             if snap and snap.get('digi'):           # digiemu says at its start whether it had it stored
@@ -4065,6 +4280,9 @@ class Daemon:
                     list(cmd) if cmd and (isinstance(cmd[0], (list, tuple)) or callable(cmd[0])) else [cmd])
             if st:
                 began = 'built-in start %s' % st if unit_starts(unit).get(st) else 'a fresh emulator'
+            if timing and timing['gate']:
+                stages = list(cmd) if cmd and (isinstance(cmd[0], (list, tuple)) or callable(cmd[0])) else [cmd]
+                cmd = stages + [self.cpu_gate_stage(s, unit, info, timing, job)]
         record = not info['emulator'] or info['settings'].get('record-refs', 'no') != 'yes'
         record = record and not a.get('record_refs')
         tainted = [h['what'] for h in before if h['taints']] if tgt == 'emulator' else []
@@ -4106,6 +4324,16 @@ class Daemon:
                 job.lines += [('power cycled here (power-off save, cold boot on its card): ' if tgt == 'emulator'
                                else 'power cycled by hand: ') + c for c in cycles]
             if tgt == 'emulator':
+                e_t = (self.emulators.get((s.sid, unit)) or {}).get('timing')
+                if e_t:
+                    job.lines.append(timing_label(e_t) + ('' if e_t['gate'] else '; CPU gate off'))
+                gate = getattr(job, 'cpu_gate', None)
+                if gate:
+                    for l in (gate.get('info'), gate['line']):
+                        if l and l not in job.lines:
+                            job.lines.append(l)
+                    ok = ok and gate['verdict'] in ('pass', 'risk')
+                    job.state = 'pass' if ok else 'fail'
                 job.lines += ['not tested here (skipped in the emulator): ' + h for h in hand_steps(info['steps'])]
                 job.lines += ['short here (%g s in the emulator, in full on the unit): %s' % (AUDIO_WAIT_EMULATOR, w)
                               for w in info['audio_waits']]
@@ -4174,6 +4402,84 @@ class Daemon:
                 job.lines.append('references recorded; run again without record_refs for the pass')
 
         return started + self.start(job, cmd, ANALOGHEALTH, done, port)
+
+    def cpu_gate_stage(self, s, unit, info, timing, job):
+        """The CPU gate after an emulator run with timing on, as a stage (rc, out) -> (rc, out) that
+        runs once the plan has passed: after cpu_quiet s with nothing sent, cpu_readings analoghealth
+        stats of its own, cpu_gap s apart, from second cpu_settle on, on the emulator as the plan left
+        it (waiting for the boot to settle when the plan ended earlier). Only those are judged; the
+        plan's own readings from cpu_settle on are listed. Fails at cpu_fail % or more, when nothing
+        could be read, and (stream on) when the OS running now never switched to the stream; passes
+        with a risk line above cpu_warn %."""
+        def gate(rc, out):
+            ends_on = info['flash'] or info.get('os_file')
+            if ends_on and os.path.isfile(ends_on) and any(
+                    os.path.exists(p) and sha256(p) == sha256(ends_on)
+                    for p in UNITS[unit].get('stock', []) + UNITS[unit].get('no_stats', [])):
+                line = ('cpu gate: not taken, the plan leaves the emulator on %s (stock / no_stats: no analoghealth)'
+                        % os.path.basename(ends_on))
+                job.cpu_gate = dict(verdict='pass', readings=[], line=line)
+                return 0, line + '\n'
+            # the plan's own stats are shown, not judged: they may be taken under load (notes
+            # playing) or, in a flash plan, on the OS before the flash
+            plan_r = []
+            for d in re.findall(r': (?:PASS|FAIL) \(.* - (.+)$', out, re.M):
+                try:
+                    with open(os.path.join(d.strip(), 'log.txt'), encoding='utf-8', errors='replace') as fh:
+                        plan_r += stats_readings(fh.read(), timing['settle'])
+                except OSError:
+                    pass
+            info_line = ('cpu gate: the plan\'s own readings (not judged): %s' % ', '.join(
+                's%d %.1f/%.1f' % r for r in plan_r)) if plan_r else None
+            if timing['stream']:
+                # the stream must be on in the OS that runs now: after an upgrade's reboot (a
+                # flash in the plan) analog-emu switches again; without that the CPU reads ~14 low
+                e = self.emulators.get((s.sid, unit)) or {}
+                try:
+                    with open(e.get('log') or '', encoding='utf-8', errors='replace') as fh:
+                        text = fh.read()
+                except OSError:
+                    text = ''
+                if STREAM_MARK not in text[text.rfind('reset: booting'):] if 'reset: booting' in text \
+                        else STREAM_MARK not in text:
+                    line = ('cpu gate: FAIL, not read: no Overbridge stream in the OS the emulator runs now '
+                            '(no "%s" line after its last boot in %s)' % (STREAM_MARK, e.get('log')))
+                    job.cpu_gate = dict(verdict='not read', readings=[], line=line)
+                    return 1, '\n'.join(filter(None, [info_line, line])) + '\n'
+            own, misses, said = [], 0, []
+            slow = 3 if timing['mode'] == 'exact' else 1
+            # nothing sent for cpu_quiet s first: the run's last steps and elkbench's saved-project
+            # check after it load the CPU (a project listing read 100 % at the next stats in C11N's
+            # end-to-end run), and the gate is about the idle margin
+            time.sleep(timing['quiet'] * slow)
+            deadline = time.time() + (timing['settle'] + timing['readings'] * (timing['gap'] + 5) + 120) * slow
+            while len(own) < timing['readings'] and time.time() < deadline and misses < 3:
+                try:
+                    r = subprocess.run([sys.executable, RUNNER, '--port', self.emu_port(s, unit), 'do', 'stats'],
+                                       cwd=ANALOGHEALTH, env=s.env(), capture_output=True, text=True,
+                                       encoding='utf-8', errors='replace', timeout=60, **NOWIN)
+                    got = stats_readings(r.stdout)
+                except (subprocess.TimeoutExpired, Refused) as e:
+                    got, r = [], None
+                    said.append(str(e))
+                if not got:
+                    misses += 1
+                    said.append(((r.stdout + r.stderr).strip().splitlines() or ['no output'])[-1] if r else '')
+                    time.sleep(2)
+                    continue
+                misses = 0
+                if got[-1][0] < timing['settle']:
+                    time.sleep(min(timing['settle'] - got[-1][0], 30))
+                    continue
+                own.append(got[-1])
+                time.sleep(timing['gap'])
+            verdict, line = cpu_verdict(own, timing['warn'], timing['fail'])
+            if verdict == 'not read' and said:
+                line += '; stats said: %s' % said[-1][:200]
+            job.cpu_gate = dict(verdict=verdict, readings=own, plan_readings=plan_r, line=line, info=info_line)
+            return (0 if verdict in ('pass', 'risk') else 1), '\n'.join(filter(None, [info_line, line])) + '\n'
+        gate.__name__ = 'cpu-gate'
+        return gate
 
     def t_flash(self, s, a):
         tgt = self.target(a.get('target'))
@@ -4434,7 +4740,9 @@ class Daemon:
             raise Refused('no file %s' % path)
         msgs = analogrun.load_syx(path)
         # sidecar-check's own commands (F0 7D 53 43 ...) are not dumps either; the 0.11 unit run sends them
-        if not msgs or not all(analogrun.is_dump(m) or bytes(m).startswith(b'\xf0\x7d\x53\x43') for m in msgs):
+        # the Sidecar companion's 5F DIAG request (F0 7D 52 54 5F ...) only, not other companion commands (T158, 2026-11-07)
+        if not msgs or not all(analogrun.is_dump(m) or bytes(m).startswith(b'\xf0\x7d\x53\x43')
+                                    or bytes(m).startswith(b'\xf0\x7d\x52\x54\x5f') for m in msgs):
             raise Refused('%s holds messages other than Elektron dumps; send refuses it' % path)
 
     def t_shot(self, s, a):
@@ -4754,6 +5062,8 @@ class Daemon:
         each of several hardware plans once, side by side, each on a fresh emulator (resuming its
         setup snapshot where it has snapshot-after), and a run that passes is recorded like
         run_plan's. Plans whose pass still stands are left out (unless force)."""
+        if any(a.get(k) is not None for k in TIMING_OPTS):
+            raise Refused('batch runs have no timing option or CPU gate yet: run_plan with timing (one plan at a time)')
         if a.get('stop'):
             j = self.jobs.get(a['stop'])
             if not j or not j.batch or j.sess is not s:
@@ -5531,6 +5841,16 @@ RESTORES = lambda: {'type': 'array', 'items': {'type': 'object', 'properties': {
     'unit': {'type': 'string'}, 'image': {'type': 'string', 'description': 'an image that exists now'},
     'take': {'type': 'string', 'description': 'instead of image: the name a recall_take under this go '
                                               'writes (the session run folder\'s {take}.bin)'}}}}
+TIMING = lambda: dict(
+    timing={'type': 'string', 'enum': ['off', 'unit', 'exact'],
+            'description': 'emulator: analog-emu DTEMU_TIMING for a fresh emulator (default: the plan\'s timing =, '
+                           'else config.toml [emulator] timing, else not set). unit/exact on the Rytm also run the '
+                           'Sidecar\'s Overbridge stream and the CPU gate'},
+    stream={'type': 'boolean', 'description': 'with timing: the Sidecar\'s Overbridge stream (Rytm; default on)'},
+    cpu_gate={'type': 'boolean', 'description': 'with timing: analoghealth stats after boot settles; fail at '
+                                                'cpu_fail %, risk above cpu_warn % (default on)'},
+    cpu_warn={'type': 'number', 'description': 'CPU % above which a run passes with a margin risk (default 90)'},
+    cpu_fail={'type': 'number', 'description': 'CPU % at or above which a run fails (default 95)'})
 EMU_BUILD = lambda: {'type': 'string', 'description': 'emulator only: boot a fresh emulator of this OS '
                                                      '.syx first (replaces yours), instead of an emulator call'}
 TOOLS = [
@@ -5621,7 +5941,8 @@ TOOLS = [
                                                      'emulator (no build), on its card as left'},
        power_off={'type': 'boolean', 'description': 'Rytm / A4 / Digitone: start it with the power-off save, so that a '
                                                     'plan with power-cycle steps can run on it later without '
-                                                    'build (after the plans that set up its state)'})),
+                                                    'build (after the plans that set up its state)'},
+       **TIMING())),
     ('run_plan', 'Run a test plan (analogrun run, format 1) in the background; returns a run_id. target '
                  'emulator records the pass a hardware run needs; hardware needs the claim and an approval token. '
                  'A plan\'s power-cycle steps power the emulator off (its OS saves to the card) and cold-boot it; '
@@ -5633,7 +5954,8 @@ TOOLS = [
                                                'start START (or fresh), for a plan whose start runs a gate batch '
                                                'cannot run (power-cycle or mods steps). With build, a fresh emulator '
                                                'builds the start first; without, the plan runs on the emulator a '
-                                               'start run of the same start left (M1, the base over itself, M2)'})),
+                                               'start run of the same start left (M1, the base over itself, M2)'},
+       **TIMING())),
     ('flash', 'Flash an OS .syx with elkflash (--no-confirm --wait) in the background; returns a run_id. '
               'Hardware: claim, a passing emulator flash of the same file over the same OS, and an approval token.',
      S(unit=UNIT(), image={'type': 'string', 'req': True}, target=TARGET(), approval={'type': 'string'},
