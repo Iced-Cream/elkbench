@@ -56,6 +56,43 @@ class Port(unittest.TestCase):
         self.assertIn('one device', r.stdout)
 
 
+class Din(unittest.TestCase):
+    """A DIN MIDI interface from elkbench's config is a device of its own (din-NAME)."""
+
+    def setUp(self):
+        self.cfg = os.path.join(TMP, 'din.toml')
+        with open(self.cfg, 'w', encoding='utf-8') as fh:
+            fh.write("[din.u2midi]\nport = 'U2MIDI Pro'\n")
+        self.env = dict(ENV, ELKBENCH_CONFIG=self.cfg)
+
+    def tearDown(self):
+        subprocess.run([sys.executable, ELKLOCK, 'release', 'din-u2midi', 'a4', '--no-snapshot'],
+                       env=dict(self.env, CLAUDE_CODE_SESSION_ID='test-d'), capture_output=True, timeout=60)
+
+    def run_d(self, session, *args, stdin=None):
+        return subprocess.run([sys.executable, ELKLOCK, *args], env=dict(self.env, CLAUDE_CODE_SESSION_ID=session),
+                              capture_output=True, text=True, timeout=60, input=stdin)
+
+    def hook(self, session, cmd):
+        r = self.run_d(session, 'hook', stdin=json.dumps({'tool_name': 'Bash', 'session_id': session,
+                                                          'tool_input': {'command': cmd}}))
+        return json.loads(r.stdout)['hookSpecificOutput']['permissionDecisionReason'] if r.stdout.strip() else ''
+
+    def test_claim_release_and_hook(self):
+        r = self.run_d('test-d', 'claim', 'din-u2midi', '--for', 'din test')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertEqual(self.run_d('test-e', 'claim', 'din-u2midi', '--for', 'x').returncode, 3)   # one holder
+        # a command naming the interface needs its claim; the interface's claim alone is not a unit's
+        cmd = 'python analogrun.py --port "Analog Four" --din "U2MIDI Pro" do "send k.syx din"'
+        self.assertIn('a4', self.hook('test-d', cmd))
+        self.assertIn('din-u2midi', self.hook('test-e', 'python dinprobe.py "U2MIDI Pro" --json'))
+        self.assertEqual(self.hook('test-d', 'python dinprobe.py "U2MIDI Pro" --json'), '')
+        self.assertIn('unit not named', self.hook('test-d', 'python analogrun.py info'))
+        r = self.run_d('test-d', 'release', 'din-u2midi', '--note', 'x')
+        self.assertIn('released din-u2midi', r.stdout)
+        self.assertTrue(free('din-u2midi'))
+
+
 class Lock(unittest.TestCase):
     def tearDown(self):
         for s in ('test-a', 'test-b'):
