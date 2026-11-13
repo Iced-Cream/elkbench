@@ -130,9 +130,20 @@ person = "the person at this PC"
 #                                          # overrides it. Flashes, steps, data, plans, the connected
 #                                          # check and the release's slot clear and snapshot use it;
 #                                          # elklock reads it too (and has release --port)
-# din = 'USB MIDI Interface'               # the MIDI interface cabled to its DIN ports (both ways, a
-#                                          # name or 'IN,OUT'): hardware steps and plans with
-#                                          # send/capture ... din use it (Rytm, A4; Digitone and
-#                                          # Digitakt with a digirun.py that has --din); unset: refused
+# din = 'USB MIDI Interface'               # older form, still read: counts as one [din.NAME] entry
+#                                          # below (one per port, however many units list it). Which
+#                                          # unit an interface reaches is not set here any more.
 #                                          # Digitone: give a DIN capture about 8 s (its DIN
 #                                          # reply comes later than over USB)
+
+# DIN MIDI interfaces: one section per interface, not per unit. A cable can be moved from unit to
+# unit with no change here: before a hardware run's first din step (send/capture/cc/... din),
+# elkbench sends analoghealth's read-only probe (tools/dinprobe.py: Elektron RPC Ping, then the
+# MIDI Identity Request) out of each connected interface and uses the one where the claimed unit
+# answers; none answering as that unit refuses the steps. Each interface is an elklock device of
+# its own (din-NAME), claimed with the unit by the run that uses it and released with the unit.
+# Cable both ways: the interface's OUT to the unit's MIDI IN, its IN from the unit's MIDI OUT.
+# [din.u2midi]
+# port = 'U2MIDI Pro'                       # a part of its MIDI port name, or 'IN,OUT'
+# [din.second]                              # a second interface: add its port once
+# port = 'USB MIDI Interface'

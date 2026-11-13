@@ -845,6 +845,9 @@ if FALLBACK not in ('popup', 'thread', 'both'):
 ELKLOCK = CFG['elklock']
 ANALOGHEALTH = CFG['analoghealth']
 RUNNER = os.path.join(ANALOGHEALTH, 'tools', 'analogrun.py') if ANALOGHEALTH else None
+# analoghealth's read-only DIN probe: which unit answers on an interface (tools/dinprobe.py)
+DINPROBE = os.path.join(ANALOGHEALTH, 'tools', 'dinprobe.py') if ANALOGHEALTH else None
+DIN_PROBE_LIMIT = 20          # s one probe of one interface may take
 DIGIHEALTH = CFG['digihealth']            # a digihealth tree with tools/digirun.py (Digitone)
 SAMPLEGATE = CFG['samplegate']            # samplegate.py: the Rytm's +Drive sample store (drive_items)
 MODSGATE = CFG['modsgate']                # modsgate.py: the Rytm's +Drive /mods folder (drive_items)
@@ -1092,6 +1095,7 @@ class Session:
         self.mods_gone = {}               # unit -> {'/mods/~T X': (step no, time, /mods after)}: a hardware
                                           # mods-remove removed it and listed /mods without it
         self.flashed_at = {}              # unit -> step no of this session's last hardware flash
+        self.din_claims = {}              # DIN interface device (din-NAME) -> the unit it was claimed for
         self.steps = itertools.count(1)   # orders the two above
 
     def folder(self, unit):
@@ -1298,6 +1302,7 @@ class Daemon:
         self.connections = 0
         self.restarting = False
         self.checked = {}                 # code mtime -> None (it starts) or why it does not
+        self.din_probes_path = os.path.join(STATE, 'din-probes.json')   # interface -> its last probe
 
     # -- helpers --
 
@@ -2339,9 +2344,13 @@ class Daemon:
 
     def units(self, a):
         try:
-            return elklock.devices([a['unit']] if isinstance(a.get('unit'), str) else a.get('unit') or [])
+            out = elklock.devices([a['unit']] if isinstance(a.get('unit'), str) else a.get('unit') or [])
         except SystemExit as e:
             raise Refused(str(e).replace('elklock: ', ''))
+        if any(elklock.is_din(u) for u in out):
+            raise Refused('a DIN interface is claimed and released with its unit: a run with din steps claims '
+                          'it when it finds the unit there (status shows it)')
+        return out
 
     def t_claim(self, s, a):
         units = self.units(a)
@@ -2476,6 +2485,10 @@ class Daemon:
             if r.returncode:
                 out[0] = 'fail: elklock release %s: %s' % (u, (r.stdout + r.stderr).strip()[-200:])
                 continue
+            dins = sorted(d for d, unit in s.din_claims.items() if unit == u)
+            if dins:                      # the DIN interface(s) claimed for the unit's din steps
+                self.din_release(s, dins)
+                out.append('%s: released DIN interface %s' % (u, ', '.join(dins)))
             row = '| %s | %s | %s | %s | %s | %s |' % (
                 stamp(), s.sid[:8], s.purpose.get(u, '?').replace('|', '/'),
                 ('<br>'.join(done) or 'none').replace('|', '/'), os_text, note.replace('|', '/'))
@@ -2833,6 +2846,14 @@ class Daemon:
             h = elklock.holder(u)
             if elklock.mine(h, session=s.sid):
                 out.append('held: %s for "%s"' % (u, h.get('purpose', '')))
+        probes = self.din_probes()
+        for d, port in sorted(elklock.DIN.items()):
+            h, r = elklock.holder(d), probes.get(d) or {}
+            out.append('DIN interface %s (%s): %s; last probe: %s' % (
+                d, port, 'held by you' if elklock.mine(h, session=s.sid) else
+                'held by %s' % elklock.who_of(h) if h else 'free',
+                '%s at %s' % ('answered ' + r['unit'] if r.get('unit') else r.get('error') or 'no answer',
+                              stamp(r['time'])) if r else 'none'))
         mine = [j for j in self.jobs.values() if j.sess is s]
         out += [j.summary()[0] for j in mine if j.state == 'running']
         out += [j.summary()[0] for j in mine if j.state != 'running'][-3:]
@@ -2890,6 +2911,7 @@ class Daemon:
                 '\n  ran after: ' + ', '.join(ep['after']) if ep.get('after') else '',
                 ''.join('\n' + l for l in start_lines + plancheck.go_lines(info['check'])),
                 ''.join('\n  NOT TESTED IN THE EMULATOR: ' + h for h in hand) +
+                ('\n  ' + self.din_go_line(info['unit']) if info['din'] else '') +
                 ''.join('\n  POWER CYCLE BY HAND (the run waits until you say it is done; the emulator pass '
                         'ran its power-off save and a cold boot): ' + c for c in info['power_cycles']) +
                 ''.join('\n  SHORT IN THE EMULATOR, IN FULL ON THE UNIT: ' + w for w in info['audio_waits']) +
@@ -3050,6 +3072,8 @@ class Daemon:
             out.append('%s: %s (%s)%s' % (head, info['name'], info['path'],
                                           ': the plan checker would refuse it' if c['errors'] else ''))
             out += ['  ERROR: ' + e for e in c['errors']] + plancheck.go_lines(c) + ['  gate: ' + g for g in gate]
+            if info['din'] and not info['emulator']:
+                out.append('  ' + self.din_go_line(info['unit']))
         for e in plancheck.shared_refs(infos):
             out.append('refused: ' + e)
             bad += 1
@@ -3824,32 +3848,160 @@ class Daemon:
 
     def din_args(self, s, unit, tgt, lines):
         """['--din', PORT] for analogrun or digirun when `lines` use the unit's DIN MIDI
-        (send/capture ... din), else []: on hardware the interface named in config
-        (units.<unit>.din), which must be connected; in the emulator, this session's emulator's
-        DIN MIDI over TCP."""
+        (send/capture ... din), else []: on hardware the interface where the unit answered a
+        probe just now (din_route); in the emulator, this session's emulator's DIN MIDI over TCP."""
         if not din_steps(lines):
             return []
         if din_refusal(unit):
             raise Refused(din_refusal(unit))
         if tgt == 'hardware':
-            name = UNITS[unit].get('din')
-            if not name:
-                raise Refused('these steps use DIN MIDI, and no interface is set for the %s: din = the MIDI '
-                              'interface cabled to its DIN ports, in [units.%s] of %s' % (unit, unit, CONFIG))
-            try:
-                ports = elklock.midi_inputs()
-            except OSError:
-                ports = None
-            want = name.split(',')[0].strip().lower()
-            if ports is not None and not any(want in p.lower() for p in ports):
-                raise Refused('the %s\'s DIN interface %r is not connected (no such MIDI port)' % (unit, name))
-            return ['--din', name]
+            return ['--din', self.din_route(s, unit)[1]]
         e = self.emulators.get((s.sid, unit)) or {}
         if e.get('din'):
             return ['--din', e['din']]
         raise Refused(self.no_emu_din(unit) if not self.emu_has_din(unit) else
                       'this session\'s %s emulator started without its DIN MIDI port: start it again '
                       '(emulator stop, then start or give build)' % unit)
+
+    # -- DIN interfaces: config lists interfaces, a probe finds which unit each reaches --
+
+    def din_probes(self):
+        return read_json(self.din_probes_path, {})
+
+    def din_last(self, unit):
+        """The last probe in which `unit` answered on an interface -> (device, record) or (None, None)."""
+        found = [(d, r) for d, r in self.din_probes().items() if r.get('unit') == unit and d in elklock.DIN]
+        return max(found, key=lambda dr: dr[1].get('time', 0)) if found else (None, None)
+
+    def din_go_line(self, unit):
+        """The go request's DIN line for a plan with din steps: what the last probe found. The go
+        is asked before any claim, so nothing is sent then; the run probes again (din_route)."""
+        if not elklock.DIN:
+            return ('DIN: no interface in config ([din.NAME] port = ...): the din steps will be refused')
+        dev, rec = self.din_last(unit)
+        again = ('; the run probes again under the claim before its first din step and stops unless '
+                 'the %s answers' % unit)
+        if not dev:
+            return 'DIN: no probe has found the %s on %s yet%s' % (
+                unit, ', '.join('%s (%s)' % (d, p) for d, p in sorted(elklock.DIN.items())), again)
+        return 'DIN: probe answered %s on %s (%s) at %s%s' % (
+            unit, dev, elklock.DIN[dev], time.strftime('%H:%M', time.localtime(rec['time'])), again)
+
+    def din_claim(self, s, dev, unit):
+        """This session's claim on interface `dev` -> True, or why not (another holder) as a str."""
+        h = elklock.holder(dev)
+        if elklock.mine(h, session=s.sid):
+            return True
+        if h:
+            return 'held: ' + elklock.describe(dev, h)
+        r = subprocess.run([sys.executable, ELKLOCK, 'claim', dev, '--for', 'DIN probe and steps for the %s (%s)'
+                            % (unit, s.purpose.get(unit) or 'elkbench run')],
+                           env=s.env(), capture_output=True, text=True, timeout=60, **NOWIN)
+        if r.returncode:
+            return 'busy: ' + ' | '.join(l.strip() for l in (r.stdout + r.stderr).splitlines() if l.strip())[:200]
+        s.din_claims[dev] = unit
+        return True
+
+    def din_release(self, s, devs):
+        for dev in devs:
+            s.din_claims.pop(dev, None)
+            if elklock.mine(elklock.holder(dev), session=s.sid):
+                subprocess.run([sys.executable, ELKLOCK, 'release', dev, '--no-snapshot', '--note',
+                                'DIN interface, nothing left on it'], env=s.env(), capture_output=True,
+                               text=True, timeout=60, **NOWIN)
+
+    def din_probe(self, s, dev, unit):
+        """dinprobe.py on interface `dev` (its in-process port lock held meanwhile) -> the unit that
+        answered (None: nothing that names a unit), recorded in din-probes.json."""
+        port = elklock.DIN[dev]
+        lk = self.port_lock('din:' + port.lower(), 'hardware')
+        if not lk.acquire(blocking=False):
+            raise Refused('the DIN interface %s (%s) is in use by another run' % (dev, port))
+        try:
+            r = subprocess.run([sys.executable, DINPROBE, port, '--json', '--want', unit],
+                               cwd=os.path.dirname(DINPROBE), env=s.env(), capture_output=True, text=True,
+                               timeout=DIN_PROBE_LIMIT, **NOWIN)
+        except subprocess.TimeoutExpired:
+            r = None
+        finally:
+            lk.release()
+        try:
+            got = json.loads(r.stdout.strip().splitlines()[-1]) if r and r.stdout.strip() else {}
+        except ValueError:
+            got = {}
+        rec = {'unit': got.get('unit'), 'time': time.time(), 'port': port, 'for': unit,
+               'session': s.sid[:8], 'answers': got.get('answers', []),
+               'error': None if r and r.returncode in (0, 2, 3) else
+               ('timed out' if r is None else (r.stderr.strip() or r.stdout.strip())[-200:])}
+        with self.lock:
+            probes = self.din_probes()
+            probes[dev] = rec
+            write_json(self.din_probes_path, probes)
+        self.log_line({'session': s.sid, 'din_probe': dev, 'port': port, 'want': unit, 'answered': rec['unit'],
+                       'error': rec['error']})
+        return rec['unit'], rec
+
+    def din_route(self, s, unit):
+        """The DIN interface where `unit` answers, for a hardware run with din steps -> (device,
+        port). Every configured interface that is connected is a candidate, the one where the unit
+        answered last first; for each, this session claims it (elklock din-NAME; one held by
+        another session is skipped) and sends dinprobe's read-only probe. The first that the unit
+        answers is kept (with its claim, until the unit's release); probe-only claims are given
+        back. Refused when no interface answers as the unit: steps never go to another unit."""
+        if not elklock.DIN:
+            raise Refused('these steps use DIN MIDI, and no DIN interface is in config: [din.NAME] with '
+                          'port = the MIDI interface\'s name, in %s' % CONFIG)
+        if not DINPROBE or not os.path.isfile(DINPROBE):
+            raise Refused('these steps use DIN MIDI, and analoghealth has no tools/dinprobe.py: DIN steps on '
+                          'hardware need an analoghealth that has it (branch din-probe), to find the %s\'s '
+                          'interface' % unit)
+        self.check_hardware(s, [unit])
+        try:
+            ports = elklock.midi_inputs()
+        except OSError:
+            ports = None
+        last, _ = self.din_last(unit)
+        cands = sorted(elklock.DIN, key=lambda d: (d != last, d))
+        notes, taken = [], []
+        try:
+            for dev in cands:
+                port = elklock.DIN[dev]
+                if ports is not None and not any(port.split(',')[0].strip().lower() in p.lower() for p in ports):
+                    notes.append('%s (%s): not connected' % (dev, port))
+                    continue
+                had = elklock.mine(elklock.holder(dev), session=s.sid)
+                ok = self.din_claim(s, dev, unit)
+                if ok is not True:
+                    notes.append('%s: %s' % (dev, ok))
+                    continue
+                if not had:
+                    taken.append(dev)
+                try:
+                    got, rec = self.din_probe(s, dev, unit)
+                except Refused as e:
+                    notes.append(str(e))
+                    continue
+                if got == unit:
+                    if dev in taken:
+                        taken.remove(dev)
+                    s.din_claims[dev] = unit
+                    with open(os.path.join(s.folder(unit), 'din-probe.log'), 'a', encoding='utf-8') as fh:
+                        fh.write('%s DIN: probe answered %s on %s (%s): %s\n' % (
+                            stamp(rec['time']), unit, dev, port, json.dumps(rec['answers'])))
+                    return dev, port
+                notes.append('%s (%s): %s' % (dev, port, 'answered as the %s' % got if got else
+                                              rec['error'] or 'no answer to the probe'))
+        finally:
+            self.din_release(s, taken)
+        raise Refused('no DIN interface answered as the %s, so the din steps were not sent: %s. Check which '
+                      'unit the interface is cabled to (both ways: its OUT to the unit\'s MIDI IN, its IN '
+                      'from the unit\'s MIDI OUT)' % (unit, '; '.join(notes) or 'none connected'))
+
+    def lock_devs(self, unit, din):
+        """`elklock run` devices for a hardware command: the unit, and the DIN interface its
+        --din names, so neither claim can lapse while it runs."""
+        port = din[1] if din else None
+        return [unit] + [d for d, p in elklock.DIN.items() if port and p == port]
 
     def no_emu_din(self, unit):
         if UNITS[unit].get('emulator') == 'digiemu':
@@ -3975,8 +4127,9 @@ class Daemon:
                              tag='%s part %d of %d' % (tag, i + 1, len(parts)), hardware=tgt == 'hardware')
             lines = [l for _, ls in part for l in ls]
             if tgt == 'hardware':
-                stages.append([sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + port_args(unit) +
-                              self.din_args(s, unit, tgt, lines) + ['--quiet', 'run', plan])
+                din = self.din_args(s, unit, tgt, lines)
+                stages.append([sys.executable, ELKLOCK, 'run'] + self.lock_devs(unit, din) + [
+                    '--', sys.executable, RUNNER] + port_args(unit) + din + ['--quiet', 'run', plan])
             else:
                 stages.append(self.emulator_part(s, unit, plan, lines, i + 1))
         return stages
@@ -4252,8 +4405,8 @@ class Daemon:
             plan = self.twin(info, False, s.sid, emulator_run=ep['run_dir']) \
                 if info['flash'] and ep.get('run_dir') else info['path']
             cmd = self.plan_stages(s, info, job, tgt, info['steps']) if staged else [
-                sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + port_args(unit) + din + [
-                '--quiet', 'run', plan]
+                sys.executable, ELKLOCK, 'run'] + self.lock_devs(unit, din) + [
+                '--', sys.executable, RUNNER] + port_args(unit) + din + ['--quiet', 'run', plan]
             started = []
         else:
             if cycles and UNITS[unit].get('emulator') == 'digiemu':
@@ -4870,7 +5023,7 @@ class Daemon:
             cmd = [sys.executable, RUNNER, '--port', where] + din + ['--quiet', '--log', log, 'do', steps,
                                                                      '--out', folder]
             if tgt == 'hardware':
-                cmd = [sys.executable, ELKLOCK, 'run', unit, '--'] + cmd
+                cmd = [sys.executable, ELKLOCK, 'run'] + self.lock_devs(unit, din) + ['--'] + cmd
             r = subprocess.run(cmd, cwd=ANALOGHEALTH, env=s.env(), capture_output=True, text=True,
                                timeout=timeout, **NOWIN)
             lines = [l.strip() for l in (r.stdout + r.stderr).splitlines() if l.strip()]
@@ -4903,7 +5056,7 @@ class Daemon:
         try:
             cmd = [sys.executable, script, '--port', where] + din + ['do', steps, '--out', folder]
             if tgt == 'hardware':
-                cmd = [sys.executable, ELKLOCK, 'run', unit, '--'] + cmd
+                cmd = [sys.executable, ELKLOCK, 'run'] + self.lock_devs(unit, din) + ['--'] + cmd
             r = subprocess.run(cmd, cwd=os.path.dirname(script), env=s.env(), capture_output=True,
                                text=True, timeout=timeout, **NOWIN)
             with open(os.path.join(folder, 'steps.log'), 'a', encoding='utf-8') as fh:

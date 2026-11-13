@@ -27,7 +27,13 @@ python %D% break rytm --yes                               # the person frees a s
   the holder exits, so a claim cannot outlive it.
 - `<device>.json` beside the lock names the holder (session id, folder, purpose, running
   commands); it is a label, not the lock. `ELKLOCK_DIR` overrides the folder (tests use a scratch dir).
-- Devices: `rytm`, `a4`, `digitone`, `digitakt`, or `all`. Claiming several is all-or-nothing.
+- Devices: `rytm`, `a4`, `digitone`, `digitakt`, or `all` (every unit). Claiming several is all-or-nothing.
+- DIN MIDI interfaces are devices too: `din-NAME` for each `[din.NAME]` (`port = '...'`) in elkbench's
+  config.toml (an older `units.<unit>.din` counts as one). A cable moves between units, so the interface
+  is locked on its own: elkbench claims it with the unit for a run with DIN steps (after a read-only probe
+  finds the unit there) and releases it with the unit. Its release reads nothing (no OS). The hook asks
+  for its claim when a command names its port (`--din "U2MIDI Pro"`, `dinprobe.py "U2MIDI Pro"`); its
+  claim alone does not stand in for a unit's.
 
 ## When a claim ends
 | Event | Ends the claim |
