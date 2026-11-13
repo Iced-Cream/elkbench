@@ -12,6 +12,8 @@
     elklock.py heard DEVICE... --by "where"        the person said they have finished
     elklock.py release DEVICE... | --all  [--note "state left"] [--no-snapshot] [--port NAME]
     elklock.py check DEVICE                        exit 0 if this session holds it
+    elklock.py stalled DEVICE                      exit 3 (and why) if the unit stalled on a restart
+    elklock.py unstall DEVICE --by "where" --yes   the person says they power-cycled it by hand
     elklock.py break DEVICE --yes                  the person frees a stuck claim
     elklock.py hook                                PreToolUse hook (reads JSON on stdin)
 
@@ -38,6 +40,13 @@ screen in its handoff note, as `release` does.
 `claim --wait` queues: tickets are served oldest first, and a plain claim does not jump the
 queue. `release` writes a handoff record (OS version from `elkflash info`, a screenshot via
 `elkflash info --screenshot`, your --note); the next `claim` prints it.
+
+A unit that stalled on its restart after an OS upgrade (elkflash exit 5 under `run`: it hung
+with the new OS written, stays on USB, and every MIDI call to it blocks) is marked
+DEVICE.stalled.json, whoever holds it. Until it has been power-cycled by hand, `run` and the
+hook refuse every device command on it except `elkflash usb-cycle` (which watches its USB node
+and opens no port; its exit 0 under `run` clears the mark), and no handoff snapshot reads it.
+`unstall` is the person's way out when the power cycle happened unwatched.
 
 DEVICE.json beside the lock says who holds it; it is only a label, the lock is the handle.
 Exit codes: 0 ok, 3 held by someone else (or wait timed out), 2 usage; `run` returns the
@@ -109,6 +118,10 @@ OFFLINE = re.compile(r'selftest|--self-test|--help|\bdecode\b|\bencode\b|\bboots
 EMULATOR = re.compile(r'rytm-emu|a4-emu|dn-emu|--port[ =]"?tcp:', re.I)
 # long, must-not-be-interrupted operations: the hook requires them under `elklock run`
 MUST_RUN = re.compile(r'elkflash\S*\s+upgrade', re.I)
+# elkflash's exit code for a unit that stalled on its restart after the commit (new OS written)
+STALL_EXIT = 5
+# the one device command a stalled unit takes: it watches the USB node, opens no MIDI port
+STALL_SAFE = re.compile(r'elkflash\S*\s+usb-cycle\b', re.I)
 # file, text and git commands: a tool's name in their arguments is a path (a run's elkflash.log)
 # or text (a commit message), not a command
 FILE_COMMANDS = re.compile(r'\s*(?:cat|cp|mv|ls|dir|head|tail|less|more|grep|rg|find|type|copy|wc|diff|'
@@ -340,6 +353,40 @@ def holder(dev):
     return {'purpose': '(holder starting)'}
 
 
+def stalled(dev):
+    """The stall record of `dev` ({'since', 'why', 'cmd', 'session'}) or None."""
+    return read_json(path(dev, '.stalled.json')) or None
+
+
+def mark_stalled(dev, why, cmd=''):
+    write_json(path(dev, '.stalled.json'), {'since': now(), 'why': why, 'cmd': cmd[:300],
+                                            'session': session_id()})
+
+
+def clear_stalled(dev, by):
+    """Ends the stall mark; the record goes to DEVICE.stalls.jsonl with how it ended."""
+    rec = stalled(dev)
+    if rec is None:
+        return False
+    rec.update(cleared=now(), by=by)
+    with open(path(dev, '.stalls.jsonl'), 'a', encoding='utf-8') as fh:
+        fh.write(json.dumps(rec) + '\n')
+    try:
+        os.remove(path(dev, '.stalled.json'))
+    except FileNotFoundError:
+        pass
+    return True
+
+
+def stall_line(dev, rec=None):
+    rec = rec or stalled(dev)
+    if not rec:
+        return ''
+    return ('%s STALLED since %s: %s. Nothing may open its MIDI port until it is power-cycled by hand '
+            '(watched by elkflash usb-cycle under `run`, or the person runs `unstall`); do not reflash.'
+            % (dev, time.strftime('%H:%M', time.localtime(rec.get('since', 0))), rec.get('why', '')))
+
+
 def live_runs(info):
     return [r for r in info.get('runs', []) if pid_alive(r.get('pid'))]
 
@@ -356,8 +403,9 @@ def describe(dev, info):
     left = int((info.get('expires', now()) - now()) // 60)
     listening = ', LISTENING (the person is listening: %s)' % info['listening'].get('what', '') \
         if info.get('listening') else ''
-    return '%-9s held by %s (%s), for "%s", since %s, idle %d min, %d min max left%s%s' % (
-        dev, who, info.get('where', '?'), info.get('purpose', ''), since, idle, left, busy, listening)
+    return '%-9s held by %s (%s), for "%s", since %s, idle %d min, %d min max left%s%s%s' % (
+        dev, who, info.get('where', '?'), info.get('purpose', ''), since, idle, left, busy, listening,
+        ', STALLED on its restart (power cycle by hand)' if stalled(dev) else '')
 
 
 def duration(text):
@@ -660,6 +708,10 @@ def snapshot(dev, note, skip, port=None):
     """The handoff record: OS version, a screenshot and the note. Best-effort, read-only.
     `port`: the MIDI port to read them on (default: port_of)."""
     rec = {'time': now(), 'note': note, 'ended': 'released'}
+    if stalled(dev):
+        # every MIDI call to a stalled unit blocks: read nothing, say why
+        rec['os'] = 'not read: the unit STALLED on its restart (new OS written); power cycle by hand'
+        return rec
     if skip:
         return rec
     port = port or port_of(dev)
@@ -742,6 +794,12 @@ def cmd_run(args):
         if not mine(holder(d)):
             print('elklock: claim %s first: ' % d + describe(d, holder(d)))
             return 3
+    line = ' '.join(command)
+    safe = bool(STALL_SAFE.search(line))
+    for d in devs:
+        if stalled(d) and not safe:
+            print('elklock: refused: ' + stall_line(d))
+            return 3
     p = subprocess.Popen(command)
     entry = {'pid': p.pid, 'cmd': ' '.join(command), 'since': now()}
     for d in devs:
@@ -756,7 +814,36 @@ def cmd_run(args):
         for d in devs:
             update_info(d, lambda inf: inf.update(
                 runs=[r for r in inf.get('runs', []) if r.get('pid') != p.pid], used=now()))
+    if rc == STALL_EXIT and MUST_RUN.search(line):
+        for d in devs:
+            mark_stalled(d, 'stalled on its restart after an OS upgrade (elkflash exit 5): on USB, never '
+                            'left it, the new OS is written', line)
+            print('elklock: ' + stall_line(d))
+    elif rc == 0 and safe:
+        for d in devs:
+            if clear_stalled(d, 'power-cycled by hand, seen by elkflash usb-cycle'):
+                print('elklock: %s power-cycled (left USB and came back): no longer stalled' % d)
     return rc
+
+
+def cmd_stalled(args):
+    rc = 0
+    for d in devices(args):
+        rec = stalled(d)
+        print(stall_line(d, rec) if rec else '%s: not stalled' % d)
+        rc = 3 if rec else rc
+    return rc
+
+
+def cmd_unstall(args):
+    """The person power-cycled a stalled unit by hand where usb-cycle did not watch it."""
+    by = (opt(args, '--by') or '').strip()
+    if not flag(args, '--yes') or not by:
+        raise SystemExit('elklock: unstall DEVICE --by "where the person said it is power-cycled" --yes '
+                         '(the person only, after a power cycle by hand)')
+    for d in devices(args):
+        print('%s: %s' % (d, 'no longer stalled' if clear_stalled(d, 'unstall: ' + by) else 'was not stalled'))
+    return 0
 
 
 def cmd_break(args):
@@ -887,6 +974,7 @@ def cmd_status(args):
                         'used': cur.get('used') if cur else None,
                         'expires': cur.get('expires') if cur else None,
                         'listening': cur.get('listening') if cur else None,
+                        'stalled': stalled(d),
                         'running': [r['cmd'] for r in live_runs(cur)] if cur else [],
                         'running_since': [r.get('since') for r in live_runs(cur)] if cur else [],
                         'waiting': [{'who': t['who'], 'purpose': t['purpose'], 'since': t['since']}
@@ -897,6 +985,8 @@ def cmd_status(args):
         return 0
     for d in DEVICES:
         print(describe(d, holder(d)))
+        if stalled(d):
+            print('  ' + stall_line(d))
         for t in tickets(d):
             print('  waiting: %s, for "%s", since %s' % (
                 t['who'], t['purpose'], time.strftime('%H:%M', time.localtime(t['since']))))
@@ -916,6 +1006,13 @@ def hook():
     if ev.get('tool_name') not in ('Bash', 'PowerShell'):
         return 0
     cmd = (ev.get('tool_input') or {}).get('command', '')
+    if re.search(r'(?:elk|dev)lock(\.py)?"?\s+unstall\b', cmd, re.I):
+        print(json.dumps({'hookSpecificOutput': {
+            'hookEventName': 'PreToolUse', 'permissionDecision': 'deny',
+            'permissionDecisionReason': 'Only the person clears a stall, after they have power-cycled the '
+                                        'unit by hand. Watch the power cycle with elkflash usb-cycle under '
+                                        '`elklock run` instead (its pass clears the mark).'}}))
+        return 0
     if re.search(r'(?:elk|dev)lock(\.py)?"?\s+heard\b', cmd, re.I):
         # Only the person ends a listening test: elkbench's listen_done asks them, or they run
         # `heard` themselves outside the AI session.
@@ -930,7 +1027,7 @@ def hook():
         return 0
     # elklock's own claim/release/renew/status/check, alone on the line: tool names in its
     # --for/--note text are words, not commands.
-    if re.fullmatch(r'\s*\S*python\S*\s+"?\S*(?:elk|dev)lock\.py"?\s+(claim|release|renew|status|check|listen)\b[^;&|`$<>]*',
+    if re.fullmatch(r'\s*\S*python\S*\s+"?\S*(?:elk|dev)lock\.py"?\s+(claim|release|renew|status|check|listen|stalled)\b[^;&|`$<>]*',
                     cmd, re.I):
         return 0
     if EMULATOR.search(cmd) and not re.search(r'Elektron', cmd):
@@ -975,6 +1072,12 @@ def hook():
                              'say in the thread that they have finished; then: python "%s" heard %s '
                              '--by "<where they said it>".' % (d, holders[d]['listening'].get('what', ''),
                                                                me, d))
+    elif any(stalled(d) for d in (named or ours)) and not STALL_SAFE.search(run_part):
+        for d in (named or ours):
+            if stalled(d):
+                lines.append(stall_line(d) + ' Ask the person to read its screen, then to power-cycle it; '
+                             'watch that with: python "%s" run %s -- python -m elkflash usb-cycle '
+                             '--port "%s"' % (me, d, port_of(d)))
     elif MUST_RUN.search(run_part) and not re.search(r'(?:elk|dev)lock(\.py)?"?\s+run\b', cmd):
         lines.append('Run OS upgrades under the claim so it cannot end mid-flash: '
                      'python "%s" run <device> -- python -m elkflash upgrade ...' % me)
@@ -999,7 +1102,7 @@ def main(argv):
         return hook()
     fn = {'claim': cmd_claim, 'run': cmd_run, 'renew': cmd_renew, 'release': cmd_release,
           'break': cmd_break, 'check': cmd_check, 'status': cmd_status, 'listen': cmd_listen,
-          'heard': cmd_heard}.get(argv[0] if argv else None)
+          'heard': cmd_heard, 'stalled': cmd_stalled, 'unstall': cmd_unstall}.get(argv[0] if argv else None)
     if not fn:
         print(__doc__)
         return 2

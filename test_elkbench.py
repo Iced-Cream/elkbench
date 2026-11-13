@@ -279,7 +279,8 @@ class OverMcp(unittest.TestCase):
             self.assertEqual(init['result']['serverInfo']['name'], 'elkbench')
             names = [t['name'] for t in L.rpc('tools/list')['result']['tools']]
             self.assertIn('approve_plan', names)
-            self.assertEqual(len(names), 23)
+            self.assertEqual(len(names), 24)
+            self.assertIn('stall_cycle', names)
             text, err = L.call('status')
             self.assertTrue(text.startswith('ok: 0 claim'), text)
             text, err = L.call('run_plan', plan=os.path.join(PLANS, 'menus.txt'), target='hardware')
@@ -996,6 +997,103 @@ class InProcess(unittest.TestCase):
         self.fake_pass(self.d.plan_info(weak))
         with self.assertRaisesRegex(daemon.Refused, 'weak is refused by the plan checker'):
             self.d.t_approve_plan(self.s, {'plans': [weak], 'purpose': 't'})
+
+    def claim(self, unit):
+        r = subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', unit, '--for', 'stall test'],
+                           env=self.s.env(), capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+
+    def test_a_stalled_unit_refuses_every_hardware_call_and_release(self):
+        self.claim('a4')
+        daemon.elklock.mark_stalled('a4', 'test stall')
+        self.addCleanup(daemon.elklock.clear_stalled, 'a4', 'test')
+        with self.assertRaisesRegex(daemon.Refused, 'STALLED.*stall_cycle'):
+            self.d.check_hardware(self.s, ['a4'])
+        with self.assertRaisesRegex(daemon.Refused, 'the claim is kept: .*STALLED'):
+            self.d.t_release(self.s, {'unit': 'a4', 'note': 'n'})
+        with self.assertRaisesRegex(daemon.Refused, 'not marked as stalled'):
+            daemon.elklock.clear_stalled('a4', 'test')
+            self.d.t_stall_cycle(self.s, {'unit': 'a4'})
+
+    def test_stall_branch_waits_for_the_power_cycle_then_reads_back(self):
+        # a fake elkflash: usb-cycle sees the power cycle (exit 0), wait finds the unit back
+        fake = os.path.join(TMP, 'fake-elkflash-stall')
+        os.makedirs(os.path.join(fake, 'elkflash'), exist_ok=True)
+        with open(os.path.join(fake, 'elkflash', '__init__.py'), 'w') as fh:
+            fh.write('')
+        with open(os.path.join(fake, 'elkflash', '__main__.py'), 'w') as fh:
+            fh.write('import sys\n'
+                     'if sys.argv[1] == "usb-cycle":\n'
+                     '    print("power-cycled: left USB at 3.0 s, back at 8.0 s; its MIDI port may be opened now")\n'
+                     'else:\n'
+                     '    print("back after 2 s: Analog Four MKII, OS 1.56")\n')
+        saved = daemon.ELKFLASH, daemon.RUNNER
+        daemon.ELKFLASH, daemon.RUNNER = fake, None
+        self.addCleanup(lambda: (setattr(daemon, 'ELKFLASH', saved[0]), setattr(daemon, 'RUNNER', saved[1])))
+        self.claim('a4')
+        daemon.elklock.mark_stalled('a4', 'test stall')
+        self.addCleanup(daemon.elklock.clear_stalled, 'a4', 'test')
+        job = daemon.Job(self.s, 'flash', 'a4', 'hardware', 'flash os.syx')
+        job.stall = {'image': 'os.syx', 'lines': []}
+        asked = []
+
+        def person():                         # reads the screen, power cycles, says done
+            for _ in range(400):
+                if os.path.exists(job.listen_file):
+                    asked.append(json.loads(read(job.listen_file)))
+                    os.remove(job.listen_file)
+                    return
+                time.sleep(0.05)
+        threading.Thread(target=person, daemon=True).start()
+        folder = os.path.join(TMP, 'A4MKII', 'stall')
+        os.makedirs(folder, exist_ok=True)
+        rc, _ = self.d.stall_branch(self.s, 'a4', job, folder)
+        self.assertEqual(rc, 0, job.stall['lines'])
+        self.assertTrue(asked and asked[0]['power_cycle'])
+        self.assertIn('SUCCESS! REBOOTING', asked[0]['what'])
+        self.assertTrue(job.stall['cycled'])
+        self.assertIsNone(daemon.elklock.stalled('a4'))           # usb-cycle under elklock run cleared it
+        self.assertTrue(any(l.startswith('readback: back after 2 s') for l in job.stall['lines']), job.stall)
+        for f in ('README.txt', 'midi-processes.json', 'usb-cycle.log', 'readback.log'):
+            self.assertTrue(os.path.exists(os.path.join(job.stall['dir'], f)), f)
+
+    def test_stall_branch_keeps_the_mark_when_the_power_cycle_is_not_seen(self):
+        fake = os.path.join(TMP, 'fake-elkflash-nostall')
+        os.makedirs(os.path.join(fake, 'elkflash'), exist_ok=True)
+        with open(os.path.join(fake, 'elkflash', '__init__.py'), 'w') as fh:
+            fh.write('')
+        with open(os.path.join(fake, 'elkflash', '__main__.py'), 'w') as fh:
+            fh.write('import sys\nprint("it never left USB in 1 s: not power-cycled yet")\nsys.exit(5)\n')
+        saved = daemon.ELKFLASH
+        daemon.ELKFLASH = fake
+        self.addCleanup(setattr, daemon, 'ELKFLASH', saved)
+        self.claim('a4')
+        daemon.elklock.mark_stalled('a4', 'test stall')
+        self.addCleanup(daemon.elklock.clear_stalled, 'a4', 'test')
+        job = daemon.Job(self.s, 'flash', 'a4', 'hardware', 'flash os.syx')
+        job.stall = {'image': 'os.syx', 'lines': []}
+        folder = os.path.join(TMP, 'A4MKII', 'stall2')
+        os.makedirs(folder, exist_ok=True)
+        rc, _ = self.d.stall_branch(self.s, 'a4', job, folder)
+        self.assertEqual(rc, daemon.STALL_EXIT)
+        self.assertFalse(job.stall['cycled'])
+        self.assertIsNotNone(daemon.elklock.stalled('a4'))
+        self.assertIn('NOT seen', ' '.join(job.stall['lines']))
+        self.assertFalse(os.path.exists(job.listen_file))
+
+    @needs_runner
+    def test_go_names_the_stall_branch_once(self):
+        plan = os.path.join(PLANS, 'menus-flash.txt')
+        self.fake_pass(self.d.plan_info(plan))
+        try:
+            body = '\n'.join(self.d.t_approval_text(self.s, {'plans': [plan], 'purpose': 't'})[2:])
+        except daemon.Refused as e:
+            self.skipTest('no go for the flash plan here: %s' % e)
+        self.assertEqual(body.count('IF A FLASH STALLS ON ITS RESTART'), 1)
+        other = os.path.join(PLANS, 'menus.txt')         # flashes nothing: no stall branch named
+        self.fake_pass(self.d.plan_info(other))
+        plain = '\n'.join(self.d.t_approval_text(self.s, {'plans': [other], 'purpose': 't'})[2:])
+        self.assertNotIn('IF A FLASH STALLS', plain)
 
     @needs_runner
     def test_approval_text_is_what_approve_plan_asks(self):
