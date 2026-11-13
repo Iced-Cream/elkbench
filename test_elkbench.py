@@ -2921,44 +2921,47 @@ class InProcess(unittest.TestCase):
         with self.assertRaisesRegex(daemon.Refused, r'no DIN interface is in config: \[din.NAME\]'):
             self.d.t_steps(self.s, a)
         daemon.elklock.DIN.update({'din-u2midi': 'U2MIDI Pro', 'din-midisport': 'MIDISPORT'})
-        # claims and probes stand in: the cable is on the A4 first
-        claims, probed, cabled = [], [], {'din-u2midi': 'a4'}
+        claims, released, cabled = [], [], {'U2MIDI Pro': 'a4', 'MIDISPORT': 'rytm'}
         self.d.din_claim = lambda s, dev, unit: claims.append(dev) or s.din_claims.update({dev: unit}) or True
-        released = []
         self.d.din_release = lambda s, devs: released.extend(devs) or [s.din_claims.pop(d, None) for d in devs]
+        ran = []
 
-        def probe(s, dev, unit):
-            probed.append(dev)
-            rec = {'unit': cabled.get(dev), 'time': time.time(), 'answers': [], 'error': None}
-            probes = self.d.din_probes()
-            probes[dev] = rec
-            daemon.write_json(self.d.din_probes_path, probes)
-            return rec['unit'], rec
-        self.d.din_probe = probe
-        ran = self.capture_runs()
-        with self.assertRaisesRegex(daemon.Refused, r'no DIN interface answered as the rytm, so the din steps '
-                                                    r'were not sent: din-midisport \(MIDISPORT\): not connected; '
-                                                    r'din-u2midi \(U2MIDI Pro\): answered as the a4'):
-            self.d.t_steps(self.s, a)
-        self.assertEqual(ran, [])                                    # nothing ran
-        self.assertEqual(released, ['din-u2midi'])                   # the probe-only claim went back
-        cabled['din-u2midi'] = 'rytm'                                # moved to the Rytm: no config change
+        def run(cmd, **kw):
+            # analogrun's probe, as it would end: the first candidate where the rytm answers
+            ran.append(cmd)
+            if '--din-probe' in cmd:
+                names = cmd[cmd.index('--din') + 1].split(';')
+                port = next((n for n in names if cabled.get(n) == 'rytm'), None)
+                with open(cmd[cmd.index('--din-probe') + 1], 'w') as fh:
+                    json.dump({'port': port, 'unit': 'rytm', 'time': time.time(),
+                               'tried': ['%s: no answer as the rytm' % n for n in names if n != port]}, fh)
+            return subprocess.CompletedProcess(cmd, 1, 'x', '')     # rc 1: device_do reads no log
+        daemon.subprocess = types.SimpleNamespace(**dict(vars(subprocess), run=run))
+        self.addCleanup(setattr, daemon, 'subprocess', subprocess)
+        # only the U2MIDI is connected, and it is on the A4: the run's probe finds no rytm
         self.d.t_steps(self.s, a)
         cmd = ran[-1]
-        self.assertEqual(cmd[cmd.index('--din') + 1], 'U2MIDI Pro')
-        self.assertLess(cmd.index('--din'), cmd.index('do'))        # a global option
-        self.assertEqual(cmd[cmd.index('run') + 1:cmd.index('--')], ['rytm', 'din-u2midi'])   # both claims kept
-        self.assertEqual(self.s.din_claims, {'din-u2midi': 'rytm'})
-        self.assertIn('DIN: probe answered rytm on din-u2midi (U2MIDI Pro) at', self.d.din_go_line('rytm'))
-        self.assertIn('DIN: no probe has found the a4', self.d.din_go_line('a4'))
-        # a second interface: the one the unit answered on last is probed first
+        self.assertEqual(cmd[cmd.index('--din') + 1], 'U2MIDI Pro')               # connected ones only
+        self.assertLess(cmd.index('--din-probe'), cmd.index('do'))                  # global options
+        self.assertEqual(cmd[cmd.index('run') + 1:cmd.index('--')], ['rytm', 'din-u2midi'])   # claims kept meanwhile
+        self.assertEqual(released, ['din-u2midi'])                                  # given back after
+        self.assertEqual(self.d.din_probes()['din-u2midi']['error'], 'no answer as the rytm')
+        self.assertIn('DIN: no probe has found the rytm', self.d.din_go_line('rytm'))
+        # both connected: the probe picks the MIDISPORT, which keeps its claim; the U2MIDI goes back
         daemon.elklock.midi_inputs = lambda: ['Analog Rytm MKII', 'U2MIDI Pro', 'MIDISPORT']
-        cabled.update({'din-midisport': 'rytm'})
-        probed.clear()
+        released.clear()
         self.d.t_steps(self.s, a)
-        self.assertEqual(probed, ['din-u2midi'])
+        cmd = ran[-1]
+        self.assertEqual(cmd[cmd.index('--din') + 1], 'MIDISPORT;U2MIDI Pro')
+        self.assertEqual(released, ['din-u2midi'])
+        self.assertEqual(self.s.din_claims, {'din-midisport': 'rytm'})
+        self.assertIn('DIN: probe answered rytm on din-midisport (MIDISPORT) at', self.d.din_go_line('rytm'))
+        # the cable moves to the Rytm: the last one found is tried first, nothing to edit
+        cabled['U2MIDI Pro'] = 'rytm'
+        self.d.t_steps(self.s, a)
+        self.assertEqual(ran[-1][ran[-1].index('--din') + 1], 'MIDISPORT;U2MIDI Pro')
         self.d.t_steps(self.s, {'unit': 'rytm', 'target': 'hardware', 'steps': 'send %s' % self.kit_request()})
-        self.assertNotIn('--din', ran[-1])                           # only when a step uses it
+        self.assertNotIn('--din', ran[-1])                                           # only when a step uses it
         self.assertEqual(ran[-1][ran[-1].index('run') + 1:ran[-1].index('--')], ['rytm'])
         daemon.elklock.DEVICES['din-u2midi'] = ('U2MIDI', 'U2MIDI Pro')
         self.addCleanup(daemon.elklock.DEVICES.pop, 'din-u2midi')

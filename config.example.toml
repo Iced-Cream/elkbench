@@ -137,11 +137,12 @@ person = "the person at this PC"
 #                                          # reply comes later than over USB)
 
 # DIN MIDI interfaces: one section per interface, not per unit. A cable can be moved from unit to
-# unit with no change here: before a hardware run's first din step (send/capture/cc/... din),
-# elkbench sends analoghealth's read-only probe (tools/dinprobe.py: Elektron RPC Ping, then the
-# MIDI Identity Request) out of each connected interface and uses the one where the claimed unit
-# answers; none answering as that unit refuses the steps. Each interface is an elklock device of
-# its own (din-NAME), claimed with the unit by the run that uses it and released with the unit.
+# unit with no change here: at a hardware run's first din step (send/capture/cc/... din),
+# analogrun sends the unit's working-kit dump request (analoghealth tools/dinprobe.py; only the
+# reply's device byte is read) out of each connected interface the run could claim and uses the one
+# where the claimed unit answers; none answering fails the step with nothing sent over DIN. Each
+# interface is an elklock device of its own (din-NAME): the run claims the candidates, keeps the one
+# the unit answered on until the unit's release, and gives the others back when the run ends.
 # Cable both ways: the interface's OUT to the unit's MIDI IN, its IN from the unit's MIDI OUT.
 # [din.u2midi]
 # port = 'U2MIDI Pro'                       # a part of its MIDI port name, or 'IN,OUT'
