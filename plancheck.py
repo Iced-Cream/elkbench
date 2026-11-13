@@ -56,9 +56,9 @@ def is_assert(w):
     if not w:
         return False
     op = w[0].lower()
-    if op == 'capture':                      # capture FILE S [any|none] [short] [nrpn=..] [cc=..] [din]
+    if op == 'capture':      # capture FILE S [any|none] [short] [realtime[=noclock]] [nrpn=..] [cc=..] [rt=XX] [din]
         return (len(w) > 3 and w[3].lower() in ('any', 'none')
-                or any(x.lower().startswith(('nrpn=', 'cc=')) for x in w[3:]))
+                or any(x.lower().startswith(('nrpn=', 'cc=', 'rt=')) for x in w[3:]))
     return op in ASSERT_OPS
 
 
@@ -179,6 +179,25 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
                 errors.append('%s comes before the first expect-screen: prove the start state before '
                               'anything is written' % ' '.join(w[:3]))
                 break
+
+    # real-time capture words (analoghealth realtime-capture): caught here, not mid-run
+    for name, w in all_words:
+        if not w or w[0].lower() != 'capture':
+            continue
+        for x in w[2:]:
+            lx = x.lower()
+            if lx.startswith('realtime') and lx not in ('realtime', 'realtime=noclock'):
+                errors.append('[%s] %s: give realtime or realtime=noclock' % (name, x))
+            elif lx.startswith('rt='):
+                try:
+                    b = int(lx[3:], 16)
+                except ValueError:
+                    b = -1
+                if not 0xF8 <= b <= 0xFF:
+                    errors.append('[%s] %s: give rt=XX, a real-time byte F8-FF in hex (FA start, FB continue, '
+                                  'FC stop)' % (name, x))
+                elif b == 0xF8 and 'realtime=noclock' in [y.lower() for y in w[2:]]:
+                    errors.append('[%s] rt=F8 asks for clock, which realtime=noclock drops' % name)
 
     # 2. what each section proves
     for i, (name, lines) in enumerate(steps):

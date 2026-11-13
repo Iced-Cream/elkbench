@@ -85,6 +85,15 @@ class Rules(unittest.TestCase):
         self.assertEqual(check(base + 'capture k.txt 2 any short\n')['errors'], [])
         self.assertTrue(check(base + 'capture k.txt 2 short\n')['errors'])
 
+    def test_real_time_capture(self):
+        base = '[start]\nexpect-screen home\n[c]\nsay proves works: transport out\ntap PLAY\n'
+        self.assertEqual(check(base + 'capture t.txt 2 rt=FA realtime=noclock din\n')['errors'], [])
+        self.assertEqual(check(base + 'capture t.txt 2 any short realtime\n')['errors'], [])
+        self.assertTrue(check(base + 'capture t.txt 2 short realtime\n')['errors'])     # no assertion
+        self.assertTrue(check(base + 'capture t.txt 2 rt=F7\n')['errors'])
+        self.assertTrue(check(base + 'capture t.txt 2 any realtime=clock\n')['errors'])
+        self.assertTrue(check(base + 'capture t.txt 2 rt=F8 realtime=noclock\n')['errors'])
+
     def test_a_flash_plan_needs_no_start_check(self):
         r = check('[home screen]\nwait 2\nshot home.png\n', flash='/os/stock.syx', stock=True,
                   os_file='/os/build.syx')
