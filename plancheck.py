@@ -31,6 +31,10 @@ What a plan must carry (see docs/testing-practices.md, "Plan checker and templat
   come last and hold only read-only steps (dump, peek-set, stats, ping, shot, wait, say). The
   runner runs them only when an earlier section failed, at once, and they never change the
   verdict, so they need no `say proves` line. A passing emulator run never runs them: a failing control does.
+- **A key that stops the firmware (`tap-noreply KEY`).** After it, until the next `power-cycle` or
+  `replug-usb`, the unit is expected not to answer: only `try` readouts (`try ping`, `try dump ...`,
+  `try shot ...`), `say`, `wait` and `listen` may follow. A `try` readout logs "no answer" instead of
+  failing, so it is a readout, never a machine assertion. Rytm and A4 (analogrun) only.
 """
 import os
 import shlex
@@ -42,13 +46,21 @@ PROVES = ('setup', 'set-and-kept', 'works', 'evidence')
 ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping', 'expect-mods')
 # steps that change what the unit holds or a value on it (keys only move through the UI)
 WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', 'at', 'pc', 'spp', 'turn', 'pad',
-             'padplay', 'mods-put', 'mods-active', 'mods-remove')
+             'padplay', 'mods-put', 'mods-active', 'mods-remove', 'tap-noreply')
 # steps that need a remote-key path in the OS (analoghealth, or a remote-only build)
-KEY_OPS = ('tap', 'hold', 'release', 'keys', 'turn', 'pad', 'padplay')
+KEY_OPS = ('tap', 'hold', 'release', 'keys', 'turn', 'pad', 'padplay', 'tap-noreply')
 # steps that only move through menus or look: nothing between a save and a check but these
 LOOK_OPS = ('tap', 'keys', 'wait', 'shot', 'hold', 'release', 'say')
 # an [on fail] section's steps (analoghealth testplan's READOUT_OPS): they read and change nothing
-READOUT_OPS = ('dump', 'peek-set', 'stats', 'ping', 'shot', 'wait', 'say')
+READOUT_OPS = ('dump', 'peek-set', 'stats', 'ping', 'shot', 'wait', 'say', 'try')
+# the readouts a `try` step may wrap (analogrun's TRY_OPS): a timeout is logged, not a failure
+TRY_OPS = ('ping', 'dump', 'peek-set', 'stats', 'shot')
+# what may follow a `tap-noreply` until the next power cycle or USB replug: the unit is expected dead
+AFTER_NOREPLY = ('try', 'say', 'wait', 'listen', 'power-cycle', 'replug-usb')
+# the steps that end a part of a plan where the unit's connection starts again
+PART_ENDS = ('power-cycle', 'replug-usb')
+# the units whose runner (analogrun) has tap-noreply and try
+NOREPLY_UNITS = ('rytm', 'a4')
 
 
 def on_fail(name):
@@ -80,8 +92,28 @@ def spp_error(w):
     return None
 
 
+def tap_noreply_error(w):
+    """Why a `tap-noreply KEY [MS]` step's words are wrong, or None."""
+    if not 2 <= len(w) <= 3:
+        return 'tap-noreply KEY [MS]: one key, and the tap length in ms if not the default: %r' % ' '.join(w)
+    if len(w) == 3:
+        try:
+            int(w[2], 0)
+        except ValueError:
+            return 'tap-noreply KEY [MS]: MS is a number, not %r' % w[2]
+    return None
+
+
+def try_error(w):
+    """Why a `try STEP...` step's words are wrong, or None: STEP is a readout (TRY_OPS), whose own
+    words must pass their check."""
+    if len(w) < 2 or w[1].lower() not in TRY_OPS:
+        return 'try STEP...: STEP is a readout (%s), not %r' % (', '.join(TRY_OPS), ' '.join(w[1:]) or 'nothing')
+    return arg_error(w[1:])
+
+
 # step -> its argument check: (words) -> why the runner would refuse them, or None
-ARG_CHECKS = {'spp': spp_error}
+ARG_CHECKS = {'spp': spp_error, 'tap-noreply': tap_noreply_error, 'try': try_error}
 
 
 def arg_error(w):
@@ -99,6 +131,32 @@ def arg_errors(steps):
             if why:
                 out.append('[%s] %s' % (name, why))
     return out
+
+
+def noreply_rules(steps, unit):
+    """-> (errors, flags) for `tap-noreply` and `try`: only on the units analogrun drives, and after
+    a tap-noreply only AFTER_NOREPLY steps until the next power cycle or USB replug (the unit is
+    expected not to answer; [on fail] sections too)."""
+    errors, flags, dead = [], [], None
+    for name, lines in steps:
+        for l in lines:
+            w = words(l)
+            if not w:
+                continue
+            op = w[0].lower()
+            if op in ('tap-noreply', 'try') and unit not in NOREPLY_UNITS:
+                errors.append('[%s] %s: the %s runner has no tap-noreply or try (Rytm and A4 only)' % (name, op, unit))
+            if op in PART_ENDS:
+                dead = None
+            elif dead and op not in AFTER_NOREPLY:
+                errors.append('[%s] %s after tap-noreply in [%s]: the unit is expected not to answer until a '
+                              'power-cycle or replug-usb; read it with try (%s) only'
+                              % (name, ' '.join(w[:3]), dead, ', '.join('try ' + x for x in TRY_OPS)))
+            if op == 'tap-noreply':
+                dead = name
+                flags.append('[%s] tap-noreply %s: a key expected to stop the firmware; after it only try '
+                             'readouts, which log no answer instead of failing' % (name, ' '.join(w[1:])))
+    return errors, flags
 
 
 def is_assert(w):
@@ -199,6 +257,9 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
     errors, flags, proves = [], [], []
     contrasts = contrasts_of(steps)
     errors += arg_errors(steps)
+    e, f = noreply_rules(steps, unit)
+    errors += e
+    flags += f
     if emulator:
         return dict(errors=errors, flags=flags, proves=proves, contrasts=contrasts)
     left = boot_state(steps)

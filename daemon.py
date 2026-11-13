@@ -207,8 +207,9 @@ def din_steps(lines):
 
 
 def hand_steps(steps):
-    """What an emulator run of a plan leaves untested: its `listen` steps (the person, by hand)
-    and its `(hardware)` sections -> lines naming them, for run results and the go request."""
+    """What an emulator run of a plan leaves untested: its `listen` and `replug-usb` steps (the
+    person, by hand) and its `(hardware)` sections -> lines naming them, for run results and the
+    go request."""
     out = []
     for name, lines in steps:
         if name.endswith('(hardware)'):
@@ -218,6 +219,8 @@ def hand_steps(steps):
             w = shlex.split(l, comments=True)
             if w and w[0].lower() == 'listen':
                 out.append('[%s] listen %s' % (name, ' '.join(w[1:])))
+            elif is_replug_usb(l):
+                out.append('[%s] replug-usb (%s)' % (name, REPLUG_EMULATOR))
     return out
 
 
@@ -257,6 +260,29 @@ def power_cycles(steps):
     return ['[%s] power-cycle' % name for name, lines in steps for l in lines if is_power_cycle(l)]
 
 
+# what an emulator run does at a `replug-usb` step (analog-emu has no USB detach while it runs)
+REPLUG_EMULATOR = ('USB replug by hand; not tested in the emulator: its run only reconnects to the same '
+                   'emulator, not restarted')
+
+
+def is_replug_usb(line):
+    """`replug-usb`: the person unplugs the unit's USB cable and plugs it in again, by hand; the
+    unit keeps running (not a power cycle: nothing is assumed lost from its RAM). elkbench runs the
+    plan in parts around it: the part before ends (its runner process, so the MIDI port is
+    closed), the run waits until the person says it is done (listen_done), then waits for the
+    port to answer a ping and starts the next part on a fresh connection. In the emulator there
+    is no replug (analog-emu has no USB detach while it runs): the next part reconnects to the
+    same emulator, which goes on running. testplan never sees the step. A line that starts with
+    it and goes on after ';' counts too, so the plan check refuses it (not a line of its own)."""
+    w = shlex.split(line.split(';')[0], comments=True)
+    return bool(w) and w[0].lower() == 'replug-usb'
+
+
+def replugs(steps):
+    """-> lines naming every `replug-usb` step of a plan, for run results and the go request."""
+    return ['[%s] replug-usb' % name for name, lines in steps for l in lines if is_replug_usb(l)]
+
+
 def boot_from_flash(e):
     """After a flash into an analog-emu: its command line drops the OS file it was started with.
     analog-emu boots a FIRMWARE it is given and the OS in --flash only when given none, so a
@@ -276,9 +302,9 @@ def boot_from_flash(e):
 
 
 def is_stage_step(line):
-    """A step elkbench runs itself between parts of a plan: `power-cycle`, or a Drive Loader
-    step (modsteps.py: mods-put, mods-active, expect-mods)."""
-    return is_power_cycle(line) or modsteps.is_mods_step(line)
+    """A step elkbench runs itself between parts of a plan: `power-cycle`, `replug-usb`, or a
+    Drive Loader step (modsteps.py: mods-put, mods-active, expect-mods)."""
+    return is_power_cycle(line) or is_replug_usb(line) or modsteps.is_mods_step(line)
 
 
 def stage_steps(steps):
@@ -287,7 +313,7 @@ def stage_steps(steps):
 
 
 def stage_parts(steps):
-    """power_cycle_parts, split at every stage step (power cycles and mods steps)."""
+    """power_cycle_parts, split at every stage step (power cycles, USB replugs and mods steps)."""
     return power_cycle_parts(steps, is_stage_step)
 
 
@@ -306,6 +332,7 @@ def power_cycle_parts(steps, split=None):
                     cur.append((piece, body))
                 parts.append(cur)
                 cur, body, piece = [], [], name + (', after the power cycle' if is_power_cycle(l) else
+                                                   ', after the USB replug' if is_replug_usb(l) else
                                                    ', after %s' % l.split('#')[0].strip()[:40])
             else:
                 body.append(l)
@@ -705,6 +732,10 @@ def load_config(path=CONFIG):
 CFG = load_config()
 UNITS = CFG['units']
 PERSON = CFG['person']
+# what the person does at a hardware run's replug-usb step: unit, then ' (n of m)' or ''
+REPLUG_HAND = ('replug the %s\'s USB cable by hand%s (a USB replug, not a power cycle: leave the unit '
+               'switched on): unplug the USB cable, wait 5 s, plug it in again')
+REPLUG_WAIT = 90                                # s for the port to answer a ping after a replug
 # what the person does at a hardware run's power-cycle step: unit, then ' (n of m)' or ''
 POWER_CYCLE_HAND = ('power cycle the %s%s by hand: switch it off, wait 10 s, switch it on, and let it '
                     'boot to its start screen; nothing is sent to it meanwhile')
@@ -1125,6 +1156,7 @@ class Job:
         self.listen_file = os.path.join(STATE, 'jobs', self.id + '.listen.json')   # a plan's listen step
         self.listening = None             # what the person listens for while the plan waits
         self.power_cycle = False          # ... and whether it waits for a power cycle by hand
+        self.replug = False               # ... or for a USB replug by hand
         self.batch = None                 # a batch's batch.Batch: its progress while it runs
         self.limit = None                 # s before the job's commands are killed, or None
         self.midisrv = None               # the midisrv line logged when it started (hardware)
@@ -1767,6 +1799,9 @@ class Daemon:
         cycles = power_cycles(steps)
         if cycles:
             self.check_power_cycles(unit, steps, flash, setup)
+        plugs = replugs(steps)
+        if plugs:
+            self.check_replugs(unit, steps, flash, setup)
         if mods_lines:
             self.check_mods_steps(unit, steps, flash, setup, here)
         # the plan checker's rules (plancheck.py): errors refuse the go, flags go into it
@@ -1776,7 +1811,7 @@ class Daemon:
                                 starts=tuple(unit_starts(unit)), here=here)
         return dict(path=path, here=here, settings=settings, steps=steps, unit=unit, key=key, check=check,
                     old_key=old_key, os_file=os_file, os_sha=os_sha, flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, stock_writes=stock_writes, setup=setup, din=bool(din),
-                    audio_waits=audio_waits(steps), power_cycles=cycles, home=home,
+                    audio_waits=audio_waits(steps), power_cycles=cycles, replugs=plugs, home=home,
                     mods_steps=mods_lines, mods_files=mods_files, stages=stage_steps(steps),
                     name=settings.get('name') or os.path.splitext(os.path.basename(path))[0],
                     emulator=settings.get('emulator', 'no').lower() == 'yes', rel=rel)
@@ -1811,6 +1846,38 @@ class Daemon:
                 raise Refused('power cycle %d has no machine assertion after it (an expect-screen of what it '
                               'had to keep, before the next power cycle or the end): a readback judged by eye '
                               'proves nothing about the card' % n)
+
+    def check_replugs(self, unit, steps, flash, setup):
+        """Refused unless this plan's `replug-usb` steps can run: on a unit analogrun drives (the
+        Rytm and A4), alone on their line, outside (hardware) sections and the setup, in a plan
+        that flashes nothing, and each followed by a machine assertion before the next stage step
+        or the end (that the unit answers on the new connection: a ping, an expect-screen; a
+        `try` readout checks nothing)."""
+        if UNITS[unit].get('runner') is not True:
+            raise Refused('replug-usb runs on the Rytm and A4 (analogrun plans); the %s has none' % unit)
+        if flash:
+            raise Refused('a plan with replug-usb cannot flash: flash in a plan of its own, then replug')
+        for i, (name, lines) in enumerate(steps):
+            for l in lines:
+                if not is_replug_usb(l):
+                    continue
+                if len(shlex.split(l, comments=True)) > 1 or ';' in l:
+                    raise Refused('[%s] %r: replug-usb takes nothing more, on a line of its own' % (name, l))
+                if name.endswith('(hardware)'):
+                    raise Refused('[%s] replug-usb in a (hardware) section: the emulator skips those, so its '
+                                  'run would not cover the part boundary' % name)
+                if setup and i < setup:
+                    raise Refused('[%s] replug-usb in the setup (snapshot-after): a setup snapshot cannot '
+                                  'hold a replug; put it after the setup' % name)
+        between, n = stage_steps(steps), 0
+        for i, part in enumerate(stage_parts(steps)[1:]):
+            if not is_replug_usb(between[i]):
+                continue
+            n += 1
+            if not any(plancheck.is_assert(plancheck.words(l)) for _, ls in part for l in ls):
+                raise Refused('USB replug %d has no machine assertion after it (a ping or an expect-screen '
+                              'before the next power cycle, replug, mods step or the end): the run must see the '
+                              'unit answer on the new connection; a try readout checks nothing' % n)
 
     def check_mods_steps(self, unit, steps, flash, setup, here):
         """Refused unless this plan's Drive Loader steps (modsteps.py) can run: on a unit with a
@@ -2107,6 +2174,7 @@ class Daemon:
                 flag = read_json(job.listen_file, {})
                 what = flag.get('what') or '(see the plan)'
                 job.power_cycle = bool(flag.get('power_cycle'))
+                job.replug = bool(flag.get('replug_usb'))
                 job.listening = what
                 subprocess.run([sys.executable, ELKLOCK, 'listen', job.unit, '--for', what],
                                env=job.sess.env(), capture_output=True, timeout=30, **NOWIN)
@@ -2669,6 +2737,12 @@ class Daemon:
             deadline = time.time() + max(0, min(STATUS_WAIT_MAX, float(a.get('wait_s', STATUS_WAIT))))
             while j.state in ('running', 'asking') and time.time() < deadline and not j.listening:
                 time.sleep(0.5)
+            if j.state == 'running' and j.listening and j.replug:
+                return j.summary() + [
+                    'USB replug: the run waits for a USB replug by hand: %s. Ask %s in your thread to '
+                    'do exactly that (a USB replug, not a power cycle) and to say when it is done, then wait '
+                    'for their reply, however long it takes; send nothing to the unit. When they say it is '
+                    'done, call listen_done with the id of that reply, then status again.' % (j.listening, PERSON)]
             if j.state == 'running' and j.listening and j.power_cycle:
                 return j.summary() + [
                     'power cycle: the run waits for a power cycle by hand: %s. Ask %s in your thread to '
@@ -2746,6 +2820,9 @@ class Daemon:
                 ''.join('\n  NOT TESTED IN THE EMULATOR: ' + h for h in hand) +
                 ''.join('\n  POWER CYCLE BY HAND (the run waits until you say it is done; the emulator pass '
                         'ran its power-off save and a cold boot): ' + c for c in info['power_cycles']) +
+                ''.join('\n  USB REPLUG BY HAND, not a power cycle (the run waits until you say it is done, then '
+                        'for the unit to answer a ping; not tested in the emulator, whose pass reconnected to '
+                        'the same emulator): ' + c for c in info.get('replugs') or []) +
                 ''.join('\n  SHORT IN THE EMULATOR, IN FULL ON THE UNIT: ' + w for w in info['audio_waits']) +
                 ''.join('\n  MODS FILE %s\n    sha256 %s, %d bytes' % (os.path.basename(f), d, n)
                         for f, d, n in info['mods_files']) +
@@ -3113,6 +3190,11 @@ class Daemon:
         job.title = 'Listening test: finished?'
         job.body = ('An AI session holds the %s for your listening test:\n\n  %s\n\nHave you finished '
                     'listening? Yes gives the unit back to the session; No keeps it waiting.' % (u, what))
+        if plan_job and plan_job.replug:
+            job.title = 'USB replug: done?'
+            job.body = ('An AI session\'s test plan waits for you to %s.\n\nHave you done it, with the '
+                        'unit left switched on? Yes lets the plan go on (it waits for the unit\'s USB MIDI '
+                        'port to answer); No keeps it waiting.' % what)
         if plan_job and plan_job.power_cycle:
             job.title = 'Power cycle: done?'
             job.body = ('An AI session\'s test plan waits for you to %s.\n\nHave you done it, and is the '
@@ -3704,7 +3786,7 @@ class Daemon:
         run with the setup's own report, and no snapshot is kept."""
         cut = info['setup']
         run = lambda plan: [sys.executable, RUNNER, '--port', addr] + list(din) + ['--quiet', 'run', plan]
-        if info['power_cycles']:               # the rest in parts, a power cycle between them
+        if info['power_cycles'] or info['replugs']:    # the rest in parts, a power cycle or replug between
             rest = self.plan_stages(s, info, job, 'emulator', info['steps'][cut:], tag=' after setup')
         else:
             rest = [run(self.twin(info, False, s.sid, sections=info['steps'][cut:], tag=' after setup'))]
@@ -3742,16 +3824,21 @@ class Daemon:
         each two: each part is a twin of its sections run on its own; in the emulator, the
         power cycle switches the emulator off with its power-off save and boots it on its card (each part
         then runs on the emulator's ports of that moment); on the unit, the run waits until the
-        person has power cycled it by hand and said so (listen_done), as at a listen step."""
+        person has power cycled it by hand and said so (listen_done), as at a listen step. A
+        `replug-usb` splits the same way (replug_stage); so do mods steps (mods_stage)."""
         unit, stages = info['unit'], []
         parts = stage_parts(steps)
         between = stage_steps(steps)
         cycles = sum(1 for l in between if is_power_cycle(l))
-        here, c = os.path.dirname(info['path']), 0
+        plugs = sum(1 for l in between if is_replug_usb(l))
+        here, c, r = os.path.dirname(info['path']), 0, 0
         for i, part in enumerate(parts):
             if i and is_power_cycle(between[i - 1]):
                 c += 1
                 stages.append(self.power_cycle_stage(s, unit, job, tgt, c, cycles))
+            elif i and is_replug_usb(between[i - 1]):
+                r += 1
+                stages.append(self.replug_stage(s, unit, job, tgt, r, plugs))
             elif i:
                 stages.append(self.mods_stage(s, unit, tgt, between[i - 1], here))
             if not part:
@@ -3974,13 +4061,67 @@ class Daemon:
                                                else ' (by hand, waits for the person)')
         return cycle
 
+    def replug_stage(self, s, unit, job, tgt, n, of):
+        """A stage for the plan's USB replug n (of `of`). The part before it has ended, and with
+        it its runner process, so the unit's MIDI port is closed. On the unit, the run waits until
+        the person has replugged the USB cable by hand and said so (listen_done), then for the
+        unit's port to answer a ping (a fresh runner process each try, under the claim, up to
+        REPLUG_WAIT s); the next part opens its own connection. In the emulator there is no
+        replug: the same emulator, not restarted, must still answer, and the next part
+        reconnects to it."""
+        if tgt == 'emulator':
+            def plug(rc, out):
+                addr = self.emu_port(s, unit)
+                if not self.wait_for_os(addr, 10):
+                    return 1, 'fail: replug-usb: the emulator did not answer at %s\n' % addr
+                return 0, ('ok replug-usb: not tested in the emulator (no USB detach): reconnecting to the same '
+                           'emulator at %s, not restarted\n' % addr)
+        else:
+            def plug(rc, out):
+                what = REPLUG_HAND % (unit, ' (%d of %d)' % (n, of) if of > 1 else '')
+                write_json(job.listen_file, {'what': what, 'since': time.time(), 'replug_usb': True})
+                while os.path.exists(job.listen_file):
+                    time.sleep(0.5)
+                ok, said = self.ping_after_replug(s, unit)
+                if not ok:
+                    return 1, ('fail: replug-usb: %s said it is done, but the %s did not answer a ping within '
+                               '%d s (%s)\n' % (PERSON, unit, REPLUG_WAIT, said))
+                return 0, 'ok replug-usb by hand: %s said it is done; the %s answered a ping again (%s)\n' % (
+                    PERSON, unit, said)
+        plug.__name__ = 'USB replug %d%s' % (n, ' (emulator: not tested, same emulator)' if tgt == 'emulator'
+                                             else ' (by hand, waits for the person)')
+        return plug
+
+    def ping_after_replug(self, s, unit, wait=None):
+        """After a USB replug by hand: ping the unit on its port, each try a new runner process
+        under the claim (a port that has not come back yet fails to open), until it answers or
+        `wait` (REPLUG_WAIT) s have passed. -> (answered, what the last try said)."""
+        end, k, last = time.time() + (REPLUG_WAIT if wait is None else wait), 0, 'no try'
+        cmd = [sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER, '--port', UNITS[unit]['port'],
+               '--quiet', 'do', 'ping']
+        t0 = time.time()
+        while True:
+            k += 1
+            try:
+                r = subprocess.run(cmd, cwd=ANALOGHEALTH, env=dict(s.env()), capture_output=True, text=True,
+                                   encoding='utf-8', errors='replace', timeout=60, **NOWIN)
+                said = ((r.stdout or '') + (r.stderr or '')).strip().splitlines()
+                last = (said[-1] if said else 'exit %d' % r.returncode)[:200]
+                if r.returncode == 0:
+                    return True, 'after %.0f s, try %d' % (time.time() - t0, k)
+            except subprocess.TimeoutExpired:
+                last = 'the ping did not end within 60 s'
+            if time.time() >= end:
+                return False, '%d tries, last: %s' % (k, last)
+            time.sleep(2)
+
     def t_run_plan(self, s, a):
         tgt = self.target(a.get('target'))
         info = self.plan_info(a.get('plan', ''))
         unit = info['unit']
         job = Job(s, 'plan', unit, tgt, 'plan ' + info['name'])
         cycles = info['power_cycles']
-        staged = bool(cycles or info['mods_steps'])       # run in parts, elkbench's own steps between
+        staged = bool(cycles or info['replugs'] or info['mods_steps'])   # in parts, elkbench's own steps between
         st, want = (a.get('start') or '').strip().lower() or None, None
         if st:
             # A start run outside a gate batch (proposal A): batches do not run power-cycle or mods
@@ -4130,6 +4271,8 @@ class Daemon:
             if cycles:
                 job.lines += [('power cycled here (power-off save, cold boot on its card): ' if tgt == 'emulator'
                                else 'power cycled by hand: ') + c for c in cycles]
+            if tgt == 'hardware':                     # the emulator's are among the hand steps below
+                job.lines += ['USB replugged by hand (then pinged): ' + r for r in info['replugs']]
             if tgt == 'emulator':
                 job.lines += ['not tested here (skipped in the emulator): ' + h for h in hand_steps(info['steps'])]
                 job.lines += ['short here (%g s in the emulator, in full on the unit): %s' % (AUDIO_WAIT_EMULATOR, w)
@@ -4185,8 +4328,9 @@ class Daemon:
                 self.record_pass(info['key'], dict({'plan': info['path'], 'run_dir': run_dir, 'unit': unit,
                                                     'start': began, 'os': booted,
                                                     'after': [h['what'] for h in before]},
-                                                   **({'run_dirs': run_dirs, 'power_cycles': len(cycles)}
-                                                      if cycles else {})))
+                                                   **({'run_dirs': run_dirs} if cycles or info['replugs'] else {}),
+                                                   **({'power_cycles': len(cycles)} if cycles else {}),
+                                                   **({'replugs': len(info['replugs'])} if info['replugs'] else {})))
                 if info['flash_sha'] and booted:
                     self.record_pass(flash_key(unit, info['flash_sha'], booted),
                                      {'image': info['flash'], 'unit': unit, 'run_dir': run_dir, 'over': booted})
@@ -4842,7 +4986,7 @@ class Daemon:
             else:
                 x['info'] = info
                 if info['stages'] and not gate:
-                    raise Refused('%s has power-cycle or mods steps: batches do not run those yet, run it with '
+                    raise Refused('%s has power-cycle, replug-usb or mods steps: batches do not run those yet, run it with '
                                   'run_plan target emulator (a gate batch runs only its start runs)'
                                   % info['name'])
                 units.add(info['unit'])
@@ -4881,7 +5025,7 @@ class Daemon:
                 if v['info']['stages']:
                     name = v['info']['name']
                     if home:
-                        raise Refused('%s has power-cycle or mods steps and start = %s: its own pass needs a gate '
+                        raise Refused('%s has power-cycle, replug-usb or mods steps and start = %s: its own pass needs a gate '
                                       'batch, and batches do not run those yet' % (name, home))
                     before = set()           # the sections wholly before the first power cycle or mods step
                     for n, ls in v['info']['steps']:

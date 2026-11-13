@@ -126,6 +126,15 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   emulator with `power_off` (emulator tool) and run the plan without `build`. The analog-emu
   build needs `--power-off` (its `--help` does not list it; elkbench looks for its power-off log
   line in the binary); digiemu needs a `tools/usbrun.py` with `--power-off`.
+- **`replug-usb`**: a plan step on a line of its own (Rytm and A4): the person unplugs the unit's
+  USB cable and plugs it in again, the unit left switched on. elkbench splits the plan there as at
+  a `power-cycle`: on the unit the part before ends (its runner exits, so the MIDI port is
+  closed), the run waits for `listen_done` ("USB replug: done?"), then pings the unit's port with
+  a fresh runner for up to 90 s before the next part. In the emulator (no USB detach) the next
+  part reconnects to the same emulator, not restarted; run results and the go request name the
+  step "not tested in the emulator". Each replug needs a machine assertion after it (`ping`,
+  `expect-screen`; a `try` does not count), and a plan with one cannot flash or put it in a
+  `(hardware)` section or the setup.
 - **`wait N audio`**: a wait that only lets the unit make sound (a recording, a tone, a pause to
   hear something). The runner waits N s on the unit; every emulator twin (run_plan, batch)
   waits 0.5 s instead, as the emulator makes no voice sound. The pass is keyed by the plan as
@@ -211,7 +220,10 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   with no machine assertion, a `listen` without `allowed:` and `needs:` or without a screen check
   before it, key or read steps after a stock flash, anything but NO after a `save-before-load`
   check, an `[on fail]` section (read-only steps run only after a failure) that is not last or
-  holds anything else, and plans in one go that compare the same
+  holds anything else, a step after `tap-noreply` other than `try`, `say`, `wait` or `listen` before
+  the next `power-cycle` or `replug-usb` (`tap-noreply KEY [MS]`: a key expected to stop the firmware;
+  `try ping|dump|peek-set|stats|shot ...`: a readout that logs "no answer" instead of failing, never a
+  machine assertion; both Rytm and A4 only), and plans in one go that compare the same
   reference file. `check_plan` gives the same answer before any emulator time.
 - **Messy starts and contrast runs**: a hardware plan's go also needs a run from each built-in
   start its unit has among `dirty` and `occupied` (`starts/<unit>/`: the Rytm MKII, A4 MKII and Digitone, not yet the Digitakt; not for

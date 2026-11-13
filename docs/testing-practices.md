@@ -40,6 +40,13 @@ reaches the hardware only with something that has already worked in the emulator
   Batches don't power cycle yet: such a plan's contrasts belong in sections before its first
   power cycle (a gate batch runs its start runs up to there), and its own pass comes from
   `run_plan`, on an emulator started with `power_off` when earlier plans set up its state.
+- **A USB replug is a plan step too** (`replug-usb`, Rytm and A4): the run pauses until the owner
+  says the cable was replugged (unit left on), then pings the port before going on. The emulator
+  has no USB detach, so its pass only reconnects: the go names the step as not tested there, and
+  a machine assertion after it (`ping`, `expect-screen`) must show the unit answers again.
+- **A key that stops the firmware** is `tap-noreply KEY`; after it, until a `power-cycle` or
+  `replug-usb`, only `try` readouts (`try ping`, `try shot`, `try dump`), `say`, `wait` and
+  `listen`. A `try` logs "no answer" and checks nothing.
 - **A power cycle by hand outside a plan** is for units or OSes the emulator can't power off.
   It may run ungated when the go names it as such, every other step of the run has its
   emulator pass, the run pauses until the owner says it is done, and the next plan starts with a

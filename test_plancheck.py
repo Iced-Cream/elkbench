@@ -72,6 +72,73 @@ class Rules(unittest.TestCase):
             r = check(GOOD.replace('cc 1 10 64', bad), emulator=True)
             self.assertEqual(len(r['errors']), 1, (bad, r['errors']))
 
+    def test_tap_noreply_and_try_words(self):
+        for good in ('tap-noreply YES', 'tap-noreply YES 120', 'tap-noreply DOWN 0x40'):
+            self.assertIsNone(plancheck.tap_noreply_error(good.split()), good)
+        for bad, why in (('tap-noreply', 'KEY [MS]'), ('tap-noreply YES 1 2', 'KEY [MS]'),
+                         ('tap-noreply YES long', 'MS is a number')):
+            self.assertIn(why, plancheck.tap_noreply_error(bad.split()) or '', bad)
+        for good in ('try ping', 'try shot crash.png', 'try dump 0x4565fca8 348 k1.bin', 'try stats',
+                     'try peek-set x.txt'):
+            self.assertIsNone(plancheck.try_error(good.split()), good)
+        for bad in ('try', 'try tap NO', 'try cc 1 7 100', 'try try ping', 'try expect-screen x 1'):
+            self.assertIn('STEP is a readout', plancheck.try_error(bad.split()) or '', bad)
+        self.assertIn('tap-noreply', plancheck.KEY_OPS)
+        self.assertIn('tap-noreply', plancheck.WRITE_OPS)
+        self.assertIn('try', plancheck.READOUT_OPS)
+
+    CRASH = GOOD + '''[crash]
+say proves evidence: the key stops the firmware
+expect-screen crash-row 1 rows=8-15
+tap-noreply YES
+wait 4
+try shot crash.png
+try ping
+try dump 0x4565fca8 348 k1.bin
+say no answer expected
+listen the unit is silent allowed: none needs: nothing
+'''
+
+    def test_after_tap_noreply_only_try_say_wait_listen(self):
+        r = check(self.CRASH)
+        self.assertEqual(r['errors'], [])
+        self.assertTrue(any('[crash] tap-noreply YES: a key expected to stop the firmware' in f for f in r['flags']),
+                        r['flags'])
+        for bad in ('ping', 'shot x.png', 'tap NO', 'dump 0x40000000 4 a.bin', 'expect-screen home 2', 'cc 1 7 1',
+                    'tap-noreply NO'):
+            r = check(self.CRASH + bad + '\n')
+            self.assertTrue(any(e.startswith('[crash] %s after tap-noreply in [crash]' % ' '.join(bad.split()[:3]))
+                                for e in r['errors']), (bad, r['errors']))
+            # emulator plans too: the runner would wait on a unit that no longer answers
+            self.assertEqual(len(check(self.CRASH + bad + '\n', emulator=True)['errors']), 1, bad)
+        # into later sections and [on fail] sections too
+        r = check(self.CRASH + '[next]\nsay proves evidence: x\nshot x.png\n')
+        self.assertTrue(any('[next] shot x.png after tap-noreply in [crash]' in e for e in r['errors']), r['errors'])
+        r = check(self.CRASH + '[on fail]\nping\n')
+        self.assertTrue(any('[on fail] ping after tap-noreply' in e for e in r['errors']), r['errors'])
+        self.assertEqual(check(self.CRASH + '[on fail]\ntry ping\n')['errors'], [])
+
+    def test_a_power_cycle_or_replug_ends_the_dead_stretch(self):
+        for end in ('power-cycle', 'replug-usb'):
+            r = check(self.CRASH + '%s\nping\nexpect-screen home 2\n' % end)
+            self.assertEqual([e for e in r['errors'] if 'tap-noreply' in e], [], (end, r['errors']))
+
+    def test_try_is_no_assertion(self):
+        r = check(GOOD + '[alive]\nsay proves works: the unit answers\ntry ping\n')
+        self.assertTrue(any('[alive] says it proves works but has no machine assertion' in e for e in r['errors']),
+                        r['errors'])
+        self.assertFalse(plancheck.is_assert(['try', 'ping']))
+        self.assertEqual(check(GOOD + '[alive]\nsay proves works: the unit answers\nping\n')['errors'], [])
+
+    def test_tap_noreply_and_try_are_rytm_and_a4_only(self):
+        for unit in ('rytm', 'a4'):
+            self.assertEqual(check(self.CRASH, unit=unit)['errors'], [], unit)
+        r = check(self.CRASH, unit='digitone')
+        self.assertTrue(any('tap-noreply: the digitone runner has no tap-noreply or try' in e for e in r['errors']),
+                        r['errors'])
+        self.assertTrue(any('try: the digitone runner has no' in e for e in r['errors']), r['errors'])
+        self.assertTrue(check(GOOD + '[on fail]\ntry ping\n', unit='digitone', emulator=True)['errors'])
+
     def test_no_start_check_is_refused(self):
         r = check(GOOD.replace('expect-screen home 2 rows=0-6', 'ping'))
         self.assertTrue(any('no start check' in e for e in r['errors']), r['errors'])

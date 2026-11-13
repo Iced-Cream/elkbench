@@ -1527,6 +1527,239 @@ class InProcess(unittest.TestCase):
         self.assertIn('POWER CYCLE BY HAND', body)
         self.assertIn('[kept] power-cycle', body)
 
+    def test_replug_usb_parts(self):
+        steps = [('a', ['tap NO', 'replug-usb', 'ping']), ('b', ['power-cycle']), ('c', ['expect-screen x 1'])]
+        self.assertTrue(daemon.is_replug_usb('replug-usb  # by hand'))
+        self.assertFalse(daemon.is_replug_usb('say replug-usb'))
+        self.assertTrue(daemon.is_stage_step('replug-usb'))
+        self.assertEqual(daemon.stage_parts(steps), [[('a', ['tap NO'])], [('a, after the USB replug', ['ping'])],
+                                                     [('c', ['expect-screen x 1'])]])
+        self.assertEqual(daemon.stage_steps(steps), ['replug-usb', 'power-cycle'])
+        self.assertEqual(daemon.replugs(steps), ['[a] replug-usb'])
+        self.assertEqual(daemon.power_cycles(steps), ['[b] power-cycle'])
+        hand = daemon.hand_steps(steps)
+        self.assertEqual(len(hand), 1)
+        self.assertTrue(hand[0].startswith('[a] replug-usb (') and 'not tested in the emulator' in hand[0], hand)
+
+    def replug_sample(self, unit='rytm'):
+        """power-cycle.txt with its power-cycle step a USB replug, for `unit`."""
+        path = os.path.join(PLANS, 'replug-usb-%s.txt' % unit)
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(read(self.sample('power-cycle.txt', unit)).replace('power-cycle\n', 'replug-usb\n').replace(
+                'after a power cycle', 'after a USB replug').replace('name = power cycle', 'name = replug usb').replace(
+                'out = runs', 'out = runs-replug'))
+        return path
+
+    @needs_runner
+    def test_replug_usb_plans_refused(self, unit='rytm'):
+        plan = self.replug_sample(unit)
+        text = read(plan)
+        info = self.d.plan_info(plan)
+        self.assertEqual(info['replugs'], ['[kept] replug-usb'])
+        self.assertEqual(info['power_cycles'], [])
+        self.assertEqual(info['stages'], ['replug-usb'])
+        refs = 'refs = %s' % os.path.join(PLANS, 'refs', 'menus')
+        for change, why in (
+                (lambda t: t + 'replug-usb\n', 'USB replug 2 has no machine assertion'),
+                (lambda t: t + 'replug-usb\ntry ping\n', 'USB replug 2 has no machine assertion.*try'),
+                (lambda t: t.replace('replug-usb', 'replug-usb now'), 'takes nothing more'),
+                (lambda t: t.replace('replug-usb', 'replug-usb; wait 1'), 'on a line of its own'),
+                (lambda t: t.replace('[kept]', '[kept (hardware)]'), r'in a \(hardware\) section'),
+                (lambda t: t.replace('format = 1', 'format = 1\nsnapshot-after = kept') + '\n[after]\nsay done\n',
+                 'in the setup'),
+                (lambda t: t.replace('unit = %s' % unit, 'unit = digitone'), 'Rytm and A4|digihealth'),
+                (lambda t: t.replace('format = 1', 'format = 1\nflash = %s' % os.path.join(TMP, 'os', 'test-build.syx')),
+                 'cannot flash')):
+            bad = os.path.join(TMP, 'replug-bad.txt')
+            with open(bad, 'w', encoding='utf-8') as fh:
+                fh.write(change(text).replace('refs = refs/menus', refs))
+            with self.assertRaisesRegex(daemon.Refused, why, msg=why):
+                self.d.plan_info(bad)
+        with self.assertRaisesRegex(daemon.Refused, 'replug-usb runs on the Rytm and A4'):
+            self.d.check_replugs('digitone', info['steps'], None, 0)   # with digihealth set up too
+        # a ping after the replug is the machine assertion it needs (no screen check)
+        ping = os.path.join(TMP, 'replug-ping.txt')
+        with open(ping, 'w', encoding='utf-8') as fh:
+            fh.write(text.rsplit('replug-usb', 1)[0].replace('refs = refs/menus', refs) + 'replug-usb\nping\n')
+        self.assertEqual(self.d.plan_info(ping)['replugs'], ['[kept] replug-usb'])
+        # a power cycle after the replug: the replug's assertion must come before it
+        early = os.path.join(TMP, 'replug-early.txt')
+        with open(early, 'w', encoding='utf-8') as fh:
+            fh.write(text.replace('refs = refs/menus', refs).replace('replug-usb\n', 'replug-usb\npower-cycle\n'))
+        with self.assertRaisesRegex(daemon.Refused, 'USB replug 1 has no machine assertion'):
+            self.d.plan_info(early)
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        with self.assertRaisesRegex(daemon.Refused, 'replug-usb or mods steps: batches do not run those yet'):
+            self.d.t_batch(self.s, {'plan': plan, 'variants': [{}], 'build': build})
+
+    @needs_runner
+    def test_replug_usb_run_plan(self, unit='rytm'):
+        """A replug-usb step splits the plan into parts. In the emulator: the same emulator goes on
+        (no quit, no cold boot) and the next part reconnects; on the unit: the run waits for the
+        person (listen_done), then for the port to answer a ping. Both name the step in the go
+        request, the emulator's as not tested there."""
+        self.fake_power_off_emulator(unit)
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        plan = self.replug_sample(unit)
+        build = os.path.join(TMP, 'os', 'test-build.syx')
+        self.d.guard_projects = lambda info, addr, cmd, folder: cmd
+        self.d.t_run_plan(self.s, {'plan': plan, 'target': 'emulator', 'build': build})
+        job, cmd = self.started[-1]
+        self.assertEqual([c.__name__ for c in cmd], ['part 1 of the plan',
+                                                     'USB replug 1 (emulator: not tested, same emulator)',
+                                                     'part 2 of the plan'])
+        e = self.d.emulators[(self.s.sid, unit)]
+        self.assertNotIn('--power-off', e['cmd'])                # a replug needs no power-off build
+        proc, boots, addr = e['proc'], e.get('boots'), e['address']
+        rc, line = cmd[1](0, '')
+        self.assertEqual(rc, 0, line)
+        self.assertIn('not tested in the emulator', line)
+        self.assertIn('reconnecting to the same emulator at %s' % addr, line)
+        self.assertIs(e['proc'], proc)                            # not quit, not restarted
+        self.assertIsNone(proc.poll())
+        self.assertEqual((e.get('boots'), e['address']), (boots, addr))
+        self.d.wait_for_os = lambda addr, tries=30: False         # an emulator that stopped answering
+        rc, line = cmd[1](0, '')
+        self.assertEqual(rc, 1)
+        self.assertIn('the emulator did not answer', line)
+        info = self.d.plan_info(plan)
+        import testplan
+        hw = self.d.plan_stages(self.s, info, job, 'hardware', info['steps'])
+        self.assertTrue(isinstance(hw[0], list) and callable(hw[1]) and isinstance(hw[2], list))
+        self.assertEqual(hw[1].__name__, 'USB replug 1 (by hand, waits for the person)')
+        part2 = testplan.parse(hw[2][-1])
+        self.assertEqual([n for n, _ in part2[1]], ['kept, after the USB replug'])
+        self.assertNotIn('replug-usb', ''.join(l for _, ls in part2[1] for l in ls))
+        pinged = []
+        self.d.ping_after_replug = lambda s, u, wait=None: (
+            pinged.append((u, os.path.exists(job.listen_file))) or (True, 'after 3 s, try 2'))
+        res = []
+        t = threading.Thread(target=lambda: res.append(hw[1](0, '')))
+        t.start()
+        for _ in range(50):
+            if os.path.exists(job.listen_file):
+                break
+            time.sleep(0.1)
+        flag = daemon.read_json(job.listen_file, {})
+        self.assertTrue(flag['replug_usb'])
+        self.assertFalse(flag.get('power_cycle'))
+        self.assertIn("replug the %s's USB cable by hand" % unit, flag['what'])
+        self.assertIn('not a power cycle', flag['what'])
+        time.sleep(0.3)
+        self.assertEqual(pinged, [])                              # no ping before the person's word
+        os.remove(job.listen_file)                                # listen_done
+        t.join(5)
+        self.assertEqual(res[0][0], 0, res)
+        self.assertIn('answered a ping again (after 3 s, try 2)', res[0][1])
+        self.assertEqual(pinged, [(unit, False)])
+        self.d.ping_after_replug = lambda s, u, wait=None: (False, '45 tries, last: no port')
+        res = []
+        t = threading.Thread(target=lambda: res.append(hw[1](0, '')))
+        t.start()
+        for _ in range(50):
+            if os.path.exists(job.listen_file):
+                break
+            time.sleep(0.1)
+        os.remove(job.listen_file)
+        t.join(5)
+        self.assertEqual(res[0][0], 1)
+        self.assertIn('did not answer a ping within %d s' % daemon.REPLUG_WAIT, res[0][1])
+        self.fake_pass(info)
+        _, body = self.d.go_request(self.s, {'plans': [plan]})
+        self.assertIn('USB REPLUG BY HAND, not a power cycle', body)
+        self.assertIn('not tested in the emulator', body)
+        self.assertIn('NOT TESTED IN THE EMULATOR: [kept] replug-usb', body)
+        self.assertNotIn('POWER CYCLE BY HAND', body)
+
+    @needs_runner
+    def test_replug_and_power_cycle_pass_is_recorded(self, unit='rytm'):
+        """An emulator pass of a plan with a USB replug and a power cycle: one verdict per part,
+        the pass recorded with both counts, and the replug named as not tested in the emulator."""
+        self.fake_power_off_emulator(unit)
+        os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
+        self.d.guard_projects = lambda info, addr, cmd, folder: cmd
+        self.d.saved_projects = lambda addr, folder: {}
+        plan = os.path.join(TMP, 'replug-and-cycle.txt')
+        with open(plan, 'w', encoding='utf-8') as fh:
+            fh.write(read(self.replug_sample(unit)).replace('refs = refs/menus', 'refs = %s' % os.path.join(
+                PLANS, 'refs', 'menus')) + 'power-cycle\nping\n')
+        info = self.d.plan_info(plan)
+        self.assertEqual((info['replugs'], info['power_cycles']), (['[kept] replug-usb'], ['[kept] power-cycle']))
+        self.d.t_run_plan(self.s, {'plan': plan, 'target': 'emulator',
+                                   'build': os.path.join(TMP, 'os', 'test-build.syx')})
+        job, cmd = self.started[-1]
+        self.assertEqual([c.__name__ for c in cmd], [
+            'part 1 of the plan', 'USB replug 1 (emulator: not tested, same emulator)', 'part 2 of the plan',
+            'power cycle 1 (emulator: power-off save, cold boot)', 'part 3 of the plan'])
+        out = ''
+        for n in range(3):
+            d = os.path.join(TMP, 'replug-cycle-run-%d' % n)
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, 'summary.json'), 'w') as fh:
+                json.dump({'emulator': True, 'pass': True}, fh)
+            out += 'replug usb on the emulator: PASS (4 steps, 1 s) - %s\n' % d
+        self.done(job, 0, out)
+        self.assertEqual(job.state, 'pass', job.lines)
+        self.assertIn('recorded as the emulator pass for this plan', job.lines)
+        self.assertTrue(any(l.startswith('not tested here (skipped in the emulator): [kept] replug-usb (')
+                            and 'not tested in the emulator' in l for l in job.lines), job.lines)
+        ep = self.d.find_pass(info['key'])
+        self.assertEqual((ep['power_cycles'], ep['replugs'], len(ep['run_dirs'])), (1, 1, 3))
+
+    @needs_runner
+    def test_tap_noreply_plans(self):
+        """A plan whose key stops the firmware: tap-noreply, try readouts after it, then a USB
+        replug and the machine assertion that the unit answers again."""
+        text = read(self.replug_sample('rytm')).replace('refs = refs/menus', 'refs = %s' % os.path.join(
+            PLANS, 'refs', 'menus'))
+        crash = text.replace('replug-usb\n', 'tap-noreply YES\nwait 4\ntry shot crash.png\ntry ping\n'
+                             'try dump 0x4565fca8 348 k1.bin\nreplug-usb\n')
+        path = os.path.join(TMP, 'noreply.txt')
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(crash)
+        info = self.d.plan_info(path)
+        self.assertEqual(info['replugs'], ['[kept] replug-usb'])
+        self.assertTrue(any('tap-noreply YES: a key expected to stop the firmware' in f for f in info['check']['flags']),
+                        info['check'])
+        with open(path, 'w', encoding='utf-8') as fh:
+            fh.write(crash.replace('try ping\n', 'ping\n'))
+        self.assertEqual(info['check']['errors'], [])
+        errors = self.d.plan_info(path)['check']['errors']        # the plan checker's errors refuse the go
+        self.assertTrue(any('[kept] ping after tap-noreply in [kept]' in e for e in errors), errors)
+        with open(path, 'w', encoding='utf-8') as fh:     # nothing ends the dead stretch before the readback
+            fh.write(crash.replace('replug-usb\n', ''))
+        errors = self.d.plan_info(path)['check']['errors']
+        self.assertTrue(any('tap NO after tap-noreply' in e for e in errors), errors)
+
+    def test_ping_after_replug(self):
+        """The ping after a replug: a new runner process each try (under the claim) until one
+        answers, or the wait is over."""
+        count = os.path.join(TMP, 'replug-pings')
+        if os.path.exists(count):
+            os.remove(count)
+        fake = os.path.join(TMP, 'fake-elklock-ping.py')
+        with open(fake, 'w', encoding='utf-8') as fh:
+            fh.write('import os, sys\n'
+                     'p = %r\n'
+                     'n = (int(open(p).read()) if os.path.exists(p) else 0) + 1\n'
+                     'open(p, "w").write(str(n))\n'
+                     'assert sys.argv[1:3] == ["run", "rytm"] and sys.argv[-2:] == ["do", "ping"], sys.argv\n'
+                     'print("ping: product 0x10" if n >= int(os.environ.get("FAKE_PINGS", "3")) else "no port named X")\n'
+                     'sys.exit(0 if n >= int(os.environ.get("FAKE_PINGS", "3")) else 1)\n' % count)
+        saved = daemon.ELKLOCK
+        daemon.ELKLOCK = fake
+        self.addCleanup(setattr, daemon, 'ELKLOCK', saved)
+        ok, said = self.d.ping_after_replug(self.s, 'rytm', wait=30)
+        self.assertTrue(ok, said)
+        self.assertIn('try 3', said)
+        os.remove(count)
+        os.environ['FAKE_PINGS'] = '99'
+        self.addCleanup(lambda: os.environ.pop('FAKE_PINGS', None))
+        ok, said = self.d.ping_after_replug(self.s, 'rytm', wait=0)
+        self.assertFalse(ok)
+        self.assertEqual(said, '1 tries, last: no port named X')
+
     @needs_runner
     def test_batch_snapshot(self):
         saved = daemon.ANALOG_EMU, daemon.ELKFLASH
@@ -3917,6 +4150,12 @@ class InProcess(unittest.TestCase):
 
     def test_power_cycle_run_plan_a4(self):
         self.test_power_cycle_run_plan('a4')
+
+    def test_replug_usb_plans_refused_a4(self):
+        self.test_replug_usb_plans_refused('a4')
+
+    def test_replug_usb_run_plan_a4(self):
+        self.test_replug_usb_run_plan('a4')
 
     def test_release_empties_test_slots_a4(self):
         self.test_release_empties_test_slots('a4')
