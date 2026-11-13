@@ -5850,7 +5850,8 @@ TOOLS = [
     ('steps', 'analogrun steps (tap, hold, keys, turn, cc, nrpn, note, spp BEATS (Song Position Pointer F2 lsb msb, '
               '0-16383 MIDI beats, USB only; Rytm, A4), wait, stats, shot NAME, send FILE [din], '
               'capture NAME S [any|none] [din], capture NAME.txt S [any|none] short [nrpn=CH:MSB:LSB[:VAL]] [cc=CH:NUM[:VAL]] [din] (notes/CCs/NRPNs, '
-              'analoghealth with short-capture), ping, save-project, save-kit...) on a unit or its emulator, any '
+              'analoghealth with short-capture; add realtime, realtime=noclock or rt=XX to keep real-time bytes F8-FF, '
+              'analoghealth with realtime-capture), ping, save-project, save-kit...) on a unit or its emulator, any '
               'local write policy applied; up to 2 min. din: over the unit\'s DIN MIDI (Rytm, A4; Digitone/Digitakt with a digirun.py that has --din; '
               'hardware: units.X.din in config).',
      S(unit=UNIT(), target=TARGET(), steps={'type': 'string', 'req': True})),
