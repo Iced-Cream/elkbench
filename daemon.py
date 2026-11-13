@@ -240,6 +240,15 @@ STATUS_WAIT, STATUS_WAIT_MAX = 300, 600     # s that status run_id waits for a r
 # s a flash job may take before elkbench kills it (and its elklock run): a backstop for a tool
 # stuck in a MIDI call. A unit flashes in 22-70 s, digiemu's reboot wait is 400 s.
 FLASH_JOB_LIMIT = {'hardware': 600, 'emulator': 900}
+# A unit that stalled on its restart after a flash commit: elkflash exits 5 (it stayed on USB
+# 45 s after the commit, and every MIDI call to it blocks; stock A4 1.56 can do this, 2 of ~30
+# flashes it ran). The new OS is written. elklock marks the unit and refuses everything but
+# elkflash usb-cycle; the flash's stall branch asks for a power cycle by hand, watches the unit
+# leave USB and come back, and reads it back. Nothing is reflashed.
+STALL_EXIT = 5
+STALL_SEEN_WAIT = 90        # s after the person's "done" for usb-cycle to see the unit back on USB
+STALL_WATCH_LIMIT = 4 * 3600  # s usb-cycle watches at most (the person may be away)
+STALL_STATS_GAP = 30        # s between the two stats reads of an analoghealth build (TSG 3c)
 # Programs that open MIDI ports beside elkbench's tools (WQL LIKE patterns on the process image
 # name); config.toml `midi_clients` replaces them. On 2026-11-05 a flash through the Sidecar Pi
 # with Transfer open (and the Overbridge Engine running) left Windows MIDI stuck: every later
@@ -825,6 +834,11 @@ PERSON = CFG['person']
 # what the person does at a hardware run's power-cycle step: unit, then ' (n of m)' or ''
 POWER_CYCLE_HAND = ('power cycle the %s%s by hand: switch it off, wait 10 s, switch it on, and let it '
                     'boot to its start screen; nothing is sent to it meanwhile')
+# what the person does at a flash's stall branch: unit, then the file flashed
+STALL_HAND = ('the %s stalled on its restart after flashing %s: the new OS is written, and nothing can read '
+              'it over MIDI now. First read its screen by eye and say in the thread what it shows (expected: '
+              'SUCCESS! REBOOTING) and the time. Then power cycle it by hand: switch it off, wait 10 s, switch '
+              'it on, and let it boot to its start screen. Nothing is reflashed')
 FALLBACK = CFG['approval_fallback']       # when the client cannot show the prompt: popup, thread or both
 if FALLBACK not in ('popup', 'thread', 'both'):
     raise SystemExit('config.toml: approval_fallback must be popup, thread or both, not %r' % FALLBACK)
@@ -1196,6 +1210,13 @@ def midi_lines(srv, others, error, last_srv=None, flash=False):
     return warn, line
 
 
+def stall_refusal(unit):
+    """Why nothing may drive a unit elklock marks as stalled on its restart."""
+    return ('%s. Its MIDI port must stay closed: no shot, steps, data, plan, flash or restore. Run '
+            'stall_cycle (%s reads its screen and power cycles it by hand; elkbench watches it leave USB '
+            'and reads it back)' % (elklock.stall_line(unit), PERSON))
+
+
 def run_limited(cmd, cwd, env, limit):
     """-> (rc, output, killed): cmd run to its end, or killed with every process it started
     (an elklock run and the tool under it) after `limit` s."""
@@ -1248,6 +1269,7 @@ class Job:
         self.batch = None                 # a batch's batch.Batch: its progress while it runs
         self.limit = None                 # s before the job's commands are killed, or None
         self.midisrv = None               # the midisrv line logged when it started (hardware)
+        self.stall = None                 # a flash's stall branch: {'dir', 'lines', 'cycled', ...}
 
     def summary(self):
         took = (self.ended or time.time()) - self.started
@@ -1342,6 +1364,8 @@ class Daemon:
                 raise Refused('%s is listening to the %s (%s): nothing may drive it until they say in '
                               'the thread that they have finished; then listen_done'
                               % (PERSON, u, h['listening'].get('what', '')))
+            if elklock.stalled(u):
+                raise Refused(stall_refusal(u))
 
     def emulator_procs(self, unit):
         """PIDs of this unit's emulator processes, ours or started by hand (a window)."""
@@ -2353,6 +2377,9 @@ class Daemon:
             if h.get('listening'):
                 raise Refused('%s is still listening to the %s (%s): release only after they say they '
                               'have finished (listen_done)' % (PERSON, u, h['listening'].get('what', '')))
+            if elklock.stalled(u):
+                raise Refused('the claim is kept: ' + stall_refusal(u) + '. %s decides what happens after '
+                              'a stall (TSG 3a)' % PERSON)
         if any(j.sess is s and j.unit in mine and j.state == 'running' and j.target == 'hardware'
                for j in self.running()):
             raise Refused('a hardware run of yours is still going; release when it ends (status)')
@@ -2917,6 +2944,13 @@ class Daemon:
                                 % (os.path.basename(img), f['unit'], d))
         if not items:
             raise Refused('nothing to approve: give plans, flashes or recall_restores')
+        if a.get('flashes') or any(i['flash'] for i in infos):
+            text.append('IF A FLASH STALLS ON ITS RESTART (the unit is still on USB %d s after the commit and never '
+                        'left: stock A4 1.56 can, when it is the OS being replaced): the stall branch, no reflash. No '
+                        'MIDI port is opened on it; you read its screen and power cycle it by hand, and say done in '
+                        'the thread; elkbench watches it leave USB and come back (elkflash usb-cycle), then reads it '
+                        'back (it answers and on which OS, a shot, stats twice %d s apart on an analoghealth build). '
+                        'Kernel-PnP events and midisrv go to the evidence folder.' % (45, STALL_STATS_GAP))
         for u in sorted({i['unit'] for i in infos} | {f.get('unit') for f in a.get('flashes') or []}
                         | {f.get('unit') for f in a.get('recall_restores') or []}):
             if clears_at_release(u):
@@ -4488,7 +4522,7 @@ class Daemon:
         if not os.path.isfile(img) or not img.lower().endswith('.syx'):
             raise Refused('no OS .syx file %s' % img)
         d = sha256(img)
-        over, ran_before, clean = None, [], False
+        over, ran_before, clean, stall = None, [], False, False
         folder = s.folder(a['unit'])
         stamp = time.strftime('%H%M%S')
         # --verbose: every request and reply goes to the log too (--quiet sends all output there)
@@ -4509,6 +4543,7 @@ class Daemon:
                 self.give_back(a.get('approval'), item)
                 raise
             cmd = [sys.executable, ELKLOCK, 'run', a['unit'], '--'] + base + ['--port', u['port']] + tail
+            stall = True
         elif (u.get('emulator') in ('digiemu', 'fwcheck') and not a.get('build')
               and not self.emu_running(s, a['unit'])):
             return self.digiemu_check(s, a['unit'], img, d, folder)
@@ -4530,6 +4565,8 @@ class Daemon:
         job = Job(s, 'flash', a['unit'], tgt, 'flash ' + os.path.basename(img))
         job.limit = FLASH_JOB_LIMIT.get(tgt)
         flog = os.path.join(folder, 'elkflash.log')
+        if tgt == 'hardware' and stall:
+            cmd = [self.flash_stage(s, a['unit'], job, cmd, img, folder, flog)]
         quiet = flash_start_line(job, port)
         self.log_line({'session': s.sid, 'job': job.id, 'flash_starts': quiet})
         os.makedirs(folder, exist_ok=True)
@@ -4550,13 +4587,28 @@ class Daemon:
                 said = []
             job.lines = [quiet] + ([job.midisrv] if job.midisrv else []) + \
                 [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + ['log: %s' % flog]
-            if tgt == 'hardware':
+            if job.stall:
+                st = job.stall
+                job.lines = [quiet] + ([job.midisrv] if job.midisrv else []) + [l for l in said if l] + [
+                    'STALL BRANCH: the %s stalled on its restart (on USB %s s after the commit, never left); '
+                    'nothing was reflashed' % (a['unit'], st.get('after', '45'))] + \
+                    ['  ' + l for l in st['lines']] + ['evidence: %s' % st['dir'], 'log: %s' % flog,
+                                                        'record the stall in the KB hardware-tests row']
+            if tgt == 'hardware' and job.stall and not job.stall.get('cycled'):
+                # still stalled: the OS on it is the new one, but nothing can be read or sent
+                s.os_left[a['unit']] = ('%s written, STALLED on its restart (power cycle by hand, then '
+                                        'stall_cycle)' % os.path.basename(img), False)
+                s.flashed_at[a['unit']] = next(s.steps)
+                s.done.setdefault(a['unit'], []).append('flash %s STALLED' % os.path.basename(img))
+            elif tgt == 'hardware':
                 if rc == 0:
                     s.os_left[a['unit']] = (os.path.basename(img), self.is_stock(a['unit'], d), d)
                 else:
                     s.os_left[a['unit']] = ('unknown after a failed flash of %s' % os.path.basename(img), False)
                 s.flashed_at[a['unit']] = next(s.steps)
-                s.done.setdefault(a['unit'], []).append('flash %s %s' % (os.path.basename(img), job.state.upper()))
+                s.done.setdefault(a['unit'], []).append('flash %s %s%s' % (
+                    os.path.basename(img), job.state.upper(),
+                    ' after a stall (power cycled by hand, read back)' if job.stall else ''))
             elif rc == 0 and over:
                 self.record_pass(flash_key(a['unit'], d, over), {'image': img, 'unit': a['unit'], 'over': over,
                                                                  'after': ran_before})
@@ -4583,6 +4635,182 @@ class Daemon:
                     job.lines.append('emulator log: %s' % kept)
 
         return (started if tgt == 'emulator' else []) + self.start(job, cmd, ELKFLASH, done, port)
+
+    def flash_stage(self, s, unit, job, cmd, img, folder, flog):
+        """The hardware flash as one stage: elkflash under the claim, killed after the job's limit;
+        on its stall exit (5) the stall branch follows in the same run."""
+        def flash(rc, out):
+            env = dict(s.env(), ANALOGRUN_LISTEN_FILE=job.listen_file)
+            rc, more, killed = run_limited(cmd, ELKFLASH, env, job.limit)
+            if killed:
+                rc = rc or -9
+                more += ('\nelkbench: killed after %d s with the processes it started: it did not end '
+                         '(a call stuck in Windows MIDI does this)\n' % job.limit)
+            if rc != STALL_EXIT:
+                return rc, more
+            job.stall = {'image': os.path.basename(img), 'lines': []}
+            rc2, said = self.stall_branch(s, unit, job, folder, img, flog)
+            return rc2, more + said
+        flash.__name__ = 'elkflash upgrade (stall branch on exit %d)' % STALL_EXIT
+        return flash
+
+    def stall_branch(self, s, unit, job, folder, img=None, flog=None):
+        """A unit stalled on its restart (elkflash exit 5; elklock has marked it): no reflash, no
+        port opened until it has been power cycled. Evidence is kept; the person reads its screen and
+        power cycles it by hand (a power-cycle listen, so status and listen_done work as at a plan's
+        power-cycle step) while elkflash usb-cycle watches its USB node; a seen power cycle clears
+        elklock's mark; then the readback: elkflash wait (it answers, and its OS), a shot, and for an
+        analoghealth build stats twice STALL_STATS_GAP s apart. -> (rc, output). job.stall gets the
+        lines, the evidence folder and whether the power cycle was seen (cycled)."""
+        st = job.stall if job.stall is not None else {}
+        job.stall = st
+        st.setdefault('lines', [])
+        say = st['lines'].append
+        ev = os.path.join(folder, 'stall-%s' % time.strftime('%H%M%S'))
+        os.makedirs(ev, exist_ok=True)
+        st['dir'] = ev
+        # 4. evidence: elkflash's own record (its Plug and Play events, the Kernel-PnP log since before
+        # the upload, midisrv), the MIDI processes now, and what the person is asked to read
+        if flog and os.path.isfile(flog):
+            shutil.copyfile(flog, os.path.join(ev, 'elkflash.log'))
+        srv, others, error = midi_processes()
+        write_json(os.path.join(ev, 'midi-processes.json'), {'midisrv': srv, 'clients': others, 'error': error,
+                                                             'last_midisrv_pids': self.last_midisrv,
+                                                             'time': stamp()})
+        what = STALL_HAND % (unit, st.get('image') or 'its OS')
+        with open(os.path.join(ev, 'README.txt'), 'w', encoding='utf-8') as fh:
+            fh.write('Stall of the %s at %s.\n\nAsked of %s: %s.\n\nelkflash.log: the flash, its Plug and '
+                     'Play events and the Kernel-PnP log; midi-processes.json: midisrv and MIDI clients; '
+                     'usb-cycle.log: the power cycle as Plug and Play saw it; readback.log: after it.\n'
+                     % (unit, stamp(), PERSON, what))
+        say('evidence kept: elkflash log with the Kernel-PnP events, midisrv %s' % (
+            ', '.join('pid %s' % r.get('pid') for r in srv) or error or 'not running'))
+        # 3. the power cycle by hand, watched on USB; no MIDI port is opened meanwhile
+        stop = os.path.join(ev, 'usb-cycle.stop')
+        wlog = os.path.join(ev, 'usb-cycle.log')
+        watch = [sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, '-m', 'elkflash', 'usb-cycle',
+                 '--port', UNITS[unit]['port'], '--timeout-total', str(STALL_WATCH_LIMIT), '--stop-file', stop]
+        with open(wlog, 'w', encoding='utf-8') as fh:
+            w = subprocess.Popen(watch, cwd=ELKFLASH, env=s.env(), stdout=fh, stderr=subprocess.STDOUT,
+                                 **NOWIN)
+        write_json(job.listen_file, {'what': what, 'since': time.time(), 'power_cycle': True})
+        while os.path.exists(job.listen_file) and w.poll() is None:
+            time.sleep(0.5)
+        if w.poll() is not None and os.path.exists(job.listen_file) and w.returncode == 0:
+            # seen before the person said so: keep waiting for their word all the same
+            while os.path.exists(job.listen_file):
+                time.sleep(0.5)
+        if not os.path.exists(job.listen_file):
+            deadline = time.time() + STALL_SEEN_WAIT
+            while w.poll() is None and time.time() < deadline:
+                time.sleep(0.5)
+        if w.poll() is None:
+            open(stop, 'w').close()
+            try:
+                w.wait(timeout=30)
+            except subprocess.TimeoutExpired:
+                pass
+        with open(wlog, encoding='utf-8', errors='replace') as fh:
+            wsaid = [l.strip() for l in fh.read().splitlines() if l.strip()]
+        if os.path.exists(job.listen_file):
+            # usb-cycle ended without seeing it (or failed) while the person had not said done yet:
+            # the run stops waiting, and the claim is no longer held for their listening
+            try:
+                os.remove(job.listen_file)
+            except FileNotFoundError:
+                pass
+            time.sleep(1)                       # watch_listen may be marking it right now
+            if job.listening:
+                subprocess.run([sys.executable, ELKLOCK, 'heard', unit, '--by',
+                                'elkbench: the stall branch ended, usb-cycle did not see the power cycle'],
+                               env=s.env(), capture_output=True, timeout=30, **NOWIN)
+            job.listening = None
+        if w.returncode != 0 or elklock.stalled(unit):
+            say('power cycle NOT seen on USB (usb-cycle exit %s: %s): the %s stays marked stalled, nothing '
+                'was opened or reflashed' % (w.returncode, wsaid[-1] if wsaid else 'no output', unit))
+            say('next: %s power cycles it by hand, then stall_cycle (or %s runs `elklock unstall %s` after a '
+                'power cycle nobody watched)' % (PERSON, PERSON, unit))
+            st['cycled'] = False
+            return STALL_EXIT, '\n'.join(wsaid) + '\n'
+        st['cycled'] = True
+        say('power cycled by hand: %s' % next((l for l in reversed(wsaid) if l.startswith('power-cycled')),
+                                               wsaid[-1] if wsaid else ''))
+        # readback: it answers, on which OS; its screen; stats twice on an analoghealth build
+        rlog = os.path.join(ev, 'readback.log')
+        ok, out = self.stall_readback(s, unit, img, ev, rlog)
+        for l in out:
+            say(l)
+        return (0 if ok else 1), ''
+
+    def stall_readback(self, s, unit, img, ev, rlog):
+        """After the power cycle of a stalled unit: -> (ok, lines)."""
+        lines = []
+        env = s.env()
+        r = subprocess.run([sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, '-m', 'elkflash', 'wait',
+                            '--port', UNITS[unit]['port'], '--timeout-total', '90'],
+                           cwd=ELKFLASH, env=env, capture_output=True, text=True, timeout=300, **NOWIN)
+        with open(rlog, 'a', encoding='utf-8') as fh:
+            fh.write('$ elkflash wait\n%s%s\n' % (r.stdout, r.stderr))
+        said = [l.strip() for l in (r.stdout + r.stderr).splitlines() if l.strip()]
+        if r.returncode:
+            return False, lines + ['readback FAILED: it does not answer after the power cycle (%s)'
+                                   % (said[-1] if said else 'exit %d' % r.returncode)]
+        lines.append('readback: ' + next((l for l in said if l.startswith('back after')), said[-1]))
+        runner_kind = UNITS[unit].get('runner')
+        if runner_kind is True and RUNNER:
+            digest = sha256(img) if img and os.path.isfile(img) else None
+            no_stats = digest is None or any(os.path.exists(p) and sha256(p) == digest
+                                             for p in UNITS[unit].get('stock', []) + UNITS[unit].get('no_stats', []))
+            steps = 'shot stall-readback.png' + ('' if no_stats else '; stats; wait %d; stats' % STALL_STATS_GAP)
+            cmd = [sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, RUNNER] + port_args(unit) + \
+                ['--quiet', '--log', rlog, 'do', steps, '--out', ev]
+            r = subprocess.run(cmd, cwd=ANALOGHEALTH, env=env, capture_output=True, text=True,
+                               timeout=STALL_STATS_GAP + 180, **NOWIN)
+            said = [l.strip() for l in (r.stdout + r.stderr).splitlines() if l.strip()]
+            if r.returncode:
+                return False, lines + ['readback FAILED at its steps (%s): %s' % (
+                    steps, said[-1] if said else 'exit %d' % r.returncode)]
+            lines.append('readback: %s (%s)' % (steps, os.path.join(ev, 'stall-readback.png')))
+            with open(rlog, encoding='utf-8', errors='replace') as fh:
+                stats = [l.strip() for l in fh.read().splitlines() if 'cpu' in l.lower()]
+            lines += ['  ' + l for l in stats[-2:]]
+        else:
+            lines.append('readback: no screen or stats on the %s (no analogrun): the answer above only' % unit)
+        return True, lines
+
+    def t_stall_cycle(self, s, a):
+        """A unit elklock marks as stalled: the stall branch alone (the person power cycles it by
+        hand while elkbench watches it on USB, then the readback), e.g. after a stall branch that
+        did not see the power cycle."""
+        u = a.get('unit')
+        self.unit(u)
+        h = elklock.holder(u)
+        if not elklock.mine(h, session=s.sid):
+            raise Refused('claim %s first (claim tool): %s' % (u, elklock.describe(u, h)))
+        if not elklock.stalled(u):
+            raise Refused('the %s is not marked as stalled: nothing to do' % u)
+        if any(j.unit == u and j.target == 'hardware' for j in self.running()):
+            raise Refused('a hardware run on the %s is still going' % u)
+        img = os.path.abspath(a['image']) if a.get('image') else None
+        port = self.busy_port(u, 'hardware', 'stall_cycle')
+        job = Job(s, 'flash', u, 'hardware', 'stall cycle')
+        job.stall = {'image': os.path.basename(img) if img else None, 'lines': []}
+        folder = s.folder(u)
+
+        def branch(rc, out):
+            return self.stall_branch(s, u, job, folder, img)
+        branch.__name__ = 'stall branch: power cycle by hand, watched on USB, then readback'
+
+        def done(job, rc, out):
+            job.state = 'pass' if rc == 0 else 'fail'
+            job.lines = ['STALL BRANCH on the %s' % u] + ['  ' + l for l in job.stall['lines']] + \
+                ['evidence: %s' % job.stall.get('dir')]
+            if job.stall.get('cycled'):
+                left = s.os_left.get(u)
+                if left and 'STALLED' in left[0] and img:
+                    s.os_left[u] = (os.path.basename(img), self.is_stock(u, sha256(img)), sha256(img))
+                s.done.setdefault(u, []).append('stall cycle %s' % job.state.upper())
+        return self.start(job, [branch], ELKFLASH, done, port)
 
     def digiemu_check(self, s, unit, img, digest, folder):
         """The Digitone's emulator gate: digiemu's own firmware check (emu.fwcheck: the
@@ -5925,6 +6153,14 @@ TOOLS = [
                'time out and nothing may drive the unit (no keys, MIDI, screenshots, flash, restore or '
                'release). Put the unit in the state to hear first; a plan uses its own listen step.' % PERSON,
      S(unit=UNIT(), what={'type': 'string', 'req': True, 'description': 'what to listen for, as you tell them'})),
+    ('stall_cycle', 'A unit elklock marks as STALLED on its restart after a flash (elkflash exit 5): %s reads '
+                    'its screen and power cycles it by hand (the run waits as at a power-cycle step: listen_done '
+                    'on their "done"), elkflash usb-cycle watches it leave USB and come back (that clears the '
+                    'mark), then the readback (ping and OS, shot, stats twice on analoghealth builds). A flash '
+                    'that stalls runs this by itself; call it when that branch did not see the power cycle. '
+                    'Nothing is reflashed.' % PERSON,
+     S(unit=UNIT(), image={'type': 'string', 'description': 'the OS file the stalled flash wrote (for the '
+                                                           'stats choice and the OS left)'})),
     ('listen_done', 'End a listening test (yours, or a plan waiting at a listen or power-cycle step) only when '
                     '%s has said in the thread that they have finished (or that the power cycle is done): pass '
                     'the id of that reply. Without one, the client asks them.' % PERSON,

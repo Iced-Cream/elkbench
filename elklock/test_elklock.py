@@ -172,6 +172,54 @@ class Lock(unittest.TestCase):
             self.assertEqual(self.hook('test-a', cmd), '', cmd)
         run('test-a', 'release', 'rytm', '--no-snapshot')
 
+    def test_stall_marks_the_unit_until_a_watched_power_cycle(self):
+        py = sys.executable
+        self.assertEqual(run('test-a', 'claim', 'a4', '--for', 'stall test').returncode, 0)
+        try:
+            # elkflash upgrade exits 5 under run: the unit is marked stalled
+            r = run('test-a', 'run', 'a4', '--', py, '-c', 'import sys; sys.exit(5)', 'elkflash', 'upgrade', 'x.syx')
+            self.assertEqual(r.returncode, 5, r.stdout + r.stderr)
+            self.assertIn('STALLED', r.stdout)
+            self.assertIsNotNone(elklock.stalled('a4'))
+            self.assertEqual(run('test-a', 'stalled', 'a4').returncode, 3)
+            # nothing else runs on it, not even a reflash; the hook says the same
+            r = run('test-a', 'run', 'a4', '--', py, '-c', 'pass', 'analogrun', 'shot')
+            self.assertEqual(r.returncode, 3)
+            self.assertIn('do not reflash', r.stdout)
+            self.assertIn('STALLED', self.hook('test-a', 'python analogrun.py --port "Analog Four" info'))
+            self.assertIn('STALLED', self.hook('test-a', 'python -m elkflash info --port "Analog Four"'))
+            self.assertEqual(self.hook('test-a', 'python elklock.py run a4 -- python -m elkflash usb-cycle '
+                                                 '--port "Analog Four"'), '')
+            self.assertIn('Only the person', self.hook('test-a', 'python elklock.py unstall a4 --by x --yes'))
+            self.assertIn('STALLED', elklock.describe('a4', elklock.holder('a4')))
+            # no handoff read of a stalled unit
+            self.assertIn('STALLED', elklock.snapshot('a4', 'n', False)['os'])
+            # usb-cycle that never saw it leave keeps the mark; its pass clears it
+            r = run('test-a', 'run', 'a4', '--', py, '-c', 'import sys; sys.exit(5)', 'elkflash', 'usb-cycle')
+            self.assertEqual(r.returncode, 5)
+            self.assertIsNotNone(elklock.stalled('a4'))
+            r = run('test-a', 'run', 'a4', '--', py, '-c', 'pass', 'elkflash', 'usb-cycle')
+            self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+            self.assertIn('no longer stalled', r.stdout)
+            self.assertIsNone(elklock.stalled('a4'))
+            with open(elklock.path('a4', '.stalls.jsonl'), encoding='utf-8') as fh:
+                self.assertIn('usb-cycle', fh.read())
+            # an ordinary failure of an upgrade marks nothing
+            run('test-a', 'run', 'a4', '--', py, '-c', 'import sys; sys.exit(1)', 'elkflash', 'upgrade', 'x.syx')
+            self.assertIsNone(elklock.stalled('a4'))
+        finally:
+            elklock.clear_stalled('a4', 'test')
+            run('test-a', 'release', 'a4', '--no-snapshot')
+
+    def test_unstall_is_the_persons(self):
+        elklock.mark_stalled('a4', 'test')
+        r = run('test-a', 'unstall', 'a4', '--by', 'x')
+        self.assertNotEqual(r.returncode, 0)
+        self.assertIsNotNone(elklock.stalled('a4'))
+        r = run('test-a', 'unstall', 'a4', '--by', 'the person, by hand', '--yes')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIsNone(elklock.stalled('a4'))
+
     def test_pid_alive(self):
         self.assertTrue(elklock.pid_alive(os.getpid()))
         p = subprocess.Popen([sys.executable, '-c', 'pass'])

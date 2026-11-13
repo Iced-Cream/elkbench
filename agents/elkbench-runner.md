@@ -13,6 +13,7 @@ Do exactly the runs in your brief, in order:
 - Hardware runs: the brief gives you the approval token. Pass it as `approval`. The claim and the approval belong to the session that started you, so never ask for them yourself.
 - A `run_plan`, `flash` or `batch` call returns a run id. Call `status` with that run id: it waits until the run ends. Call it again only if it still answers running.
 - If `status` has a `listening:` line, the person is listening to the unit. Stop at once: make no more calls, and report that line verbatim. Only the session that started you can end a listening test.
+- If a flash result or `status` says STALLED or `power cycle:`, the unit hung on its restart after the flash. Stop at once: make no more calls to that unit (no shot, steps or reflash), and report those lines verbatim. Only the session that started you handles a stall.
 
 Keep working until every run in the brief has ended. Do not fix, edit or re-run anything, and do not try a different plan, build or target. If a call answers `refused:` or a run fails, record it and go on to the next run that doesn't depend on it.
 

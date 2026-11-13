@@ -40,6 +40,20 @@ python %D% break rytm --yes                               # the person frees a s
 
 A claim that ends by itself (idle, max time, session gone) records the OS and the screen in
 its handoff note, as `release` does.
+
+## A unit that stalled on its restart
+
+When `elkflash upgrade` exits 5 under `run`, the unit hung on its restart after writing the new
+OS (stock A4 1.56 can): it stays on USB and every MIDI call to it blocks. `run` then marks it
+(`DEVICE.stalled.json`), whoever holds it later:
+
+- `run` and the hook refuse every device command on it, a reflash included, except
+  `elkflash usb-cycle`, which watches its USB node and opens no port;
+- no handoff snapshot reads it (its note says why), and elkbench's release keeps the claim;
+- `usb-cycle` exiting 0 under `run` (it saw the unit leave USB and come back: the hand power
+  cycle) clears the mark; the record goes to `DEVICE.stalls.jsonl`;
+- `stalled DEVICE` says whether it is marked (exit 3 if so); `unstall DEVICE --by "..." --yes` is
+  the person's way out after a power cycle nobody watched (the hook denies it to a session).
 | `break --yes` (the person) | at once; kills the holder if it does not let go |
 
 ## Safety additions
