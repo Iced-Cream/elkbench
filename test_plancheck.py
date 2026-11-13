@@ -53,6 +53,25 @@ class Rules(unittest.TestCase):
         lines = plancheck.go_lines(r)
         self.assertIn('evidence: [look]', lines[0])
 
+    def test_spp_beats_is_one_integer_0_to_16383(self):
+        for good in ('spp 0', 'spp 1', 'spp 127', 'spp 128', 'spp 16383', 'spp 0x3FFF'):
+            self.assertIsNone(plancheck.spp_error(good.split()), good)
+        for bad, why in (('spp -1', '0..16383'), ('spp 16384', '0..16383'), ('spp 1.5', 'an integer'),
+                         ('spp x', 'an integer'), ('spp', 'needs BEATS'), ('spp 1 2', 'one number'),
+                         ('spp 4 din', 'USB only')):
+            self.assertIn(why, plancheck.spp_error(bad.split()) or '', bad)
+        self.assertIn('spp', plancheck.WRITE_OPS)
+
+    def test_a_bad_spp_step_is_refused(self):
+        plan = GOOD.replace('cc 1 10 64', 'cc 1 10 64\nspp 96')
+        self.assertEqual(check(plan)['errors'], [])
+        for bad in ('spp -1', 'spp 16384', 'spp 2.5', 'spp'):
+            r = check(GOOD.replace('cc 1 10 64', bad))
+            self.assertTrue(any(e.startswith('[set the value] spp') for e in r['errors']), (bad, r['errors']))
+            # an emulator plan is checked for it too
+            r = check(GOOD.replace('cc 1 10 64', bad), emulator=True)
+            self.assertEqual(len(r['errors']), 1, (bad, r['errors']))
+
     def test_no_start_check_is_refused(self):
         r = check(GOOD.replace('expect-screen home 2 rows=0-6', 'ping'))
         self.assertTrue(any('no start check' in e for e in r['errors']), r['errors'])

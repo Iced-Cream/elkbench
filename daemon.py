@@ -133,7 +133,7 @@ DATA_OPS = ('ls', 'get', 'put', 'clear', 'roundtrip')
 # capture and ping need a digirun that has them (digihealth's runner-capture-ping, merged with the
 # key-session reopen in branch digirun-reopen-capture-ping); an older one lacks them, and then they
 # are refused here too. din is its --din option (send/capture ... din).
-DIGI_NO_STEPS = {'save-kit'}
+DIGI_NO_STEPS = {'save-kit', 'spp'}       # digirun has no spp
 DIGI_NEWER_STEPS = {'capture': '    capture FILE', 'ping': '    ping ',    # step -> its line in digirun's help
                     'din': "'--din'"}                                       # option -> its argparse name
 
@@ -186,8 +186,8 @@ def din_refusal(unit):
     return 'DIN steps (send/capture ... din) have no runner on the %s' % unit
 
 
-STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'bend', 'at', 'pc', 'wait',
-            'stats', 'dump', 'send', 'capture', 'ping', 'save-project', 'save-kit', 'say'}
+STEP_OPS = {'tap', 'hold', 'release', 'keys', 'turn', 'shot', 'cc', 'nrpn', 'note', 'bend', 'at', 'pc', 'spp',
+            'wait', 'stats', 'dump', 'send', 'capture', 'ping', 'save-project', 'save-kit', 'say'}
 
 
 SHORT_SEND_OPS = ('cc', 'nrpn', 'note', 'bend', 'at', 'pc')     # analogrun's short-message steps
@@ -4425,6 +4425,9 @@ class Daemon:
             if op not in allowed:
                 raise Refused('step %r is not allowed here (allowed: %s; screens: expect_screen)'
                               % (op, ', '.join(sorted(allowed))))
+            why = plancheck.arg_error(w)
+            if why:
+                raise Refused(why)
             if op in ('shot', 'dump', 'capture') and re.search(r'[\\/:]', w[1 if op == 'capture' else -1]):
                 raise Refused('%s writes into this session\'s evidence folder: give a bare file name' % op)
             if op == 'capture':
@@ -5700,7 +5703,8 @@ TOOLS = [
               'description': 'gate: the hardware plan files (up to %d), each run once' % GATE_PLANS_MAX},
        force={'type': 'boolean', 'description': 'gate: run plans whose pass still stands too'},
        stop={'type': 'string', 'description': 'a batch run_id: start no more of its runs'})),
-    ('steps', 'analogrun steps (tap, hold, keys, turn, cc, nrpn, note, wait, stats, shot NAME, send FILE [din], '
+    ('steps', 'analogrun steps (tap, hold, keys, turn, cc, nrpn, note, spp BEATS (Song Position Pointer F2 lsb msb, '
+              '0-16383 MIDI beats, USB only; Rytm, A4), wait, stats, shot NAME, send FILE [din], '
               'capture NAME S [any|none] [din], capture NAME.txt S [any|none] short [nrpn=CH:MSB:LSB[:VAL]] [cc=CH:NUM[:VAL]] [din] (notes/CCs/NRPNs, '
               'analoghealth with short-capture), ping, save-project, save-kit...) on a unit or its emulator, any '
               'local write policy applied; up to 2 min. din: over the unit\'s DIN MIDI (Rytm, A4; Digitone/Digitakt with a digirun.py that has --din; '

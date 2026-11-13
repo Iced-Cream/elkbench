@@ -41,8 +41,8 @@ PROVES = ('setup', 'set-and-kept', 'works', 'evidence')
 # steps whose failure stops the run: machine assertions
 ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping', 'expect-mods')
 # steps that change what the unit holds or a value on it (keys only move through the UI)
-WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', 'at', 'pc', 'turn', 'pad', 'padplay',
-             'mods-put', 'mods-active', 'mods-remove')
+WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', 'at', 'pc', 'spp', 'turn', 'pad',
+             'padplay', 'mods-put', 'mods-active', 'mods-remove')
 # steps that need a remote-key path in the OS (analoghealth, or a remote-only build)
 KEY_OPS = ('tap', 'hold', 'release', 'keys', 'turn', 'pad', 'padplay')
 # steps that only move through menus or look: nothing between a save and a check but these
@@ -62,6 +62,43 @@ def words(line):
         return shlex.split(line, comments=True)
     except ValueError:
         return line.split()
+
+
+def spp_error(w):
+    """Why an `spp BEATS` step's words `w` are wrong, or None. BEATS is one integer 0..16383 (MIDI
+    beats, 16th notes), read as the runner reads it (int(x, 0): 0x.. too); USB only, no din."""
+    if len(w) < 2:
+        return 'spp needs BEATS, a number 0..16383'
+    if len(w) > 2:
+        return 'spp takes one number, BEATS 0..16383 (USB only, no din): %r' % ' '.join(w)
+    try:
+        beats = int(w[1], 0)
+    except ValueError:
+        return 'spp BEATS is an integer 0..16383, not %r' % w[1]
+    if not 0 <= beats <= 16383:
+        return 'spp BEATS is 0..16383 (MIDI beats, 16th notes), not %d' % beats
+    return None
+
+
+# step -> its argument check: (words) -> why the runner would refuse them, or None
+ARG_CHECKS = {'spp': spp_error}
+
+
+def arg_error(w):
+    """Why a step's words `w` are refused by its ARG_CHECKS entry, or None."""
+    check = ARG_CHECKS.get(w[0].lower()) if w else None
+    return check(w) if check else None
+
+
+def arg_errors(steps):
+    """-> ['[section] why'] for steps whose arguments their runner would refuse (ARG_CHECKS)."""
+    out = []
+    for name, lines in steps:
+        for l in lines:
+            why = arg_error(words(l))
+            if why:
+                out.append('[%s] %s' % (name, why))
+    return out
 
 
 def is_assert(w):
@@ -161,6 +198,7 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
     -> dict(errors=[...], flags=[...], proves=[(section, kind)], contrasts=[(section, start, why)])."""
     errors, flags, proves = [], [], []
     contrasts = contrasts_of(steps)
+    errors += arg_errors(steps)
     if emulator:
         return dict(errors=errors, flags=flags, proves=proves, contrasts=contrasts)
     left = boot_state(steps)

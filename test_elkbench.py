@@ -2564,6 +2564,20 @@ class InProcess(unittest.TestCase):
         self.assertTrue({'bend', 'at', 'pc'} <= daemon.STEP_OPS)
         self.assertIn('pc', daemon.plancheck.WRITE_OPS)
 
+    def test_spp_step(self):
+        """spp BEATS: a steps-tool step and a write; USB only (no DIN leg); refused with a bad BEATS
+        before anything starts, and on the Digitone (digirun has no spp)."""
+        self.assertIn('spp', daemon.STEP_OPS)
+        self.assertIn('spp', daemon.plancheck.WRITE_OPS)
+        self.assertEqual(daemon.din_steps(['spp 4', 'spp 4 din']), [])
+        self.assertIn('spp', daemon.DIGI_NO_STEPS)
+        for bad, why in (('spp -1', '0..16383'), ('spp 16384', '0..16383'), ('spp 1.5', 'an integer'),
+                         ('spp', 'needs BEATS'), ('spp 4 din', 'USB only')):
+            with self.assertRaisesRegex(daemon.Refused, re.escape(why)):
+                self.d.t_steps(self.s, {'unit': 'rytm', 'target': 'emulator', 'steps': 'wait 0.1; ' + bad})
+        with self.assertRaisesRegex(daemon.Refused, "step 'spp' is not allowed"):
+            self.d.t_steps(self.s, {'unit': 'digitone', 'target': 'emulator', 'steps': 'spp 4'})
+
     @needs_runner
     def test_din_on_hardware_needs_the_configured_interface(self):
         subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
