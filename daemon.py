@@ -109,10 +109,12 @@ IDLE_EXIT = 30 * 60
 UNIT_FACTS = {
     'rytm': dict(port='Analog Rytm', emu='rytm-emu usb out,rytm-emu usb in', emu_exe='rytm' + EXE,
                  asio='Elektron Analog Rytm MKII', engine='Analog Rytm', runner=True, stock=[], no_stats=[],
-                 din=None, drive=True),           # drive: its +Drive sample store by samplegate (drive_items)
+                 din=None, drive=True, mods=True),  # drive: its +Drive sample store by samplegate (drive_items);
+                                                     # mods: the Drive Loader's /mods route (modsgate, modsteps.py)
     'a4': dict(port='Analog Four', emu='a4-emu usb out,a4-emu usb in', emu_exe='a4' + EXE,
                asio='Elektron Analog Four MKII', engine='Analog Four', runner=True, stock=[], no_stats=[],
-               din=None),
+               din=None, mods=True),             # mods: no +Drive file system; the A4 Drive Loader keeps
+                                                 # /mods in its own sector store, served by the same route
     'digitone': dict(port='Digitone', emu='digiemu', asio='Elektron Digitone', engine='Digitone',
                      runner='digirun', stock=[], no_stats=[], din=None,   # digirun: steps and screens, no plans
                      emulator='digiemu'),              # digiemu over TCP; without a build, emu.fwcheck
@@ -451,9 +453,9 @@ def drive_items(a):
         u, path = (d or {}).get('unit'), ((d or {}).get('path') or '').rstrip('/')
         if u not in UNITS:
             raise Refused('drive_items: unknown unit %r' % u)
-        if not UNITS[u].get('drive'):
-            raise Refused('drive_items: the %s has no +Drive sample tool here (only the Rytm)' % u)
         if path.startswith('/mods/') or path == '/mods':
+            if not UNITS[u].get('mods'):
+                raise Refused('drive_items: the %s has no Drive Loader /mods here (the Rytm and the A4 do)' % u)
             if not MODSGATE:
                 raise Refused('drive_items: tools.modsgate is not set in config.toml, so the release '
                               'could not remove /mods items')
@@ -463,6 +465,9 @@ def drive_items(a):
                               '"~T name.elemod" file; the release removes it with the ~T items it holds'
                               % (path, MODS_DEPTH))
         else:
+            if not UNITS[u].get('drive'):
+                raise Refused('drive_items: %r: the %s has no +Drive sample tool here (only the Rytm); its '
+                              'Drive Loader items are /mods items' % (path, u))
             if not SAMPLEGATE:
                 raise Refused('drive_items: tools.samplegate is not set in config.toml, so the release '
                               'could not remove them')
@@ -505,6 +510,13 @@ def mods_rows(ls_text):
         if len(w) == 2 and w[1].isdigit() and w[0]:
             out.append((w[0][:-1], True) if w[0].endswith('/') else (w[0], False))
     return out
+
+
+def modsgate_args(gate, u, port):
+    """-> modsgate's command line up to the op: the unit's port and, for a unit other than the
+    Rytm (modsgate's default), --unit, so the write policy records in the manifest of the claim of
+    THAT unit (an A4 run's /mods items are released with the A4's claim)."""
+    return [sys.executable, gate] + (['--unit', u] if u != 'rytm' else []) + ['--port', port]
 
 
 def drive_rows(ls_text):
@@ -755,7 +767,7 @@ RUNNER = os.path.join(ANALOGHEALTH, 'tools', 'analogrun.py') if ANALOGHEALTH els
 DINPROBE = os.path.join(ANALOGHEALTH, 'tools', 'dinprobe.py') if ANALOGHEALTH else None
 DIGIHEALTH = CFG['digihealth']            # a digihealth tree with tools/digirun.py (Digitone)
 SAMPLEGATE = CFG['samplegate']            # samplegate.py: the Rytm's +Drive sample store (drive_items)
-MODSGATE = CFG['modsgate']                # modsgate.py: the Rytm's +Drive /mods folder (drive_items)
+MODSGATE = CFG['modsgate']                # modsgate.py: the Drive Loader's /mods (Rytm, A4; drive_items)
 MODSGATE_ELEKLOADER = CFG['modsgate_elekloader']   # the elekloader tree modsgate runs (ELEKLOADER)
 ANALOG_EMU = CFG['analog_emu']            # folder with analog-emu's rytm.exe and a4.exe
 DIGIEMU = CFG['digiemu']                  # a digiemu checkout (emu.fwcheck)
@@ -1789,7 +1801,7 @@ class Daemon:
         mods_files = []
         if mods_lines:
             try:
-                mods_files = [(f, sha256(f), os.path.getsize(f)) for f in modsteps.put_files(steps, here)]
+                mods_files = [(f, sha256(f), os.path.getsize(f)) for f in modsteps.put_files(steps, here, unit)]
             except ValueError as e:
                 raise Refused(str(e))
             vouched['mods'] = [(os.path.basename(f), d) for f, d, _n in mods_files]
@@ -1908,8 +1920,8 @@ class Daemon:
         +Drive and modsgate set, alone on their line, outside (hardware) sections and the setup,
         in a plan that flashes nothing (the base is flashed, or reflashed for a reboot, in a plan
         of its own), each parsing."""
-        if not UNITS[unit].get('drive'):
-            raise Refused('mods steps run on the Rytm (its +Drive /mods, the Drive Loader); the %s has none' % unit)
+        if not UNITS[unit].get('mods'):
+            raise Refused('mods steps run on the Rytm and the A4 (the Drive Loader\'s /mods); the %s has none' % unit)
         need(MODSGATE, 'modsgate', 'the +Drive /mods tool (modsgate.py)')
         if flash:
             raise Refused('a plan with mods steps cannot flash: flash (or reflash the base to reboot) in a plan '
@@ -1921,7 +1933,7 @@ class Daemon:
                 if ';' in l:
                     raise Refused('[%s] %r: a mods step goes on a line of its own' % (name, l))
                 try:
-                    modsteps.parse(l, here)
+                    modsteps.parse(l, here, unit)
                 except ValueError as e:
                     raise Refused('[%s] %s' % (name, e))
                 if name.endswith('(hardware)'):
@@ -2509,8 +2521,8 @@ class Daemon:
             env['ELEKLOADER'] = MODSGATE_ELEKLOADER
 
         def run(*args):
-            r = subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, gate, '--port',
-                                UNITS[u]['port']] + list(args), cwd=os.path.dirname(os.path.abspath(gate)),
+            r = subprocess.run([sys.executable, ELKLOCK, 'run', u, '--'] + modsgate_args(gate, u, UNITS[u]['port'])
+                               + list(args), cwd=os.path.dirname(os.path.abspath(gate)),
                                env=env, capture_output=True, text=True, encoding='utf-8',
                                errors='replace', timeout=300, **NOWIN)
             log.append('$ modsgate %s\n%s%s' % (' '.join(args), r.stdout, r.stderr))
@@ -2571,8 +2583,8 @@ class Daemon:
             env['ELEKLOADER'] = MODSGATE_ELEKLOADER
 
         def run(*args):
-            r = subprocess.run([sys.executable, ELKLOCK, 'run', u, '--', sys.executable, gate, '--port',
-                                UNITS[u]['port']] + list(args), cwd=os.path.dirname(os.path.abspath(gate)),
+            r = subprocess.run([sys.executable, ELKLOCK, 'run', u, '--'] + modsgate_args(gate, u, UNITS[u]['port'])
+                               + list(args), cwd=os.path.dirname(os.path.abspath(gate)),
                                env=env, capture_output=True, text=True, encoding='utf-8',
                                errors='replace', timeout=300, **NOWIN)
             log.append('$ modsgate %s\n%s%s' % (' '.join(args), r.stdout, r.stderr))
@@ -4044,11 +4056,11 @@ class Daemon:
         if MODSGATE_ELEKLOADER:
             env['ELEKLOADER'] = MODSGATE_ELEKLOADER
         if tgt == 'hardware':
-            cmd = [sys.executable, ELKLOCK, 'run', unit, '--', sys.executable, gate, '--port', UNITS[unit]['port']]
+            cmd = [sys.executable, ELKLOCK, 'run', unit, '--'] + modsgate_args(gate, unit, UNITS[unit]['port'])
         else:
             env['ELKLOCK_DIR'] = os.path.join(STATE, 'emulator-locks', s.sid[:8])
             os.makedirs(env['ELKLOCK_DIR'], exist_ok=True)
-            cmd = [sys.executable, gate, '--port', self.emu_port(s, unit)]
+            cmd = modsgate_args(gate, unit, self.emu_port(s, unit))
         return cmd + list(args), env
 
     def modsgate(self, s, unit, tgt, log, *args, timeout=900):
@@ -4094,7 +4106,7 @@ class Daemon:
 
     def mods_stage(self, s, unit, tgt, line, here):
         """A stage running one Drive Loader step (modsteps.py) through modsgate."""
-        step = modsteps.parse(line, here)
+        step = modsteps.parse(line, here, unit)
         folder = s.folder(unit) if tgt == 'hardware' else os.path.join(s.folder(unit), 'emulator')
 
         def run(rc, out):

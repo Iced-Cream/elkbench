@@ -397,7 +397,7 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
     # 5b. Drive Loader steps (modsteps.py): parse, none after a stock flash, expect-mods after a reboot
     if any(w and w[0].lower() in modsteps.OPS for _, w in all_words):
         e, f = modsteps.plan_rules(steps, stock_flash=bool(flash and stock),
-                                   here=here or (os.path.dirname(refs) if refs else '.'))
+                                   here=here or (os.path.dirname(refs) if refs else '.'), unit=unit)
         errors += e
         flags += f
     if not flash and any(w and w[0].lower() in KEY_OPS + ('dump', 'peek-set') for _, w in all_words):

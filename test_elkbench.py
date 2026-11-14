@@ -191,6 +191,32 @@ class ModsSteps(unittest.TestCase):
         self.assertEqual(rc, 0, out)
         self.assertNotIn('active', self.mods())
 
+    def test_a4_steps_name_the_unit(self):
+        """On the A4, modsgate gets --unit a4 (the policy records in the A4 claim's manifest); the
+        Rytm's calls stay as they were. The steps themselves run the same."""
+        cmd, _env = self.d.mods_cmd(self.s, 'a4', 'emulator', 'ls')
+        self.assertEqual(cmd[cmd.index(daemon.MODSGATE) + 1:], ['--unit', 'a4', '--port', 'tcp:127.0.0.1:1', 'ls'])
+        cmd, _env = self.d.mods_cmd(self.s, 'rytm', 'emulator', 'ls')
+        self.assertNotIn('--unit', cmd)
+        cmd, _env = self.d.mods_cmd(self.s, 'a4', 'hardware', 'ls')
+        self.assertEqual(cmd[cmd.index(daemon.MODSGATE) + 1:], ['--unit', 'a4', '--port', 'Analog Four', 'ls'])
+        step = lambda line: self.d.mods_stage(self.s, 'a4', 'emulator', line, self.dir)(0, '')  # noqa: E731
+        rc, out = step('mods-put "~T BASE" a.elemod')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('~T BASE/a.elemod', self.mods())
+        rc, out = step('mods-active "~T BASE/a.elemod"')
+        self.assertEqual(rc, 0, out)
+        self.assertIn(('a4', 'emulator'), self.s.mods_saved)
+        self.assertEqual(step('mods-active restore')[0], 0)
+        self.assertEqual(self.mods()['active'], 'OWNER.elemod')
+        self.assertEqual(step('mods-remove "~T BASE"')[0], 0)
+
+    def test_mods_steps_only_on_loader_units(self):
+        plan = [('load', ['mods-put "~T BASE" a.elemod'])]
+        self.d.check_mods_steps('a4', plan, None, 0, self.dir)
+        with self.assertRaisesRegex(daemon.Refused, 'Rytm and the A4'):
+            self.d.check_mods_steps('digitone', plan, None, 0, self.dir)
+
     def test_emulator_writes_use_scratch_locks(self):
         _cmd, env = self.d.mods_cmd(self.s, 'rytm', 'emulator', 'ls')
         self.assertNotEqual(env['ELKLOCK_DIR'], os.environ['ELKLOCK_DIR'])
@@ -2403,6 +2429,14 @@ class InProcess(unittest.TestCase):
                         '/mods/~T NAV/.armed', '/mods/~T NAV/~T A/active', '/mods/~T .', '/mods/~T NAV/..'):
                 with self.assertRaisesRegex(daemon.Refused, 'not a /mods test item|modsgate'):
                     daemon.drive_items({'drive_items': [{'unit': 'rytm', 'path': bad}]})
+            self.assertEqual(daemon.drive_items({'drive_items': [{'unit': 'a4', 'path': '/mods/~T DL/'}]}),
+                             {'a4': ['/mods/~T DL']})
+            with self.assertRaisesRegex(daemon.Refused, 'no \\+Drive sample tool'):
+                daemon.drive_items({'drive_items': [{'unit': 'a4', 'path': '/~T DL'}]})
+            with self.assertRaisesRegex(daemon.Refused, 'not a /mods test item'):
+                daemon.drive_items({'drive_items': [{'unit': 'a4', 'path': '/mods/DRUMS'}]})
+            with self.assertRaisesRegex(daemon.Refused, 'no Drive Loader /mods'):
+                daemon.drive_items({'drive_items': [{'unit': 'digitone', 'path': '/mods/~T DL'}]})
             daemon.MODSGATE = None
             with self.assertRaisesRegex(daemon.Refused, 'tools.modsgate is not set'):
                 daemon.drive_items({'drive_items': [{'unit': 'rytm', 'path': '/mods/~T NAV'}]})
@@ -2462,14 +2496,16 @@ class InProcess(unittest.TestCase):
         self.assertEqual(ran[-1], ('ls',))               # /mods listed last
         self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
 
-    def release_with_manifest(self, tree, manifest, refuse=()):
+    def release_with_manifest(self, tree, manifest, refuse=(), unit='rytm'):
         """Claim, write `manifest` as the claim's (as the write policy would), release with a
         fake modsgate over `tree`; rm of a name in `refuse` exits 3 (the policy). -> (ran, result
         or the Refused text, the handoff note)."""
-        ran = []
+        ran, units = [], []
 
         def fake(cmd, **kw):
-            args = cmd[cmd.index(daemon.MODSGATE) + 3:]
+            at = cmd.index(daemon.MODSGATE)
+            args = cmd[cmd.index('--port', at) + 2:]
+            units.append(cmd[cmd.index('--unit', at) + 1] if '--unit' in cmd[at:] else 'rytm')
             ran.append(tuple(args))
             if args[0] == 'ls':
                 rel = args[1] if len(args) > 1 else ''
@@ -2486,9 +2522,9 @@ class InProcess(unittest.TestCase):
         with open(daemon.MODSGATE, 'w') as fh:
             fh.write('# stand-in\n')
         self.d.check_connected = lambda unit, target: None
-        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', 'rytm', '--for', 'elkbench test'],
+        subprocess.run([sys.executable, daemon.ELKLOCK, 'claim', unit, '--for', 'elkbench test'],
                        env=self.s.env(), capture_output=True)
-        nonce = daemon.elklock.holder('rytm')['nonce']
+        nonce = daemon.elklock.holder(unit)['nonce']
         mpath = os.path.join(daemon.elklock.DIR, 'manifests', '%s.json' % nonce)
         os.makedirs(os.path.dirname(mpath), exist_ok=True)
         with open(mpath, 'w', encoding='utf-8') as fh:
@@ -2498,16 +2534,17 @@ class InProcess(unittest.TestCase):
                                                    else real_run(cmd, **kw))
         try:
             try:
-                res = self.d.t_release(self.s, {'unit': 'rytm', 'note': 'x'})
+                res = self.d.t_release(self.s, {'unit': unit, 'note': 'x'})
             except daemon.Refused as e:
                 res = str(e)
         finally:
             daemon.MODSGATE, daemon.subprocess.run = saved
             del self.d.check_connected
         try:
-            note = json.loads(read(os.path.join(daemon.elklock.DIR, 'rytm.handoff.json')))['note']
+            note = json.loads(read(os.path.join(daemon.elklock.DIR, '%s.handoff.json' % unit)))['note']
         except (OSError, ValueError):
             note = ''
+        self.assertEqual(set(units), {unit})            # modsgate asked about this unit's claim
         return ran, res, note
 
     def test_release_removes_claim_manifest(self):
@@ -2544,6 +2581,27 @@ class InProcess(unittest.TestCase):
         self.assertTrue(daemon.elklock.mine(daemon.elklock.holder('rytm'), session=self.s.sid))
         subprocess.run([sys.executable, daemon.ELKLOCK, 'release', 'rytm', '--note', 'test', '--no-snapshot'],
                        env=self.s.env(), capture_output=True)
+
+    def test_release_removes_a4_claim_manifest(self):
+        """On the A4 (its Drive Loader serves /mods through the same route), release removes what
+        the A4 claim's manifest records through modsgate --unit a4, and leaves the owner's items."""
+        tree = {'': [('drive-hello-0.1.elemod', False), ('dl-a4-0.1.elemod', False), ('~T A4', True)],
+                '~T A4': [('~T x-0.1.elemod', False)]}
+        manifest = {'files': {'dl-a4-0.1.elemod': {'put': 't', 'unit': 'a4'},
+                              '~T A4/~T x-0.1.elemod': {'put': 't', 'unit': 'a4'}},
+                    'folders': {'~T A4': {'first': 't', 'unit': 'a4'}}}
+        saved = daemon.clears_at_release
+        daemon.clears_at_release = lambda u: False      # the test slots: their own tests
+        try:
+            ran, res, note = self.release_with_manifest(tree, manifest, unit='a4')
+        finally:
+            daemon.clears_at_release = saved
+        self.assertEqual([a[1] for a in ran if a[0] == 'rm'], ['~T A4/~T x-0.1.elemod', '~T A4',
+                                                               'dl-a4-0.1.elemod'])
+        self.assertEqual(tree[''], [('drive-hello-0.1.elemod', False)])
+        self.assertIn('ok: released a4', res[0])
+        self.assertIn('/mods/dl-a4-0.1.elemod', note)
+        self.assertFalse(daemon.elklock.holder('a4'))
 
     def release_after_mods_remove(self, flash_after=True, put_again=False, stock=True):
         """A hardware mods-put and mods-remove of "~T BASE" through the stand-in modsgate (a go named

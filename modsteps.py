@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: GPL-2.0-or-later
-"""Plan steps for the Rytm's Drive Loader: mods tested on a fixed base build instead of a flashed
-build per test (decided 2026-11-09).
+"""Plan steps for the Drive Loader (the Rytm's, and the A4 MKII's): mods tested on a fixed base build
+instead of a flashed build per test (decided 2026-11-09).
 
     mods-put "~T NAME" FILE...     make the ~T folder below /mods if it is not there and upload the
                                    files into it (paths relative to the plan); release removes them
@@ -18,6 +18,11 @@ build per test (decided 2026-11-09).
                                    it put there, and list /mods to show it gone: before a stock
                                    flash, so stock never boots with a run's .elemod on /mods
 
+Both loaders serve /mods through the same Data RPC route, so the steps and modsgate are the same
+on both units. The A4 has no +Drive file system: its loader keeps /mods (folders 3 deep, as the
+Rytm's) in its own store in free +Drive sectors and writes an upload straight to them, so its file
+limit is the mods' area in core_ddr rather than a staging buffer (MAX_FILE).
+
 The loader links mods only at boot, so a new active takes effect after a reboot: a `power-cycle`
 step, or the base build flashed over itself in a plan of its own. The steps run through
 modsgate (the deployed write policy decides every write), on the unit under the claim or on the
@@ -29,7 +34,11 @@ import re
 import shlex
 
 OPS = ('mods-put', 'mods-active', 'expect-mods', 'mods-remove')
-MAX_FILE = 512 * 1024                 # the loader's staging buffer (DL_STAGING_SIZE)
+# the largest .elemod a mods-put uploads, per unit with a Drive Loader
+MAX_FILE = {
+    'rytm': 512 * 1024,               # the loader's staging buffer (DL_STAGING_SIZE)
+    'a4': 0x47C00000 - 0x45650000,    # core-a4mk2's mods area in core_ddr (37.7 MB); uploads go
+}                                     # straight to the loader's sector store, no staging buffer
 MAX_ACTIVE = 256                      # DL_MAX_MODS
 NAME_CHARS = re.compile(r"[A-Z0-9 +\-=&/#@?%$~]*")
 
@@ -56,11 +65,14 @@ def tname_ok(name):
     return name.startswith('~T ') and 0 < len(name) - 3 <= 15 and bool(NAME_CHARS.fullmatch(name[3:]))
 
 
-def parse(line, here):
+def parse(line, here, unit='rytm'):
     """A mods step line -> dict(op, ...), or raises ValueError with the reason. `here` is the plan's
-    folder, which relative file names are read from."""
+    folder, which relative file names are read from; `unit` the unit the plan runs on."""
     w = words(line)
     op = w[0].lower()
+    if unit not in MAX_FILE:
+        raise ValueError('%s: the %s has no Drive Loader (mods steps run on %s)'
+                         % (op, unit, ' and '.join(sorted(MAX_FILE))))
     if op == 'mods-put':
         if len(w) < 3:
             raise ValueError('mods-put "~T NAME" FILE...: a ~T folder and at least one .elemod')
@@ -75,9 +87,10 @@ def parse(line, here):
                 raise ValueError('mods-put %s: only .elemod files go into /mods' % f)
             if not os.path.isfile(p):
                 raise ValueError('mods-put %s: no such file' % p)
-            if os.path.getsize(p) > MAX_FILE:
-                raise ValueError('mods-put %s: %d bytes, over the loader\'s %d-byte staging buffer'
-                                 % (f, os.path.getsize(p), MAX_FILE))
+            if os.path.getsize(p) > MAX_FILE[unit]:
+                raise ValueError('mods-put %s: %d bytes, over the %s loader\'s %d-byte %s'
+                                 % (f, os.path.getsize(p), unit, MAX_FILE[unit],
+                                    'mods area' if unit == 'a4' else 'staging buffer'))
             files.append(p)
         names = [os.path.basename(p) for p in files]
         if len(set(names)) != len(names):
@@ -113,14 +126,14 @@ def parse(line, here):
     raise ValueError('%s is not a mods step' % w[0])
 
 
-def put_files(steps, here):
+def put_files(steps, here, unit='rytm'):
     """-> sorted [(file, None)] of every file a plan's mods-put steps upload (the caller adds
     sha256s): part of what an emulator pass vouches for."""
     out = set()
     for _, lines in steps:
         for l in lines:
             if op_of(l) == 'mods-put':
-                out.update(parse(l, here)['files'])
+                out.update(parse(l, here, unit)['files'])
     return sorted(out)
 
 
@@ -204,7 +217,7 @@ def expect(text, n, ids=()):
     return ok, lines
 
 
-def plan_rules(steps, stock_flash=False, here='.'):
+def plan_rules(steps, stock_flash=False, here='.', unit='rytm'):
     """The plan checker's rules for mods steps -> (errors, flags). steps: [(section, [lines])]."""
     errors, flags = [], []
     seen_active, rebooted, expected = False, False, True
@@ -218,7 +231,7 @@ def plan_rules(steps, stock_flash=False, here='.'):
             step = None
             if op in OPS:
                 try:
-                    step = parse(l, here)
+                    step = parse(l, here, unit)
                 except ValueError as e:
                     errors.append('[%s] %s' % (name, e))
                 if stock_flash:

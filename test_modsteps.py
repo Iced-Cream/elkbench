@@ -40,9 +40,31 @@ class Parse(unittest.TestCase):
             self.assertIn(why, str(c.exception))
         big = os.path.join(self.d, 'big.elemod')
         with open(big, 'wb') as fh:
-            fh.write(b'x' * (modsteps.MAX_FILE + 1))
+            fh.write(b'x' * (modsteps.MAX_FILE['rytm'] + 1))
         with self.assertRaises(ValueError):
             modsteps.parse('mods-put "~T BASE" big.elemod', self.d)
+
+    def test_put_limit_per_unit(self):
+        """The Rytm's loader stages an upload in 512 KB; the A4's writes it straight to its sector
+        store, so its limit is the mods area in core_ddr."""
+        big = os.path.join(self.d, 'big.elemod')
+        with open(big, 'wb') as fh:
+            fh.write(b'x' * (modsteps.MAX_FILE['rytm'] + 1))
+        with self.assertRaisesRegex(ValueError, 'staging buffer'):
+            modsteps.parse('mods-put "~T BASE" big.elemod', self.d, 'rytm')
+        self.assertEqual(modsteps.parse('mods-put "~T BASE" big.elemod', self.d, 'a4')['files'], [big])
+        e = plancheck.check([('s', ['mods-put "~T BASE" big.elemod'])], unit='rytm', here=self.d)['errors']
+        self.assertTrue(any('staging buffer' in x for x in e), e)
+        e = plancheck.check([('s', ['mods-put "~T BASE" big.elemod'])], unit='a4', here=self.d)['errors']
+        self.assertFalse([x for x in e if 'big.elemod:' in x], e)
+        with open(big, 'r+b') as fh:
+            fh.truncate(modsteps.MAX_FILE['a4'] + 1)
+        with self.assertRaisesRegex(ValueError, 'mods area'):
+            modsteps.parse('mods-put "~T BASE" big.elemod', self.d, 'a4')
+        with self.assertRaisesRegex(ValueError, 'no Drive Loader'):
+            modsteps.parse('mods-active none', self.d, 'digitone')
+        e, _f = modsteps.plan_rules([('s', ['mods-active none'])], unit='digitone')
+        self.assertTrue(e)
 
     def test_active(self):
         self.assertEqual(modsteps.parse('mods-active "~T BASE/a.elemod"', self.d)['paths'], ['~T BASE/a.elemod'])
