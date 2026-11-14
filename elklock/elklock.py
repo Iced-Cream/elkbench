@@ -17,7 +17,11 @@
     elklock.py break DEVICE --yes                  the person frees a stuck claim
     elklock.py hook                                PreToolUse hook (reads JSON on stdin)
 
-DEVICE: rytm, a4, digitone, digitakt (see DEVICES), or "all".
+DEVICE: rytm, a4, digitone, digitakt (see DEVICES), "all" (every unit), or a DIN MIDI
+interface: din-NAME for each [din.NAME] in elkbench's config.toml (a units.<unit>.din entry
+counts as one too). An interface is its own device because a cable can be moved from unit to
+unit: a run with DIN steps claims the interface with the unit, and no two sessions send into one
+interface at once. It has no OS, so its release reads nothing (no snapshot).
 A device's MIDI port (the handoff snapshot reads it there, and `status` looks for it):
 release --port NAME (one device), else ELKBENCH_<DEVICE>_PORT, else units.<device>.port in
 elkbench's config.toml, else the built-in name (DEVICES); for a unit behind a MIDI host
@@ -68,6 +72,7 @@ DEVICES = {
     'digitone': (r'digitone|digiusb', 'Digitone'),   # digiusb (digihealth) talks to the Digitone
     'digitakt': (r'digitakt', 'Digitakt'),           # digiusb with a Digitakt: name it, or claim both
 }
+UNIT_DEVICES = tuple(DEVICES)
 # device -> regex for a MIDI host's port name that reaches it (in a --port or ELKBENCH_<DEV>_PORT
 # value only: the host's name in a path names no unit). The Rytm is cabled to the Sidecar Pi.
 HOST_PORTS = {'rytm': r'sidecar'}
@@ -91,6 +96,36 @@ def load_config():
 
 
 CFG = load_config()
+DIN_PREFIX = 'din-'
+
+
+def din_interfaces(cfg):
+    """{device: MIDI port name} of the DIN MIDI interfaces in elkbench's config: each [din.NAME]
+    with port = 'NAME' (a part of it, or 'IN,OUT') is device din-NAME. An older units.<unit>.din
+    entry counts as an interface too (named from its port), once per port, so a config that
+    listed one interface on two units has one interface. Which unit an interface reaches is not
+    configured: elkbench asks with a read-only probe before a run's first DIN step."""
+    out, seen = {}, set()
+    for name, d in (cfg.get('din') or {}).items():
+        port = (d or {}).get('port') if isinstance(d, dict) else d
+        if port:
+            out[DIN_PREFIX + re.sub(r'[^a-z0-9]+', '-', name.lower()).strip('-')] = port
+            seen.add(port.split(',')[0].strip().lower())
+    for u in sorted((cfg.get('units') or {})):
+        port = (cfg['units'][u] or {}).get('din')
+        if port and port.split(',')[0].strip().lower() not in seen:
+            out[DIN_PREFIX + re.sub(r'[^a-z0-9]+', '-', port.split(',')[0].lower()).strip('-')] = port
+            seen.add(port.split(',')[0].strip().lower())
+    return out
+
+
+def is_din(dev):
+    return dev.startswith(DIN_PREFIX)
+
+
+DIN = din_interfaces(CFG)
+for _d, _p in DIN.items():         # the hook knows an interface by its port name on the line
+    DEVICES[_d] = (re.escape(_p.split(',')[0].strip()).replace(r'\ ', r'\s*'), _p)
 ELKFLASH_REPO = CFG.get('tools', {}).get('elkflash')          # None: an installed elkflash
 ANALOGHEALTH = CFG.get('tools', {}).get('analoghealth')
 RUNNER_DIR = os.path.join(ANALOGHEALTH, 'tools') if ANALOGHEALTH else None
@@ -100,10 +135,12 @@ def port_of(dev):
     """The device's MIDI port name (a part of it): ELKBENCH_<DEV>_PORT, else units.<dev>.port in
     elkbench's config, else the built-in name. A unit behind a MIDI host such as Sidecar has the
     host's port name. The hook still names units by the command's words (DEVICES), not by this."""
+    if is_din(dev):
+        return DEVICES[dev][1]
     return (os.environ.get('ELKBENCH_%s_PORT' % dev.upper())
             or CFG.get('units', {}).get(dev, {}).get('port') or DEVICES[dev][1])
 # commands that talk to a unit: the hook requires a claim before they run
-GUARD = ['analogusb', 'analogrun', 'digiusb', 'digirun', 'elkflash', 'obtr',
+GUARD = ['analogusb', 'analogrun', 'digiusb', 'digirun', 'elkflash', 'obtr', 'dinprobe',
          'asio_rec', 'asio_tone', 'asio_loop', 'wavein_rec', 'loopback.py'] + list(CFG.get('elklock', {}).get('guard', []))
 # a tool's name as a word of its own (analogrun, analogrun.py, tools\\analogrun.py), not inside a longer
 # name (test_analogusb.py) or a folder (analoghealth-gap10)
@@ -424,7 +461,7 @@ def devices(args):
     for a in args:
         a = a.lower()
         if a == 'all':
-            out += list(DEVICES)
+            out += list(UNIT_DEVICES)
         elif a in DEVICES:
             out.append(a)
         else:
@@ -708,6 +745,8 @@ def snapshot(dev, note, skip, port=None):
     """The handoff record: OS version, a screenshot and the note. Best-effort, read-only.
     `port`: the MIDI port to read them on (default: port_of)."""
     rec = {'time': now(), 'note': note, 'ended': 'released'}
+    if is_din(dev):
+        return rec                  # an interface: no OS, no screen
     if stalled(dev):
         # every MIDI call to a stalled unit blocks: read nothing, say why
         rec['os'] = 'not read: the unit STALLED on its restart (new OS written); power cycle by hand'
@@ -1046,11 +1085,12 @@ def hook():
                             or port_of(d) != DEVICES[d][1] and port_of(d).lower() in hosted)]
     holders = {d: holder(d) for d in DEVICES}
     ours = [d for d in DEVICES if mine(holders[d], session=session)]
+    # an interface's claim alone is not a unit's: a command naming no unit needs a unit claim
     missing = [d for d in named if d not in ours] if named else \
-        ([] if ours else ['(unit not named in the command)'])
+        ([] if any(not is_din(d) for d in ours) else ['(unit not named in the command)'])
     if ENGINE_TOOLS.search(run_part) and not OFFLINE.search(run_part):
         # Every unit, connected or not: one switched on midway joins the same Engine.
-        needed = list(DEVICES)
+        needed = list(UNIT_DEVICES)
         missing = sorted((set(missing) | {d for d in needed if d not in ours})
                          - {'(unit not named in the command)'}) \
             or ([] if ours else ['(every connected unit: the Overbridge Engine is shared)'])
