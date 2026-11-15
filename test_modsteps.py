@@ -132,6 +132,19 @@ class Expect(unittest.TestCase):
             self.assertEqual(len(modsteps.status(STATUS + stage)['records']),
                              len(modsteps.status(STATUS)['records']))
 
+    def test_a4_status_head_is_not_a_record(self):
+        # drive-loader-a4mk2's .status (seen in the emulator 2026-11-15): its own route line and a
+        # room: line in place of stage:; neither is a mod
+        a4 = ('drive-loader-a4mk2 route\nfolder /mods\nlast: -\nio: 0 0 0 0\ncheck: -\n'
+              'boot: 20178 us (checks 20170, link 7, inits 0)\n'
+              'room: 249229312 bytes in one run, 249229312 free; directory generation 0\n')
+        ok, lines = modsteps.expect(a4, 0)
+        self.assertTrue(ok, lines)
+        self.assertEqual(modsteps.status(a4)['records'], [])
+        two = a4 + 'drive-hello loaded 0 0\ndrive-pay loaded 0 0\n'
+        self.assertTrue(modsteps.expect(two, 2, ['drive-hello', 'drive-pay'])[0])
+        self.assertFalse(modsteps.expect(two, 1)[0])
+
     def test_v2_expect_parse(self):
         self.assertEqual(modsteps.parse('expect-mods 2 loaded a duck=18', '.')['ids'], ['a', 'duck=18'])
         with self.assertRaises(ValueError):

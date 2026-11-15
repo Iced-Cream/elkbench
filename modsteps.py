@@ -141,8 +141,10 @@ def status(text):
     """/mods/.status -> dict(records=[(id, state, code, arg, detail)], boot=str|None,
     skipped=str|None, check=str|None)."""
     out = dict(records=[], boot=None, skipped=None, check=None, store=None, sites={})
-    # `stage:` (top-staging loaders): the live stage, `stage: N bytes at 0xADDR, free tail|floor`
-    head = ('drive-loader route', 'folder ', 'last:', 'io:', 'stage:')
+    # `stage:` (top-staging loaders): the live stage, `stage: N bytes at 0xADDR, free tail|floor`;
+    # the A4 MKII's loader names itself `drive-loader-a4mk2 route` and gives its sector store's
+    # `room: N bytes in one run, M free; directory generation G` in place of a stage
+    head = ('drive-loader route', 'drive-loader-a4mk2 route', 'folder ', 'last:', 'io:', 'stage:', 'room:')
     for l in text.splitlines():
         l = l.rstrip()
         if not l or l.startswith(head):
