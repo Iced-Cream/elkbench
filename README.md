@@ -193,7 +193,8 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   policy's manifest is the A4 claim's; a mods-put file may be up to 512 KB on the Rytm, up to the
   37.7 MB mods area on the A4): `mods-put "~T NAME"
   FILE...` (makes the ~T folder below /mods, uploads the files; release removes them from the
-  claim's /mods manifest), `mods-active PATH...|none|restore` (the first one in a session saves
+  claim's /mods manifest; with `--new` after the folder, the folder must not be there and no mkdir
+  is sent, so the upload into a missing folder is what runs), `mods-active PATH...|none|restore` (the first one in a session saves
   /mods/active to the evidence folder; `restore` or release writes it back and reads it back byte
   for byte), `expect-mods N loaded [ID...]` (reads /mods/.status: exactly N `loaded` records,
   the IDs among them, no `skipped:` line, a `boot:` line; a machine assertion), `mods-remove
