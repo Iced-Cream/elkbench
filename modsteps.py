@@ -4,6 +4,9 @@ instead of a flashed build per test (decided 2026-11-09).
 
     mods-put "~T NAME" FILE...     make the ~T folder below /mods if it is not there and upload the
                                    files into it (paths relative to the plan); release removes them
+    mods-put "~T NAME" --new FILE...
+                                   the folder must not be in /mods; no mkdir: the upload names it,
+                                   and the loader makes it (an upload into a missing folder)
     mods-active PATH...            write /mods/active: the mods the next boot links, in this order
                                    (paths below /mods, in ~T folders). The first one in a session
                                    saves the active that was there; release writes it back
@@ -77,6 +80,11 @@ def parse(line, here, unit='rytm'):
         if len(w) < 3:
             raise ValueError('mods-put "~T NAME" FILE...: a ~T folder and at least one .elemod')
         folder = w[1].strip('/')
+        new = len(w) > 2 and w[2] == '--new'
+        if new:
+            w = w[:2] + w[3:]
+            if len(w) < 3:
+                raise ValueError('mods-put "~T NAME" --new FILE...: at least one .elemod')
         if '/' in folder or not tname_ok(folder):
             raise ValueError('mods-put %r: the folder is one ~T name below /mods (`~T ` and at most 15 '
                              'characters A-Z 0-9 space + - = & / # @ ? %% $ ~)' % w[1])
@@ -96,7 +104,7 @@ def parse(line, here, unit='rytm'):
         if len(set(names)) != len(names):
             raise ValueError('mods-put: two files named the same: %s' % ', '.join(sorted(
                 n for n in set(names) if names.count(n) > 1)))
-        return dict(op=op, folder=folder, files=files)
+        return dict(op=op, folder=folder, files=files, new=new)
     if op == 'mods-active':
         if len(w) == 2 and w[1].lower() in ('restore', 'none'):
             return dict(op=op, what=w[1].lower(), paths=[])

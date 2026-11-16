@@ -31,6 +31,15 @@ class Parse(unittest.TestCase):
         self.assertEqual(st['files'], [self.f])
         self.assertEqual(modsteps.put_files([('s', ['mods-put "~T BASE" a.elemod'])], self.d), [self.f])
 
+    def test_put_new(self):
+        """--new: an upload into a folder that isn't there (the loader makes it); no mkdir."""
+        st = modsteps.parse('mods-put "~T MF" --new a.elemod', self.d)
+        self.assertEqual((st['folder'], st['files'], st['new']), ('~T MF', [self.f], True))
+        self.assertFalse(modsteps.parse('mods-put "~T MF" a.elemod', self.d)['new'])
+        self.assertEqual(modsteps.put_files([('s', ['mods-put "~T MF" --new a.elemod'])], self.d), [self.f])
+        with self.assertRaises(ValueError):
+            modsteps.parse('mods-put "~T MF" --new', self.d)
+
     def test_put_refusals(self):
         for line, why in [('mods-put BASE a.elemod', '~T'), ('mods-put "~T BASE" b.elemod', 'no such'),
                           ('mods-put "~T bad lower" a.elemod', '~T'), ('mods-put "~T X/Y" a.elemod', '~T'),

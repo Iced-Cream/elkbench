@@ -4117,7 +4117,12 @@ class Daemon:
                     rc, out = self.modsgate(s, unit, tgt, log, 'ls')
                     if rc:
                         return 1, 'fail mods-put: modsgate ls /mods exit %d\n' % rc
-                    if (step['folder'], True) not in mods_rows(out):
+                    there = (step['folder'], True) in mods_rows(out)
+                    if step.get('new'):             # an upload into a missing folder: the loader makes it
+                        if there or step['folder'] in {n for n, _d in mods_rows(out)}:
+                            return 1, 'fail mods-put --new: /mods/%s is already there (ls)\n' % step['folder']
+                        said.append('/mods lists no %s: the upload makes it (no mkdir)' % step['folder'])
+                    elif not there:
                         rc, _ = self.modsgate(s, unit, tgt, log, 'mkdir', step['folder'])
                         if rc:
                             return 1, 'fail mods-put: mkdir %s exit %d\n' % (step['folder'], rc)
