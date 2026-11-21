@@ -53,6 +53,25 @@ class Rules(unittest.TestCase):
         lines = plancheck.go_lines(r)
         self.assertIn('evidence: [look]', lines[0])
 
+    def test_drive_put_needs_its_wait_in_the_same_part(self):
+        ok = GOOD + '[upload]\nsay proves works: it ends cut\ndrive-put /a.wav "/~T U/~T A"\ntap YES\n' \
+                    'wait 3\ndrive-put-wait 30 cut\n'
+        self.assertEqual(check(ok)['errors'], [])
+        self.assertIn(('upload', 'works'), check(ok)['proves'])      # drive-put-wait is an assertion
+        cases = {
+            'no wait': GOOD + '[u]\nsay proves evidence: x\ndrive-put /a.wav "/~T U/~T A"\n',
+            'wait alone': GOOD + '[u]\nsay proves works: x\ndrive-put-wait 3\n',
+            'two at once': GOOD + '[u]\nsay proves works: x\ndrive-put /a.wav "/~T U/~T A"\n'
+                                  'drive-put /a.wav "/~T U/~T B"\ndrive-put-wait 3\n',
+            'across a power cycle': GOOD + '[u]\nsay proves works: x\ndrive-put /a.wav "/~T U/~T A"\n'
+                                           'power-cycle\ndrive-put-wait 3\n',
+            'across a mods step': GOOD + '[u]\nsay proves works: x\ndrive-put /a.wav "/~T U/~T A"\n'
+                                         'expect-mods 1 loaded\ndrive-put-wait 3\n',
+        }
+        for why, text in cases.items():
+            with self.subTest(why=why):
+                self.assertTrue(any('drive-put' in e for e in check(text)['errors']), check(text)['errors'])
+
     def test_spp_beats_is_one_integer_0_to_16383(self):
         for good in ('spp 0', 'spp 1', 'spp 127', 'spp 128', 'spp 16383', 'spp 0x3FFF'):
             self.assertIsNone(plancheck.spp_error(good.split()), good)

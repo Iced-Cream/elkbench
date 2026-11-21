@@ -215,6 +215,17 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   others run with `run_plan target emulator start=START` (with `build`: a fresh emulator builds
   the start, then the plan; without: the next plan of a sequence, such as M1, the base over
   itself, M2, on the emulator that start run left), each recorded as that start's run.
+- **A +Drive upload in the background** (Rytm and A4 plans; needs an analoghealth with
+  `driveput.py`): `drive-put WAV PATH [gap=MS]` starts uploading a 16-bit 48 kHz WAV to the +Drive
+  file PATH over the plan's own port (Elektron's sample-store RPC, as samplegate sends it; the write
+  policy's `check_sample_path` is asked first), and the next steps run meanwhile, keys included;
+  `drive-put-wait S completed|cut|error|any` waits for it and is a machine assertion. The WAV is
+  given by its absolute path and is part of what a pass vouches for; the go request lists each
+  upload with its target and sha256, and refuses unless the target's top folder is in `drive_items`
+  (so the release removes it). The plan checker refuses a drive-put with no drive-put-wait in the
+  same part (before a power-cycle, replug-usb or mods step), two at once, and one in an `[on fail]`
+  section. Made for an upload in flight while a restart is confirmed (one TCP client per emulator
+  port, so a second process could not upload beside the plan).
 - **No `stats` on remote-only builds**: a plan or steps call with a `stats` step is refused when
   the OS (the plan's flash, the unit's last flash or the emulator's build) is one of the unit's
   `no_stats` files.

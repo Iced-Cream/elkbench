@@ -519,6 +519,15 @@ def modsgate_args(gate, u, port):
     return [sys.executable, gate] + (['--unit', u] if u != 'rytm' else []) + ['--port', port]
 
 
+def drive_put_args(w):
+    """`drive-put WAV PATH [gap=MS]` (analogrun's background +Drive upload) -> (WAV, PATH)."""
+    a = [x for x in w[1:] if '=' not in x]
+    if len(a) != 2 or not a[1].startswith('/'):
+        raise Refused('drive-put WAV PATH [gap=MS]: a WAV and an absolute +Drive file path, not %r'
+                      % ' '.join(w))
+    return a[0], a[1]
+
+
 def drive_rows(ls_text):
     """samplegate `ls` output ('D NAME SIZE' / 'F NAME SIZE' rows) -> [(name, is_folder)]."""
     out = []
@@ -1764,7 +1773,7 @@ class Daemon:
         ref_sums = [(f, sha256(os.path.join(refs, f))) for f in ref_files]
         # send in a plan: a file an earlier capture step saved in the run folder, or an absolute
         # path, which must hold dumps only (as steps' send) and is part of what a pass vouches for
-        captured, send_sums = set(), []
+        captured, send_sums, drive_puts = set(), [], []
         for _, lines in steps:
             for l in lines:
                 w = shlex.split(l, comments=True)
@@ -1778,6 +1787,13 @@ class Daemon:
                                       'capture step saved' % w[1])
                     self.check_dumps(w[1], here)
                     send_sums.append((w[1], sha256(w[1])))
+                elif w[0].lower() == 'drive-put':
+                    put = drive_put_args(w)
+                    if not os.path.isabs(put[0]) or not os.path.isfile(put[0]):
+                        raise Refused('drive-put %s: a plan uploads a WAV by its absolute path, and the '
+                                      'file must exist' % put[0])
+                    drive_puts.append((l.split('#')[0].strip(), put[0], sha256(put[0]),
+                                       os.path.getsize(put[0]), put[1]))
         # start = START: the plan's own run starts from that built-in start, not a fresh emulator
         # (a plan for a state only a start leaves, such as a project loaded from a cleared slot)
         home = (settings.get('start') or '').strip().lower() or None
@@ -1796,6 +1812,8 @@ class Daemon:
         vouched = {'unit': unit, 'steps': steps, 'flash': flash_sha, 'refs': ref_sums}
         if send_sums:                 # left out otherwise, so earlier passes still count
             vouched['sends'] = send_sums
+        if drive_puts:                # likewise: the WAVs a plan's drive-put steps upload
+            vouched['drive_puts'] = [(f, d, path) for _l, f, d, _n, path in drive_puts]
         # mods-put: the files a plan uploads to /mods are part of what its pass vouches for
         mods_lines = [l for _, lines in steps for l in lines if modsteps.is_mods_step(l)]
         mods_files = []
@@ -1849,6 +1867,7 @@ class Daemon:
                     old_key=old_key, os_file=os_file, os_sha=os_sha, flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, stock_writes=stock_writes, setup=setup, din=bool(din),
                     audio_waits=audio_waits(steps), power_cycles=cycles, replugs=plugs, home=home,
                     mods_steps=mods_lines, mods_files=mods_files, stages=stage_steps(steps),
+                    drive_puts=drive_puts,
                     name=settings.get('name') or os.path.splitext(os.path.basename(path))[0],
                     emulator=settings.get('emulator', 'no').lower() == 'yes', rel=rel)
 
@@ -2882,6 +2901,10 @@ class Daemon:
                         for f, d, n in info['mods_files']) +
                 ''.join('\n  MODS STEP (through modsgate and the write policy): ' + l.split('#')[0].strip()
                         for l in info['mods_steps']) +
+                ''.join('\n  +DRIVE UPLOAD IN THE BACKGROUND (drive-put: Elektron\'s sample-store RPC over the '
+                        'plan\'s own port, the write policy\'s sample path rule asked first; the next steps run '
+                        'meanwhile): %s\n    writes %s; WAV %s, sha256 %s, %d bytes'
+                        % (l, path, os.path.basename(f), d, n) for l, f, d, n, path in info.get('drive_puts') or []) +
                 ('\n  /mods/active: saved to the run folder before the first mods-active, written back by '
                  'mods-active restore or at release' if any(modsteps.op_of(l) == 'mods-active'
                                                            for l in info['mods_steps']) else '')))
@@ -2935,7 +2958,14 @@ class Daemon:
                 text.append('AT RELEASE on %s, however the run ends: project slots %s, whatever they hold, '
                             'backed up to the run folder and erased (data clear), then listed to show them empty'
                             % (u, slot_text(UNITS[u]['clear_at_release'])))
-        for u, paths in sorted(drive_items(a).items()):
+        named = drive_items(a)
+        for info in infos:
+            for _l, _f, _d, _n, path in info.get('drive_puts') or []:
+                top = '/' + path.strip('/').split('/')[0]
+                if top not in named.get(info['unit'], []):
+                    raise Refused('%s: drive-put writes %s; name %s in drive_items, so the release removes '
+                                  'it however the run ends' % (info['name'], path, top))
+        for u, paths in sorted(named.items()):
             mods = [p for p in paths if p.startswith('/mods/')]
             root = [p for p in paths if p not in mods]
             how = []

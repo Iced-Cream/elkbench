@@ -2828,6 +2828,49 @@ class InProcess(unittest.TestCase):
         self.assertNotEqual(info('send "%s"' % dump.replace('\\', '/'))['key'], sent)
         self.assertNotEqual(plain, sent)
 
+    def test_plan_drive_put(self):
+        """drive-put: the WAV by absolute path, vouched for by the pass, listed in the go, and its
+        +Drive folder named in drive_items."""
+        import wave
+        with open(os.path.join(PLANS, 'menus.txt'), encoding='utf-8') as fh:
+            text = fh.read()
+        plan = os.path.join(PLANS, 'drive-put.txt')
+        wav = os.path.join(TMP, 'up.wav')
+        with wave.open(wav, 'wb') as w:
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(48000)
+            w.writeframes(bytes(400))
+        fwd = wav.replace('\\', '/')
+
+        def info(steps):
+            with open(plan, 'w', encoding='utf-8') as fh:
+                fh.write(text + '\n[upload]\nsay proves works: it ends cut\n' + steps + '\n')
+            return self.d.plan_info(plan)
+        plain = info('expect-screen home 2')['key']
+        with self.assertRaisesRegex(daemon.Refused, 'absolute path'):
+            info('drive-put up.wav "/~T UP/~T A"\ndrive-put-wait 5 any')
+        with self.assertRaisesRegex(daemon.Refused, 'absolute \\+Drive file path'):
+            info('drive-put "%s" "~T A"\ndrive-put-wait 5 any' % fwd)
+        one = info('drive-put "%s" "/~T UP/~T A" gap=20\ndrive-put-wait 5 cut' % fwd)
+        self.assertNotEqual(one['key'], plain)
+        self.assertEqual(one['drive_puts'][0][4], '/~T UP/~T A')
+        self.assertEqual(one['check']['errors'], [])
+        with wave.open(wav, 'wb') as w:            # another WAV: another key
+            w.setnchannels(1)
+            w.setsampwidth(2)
+            w.setframerate(48000)
+            w.writeframes(bytes(402))
+        self.assertNotEqual(info('drive-put "%s" "/~T UP/~T A" gap=20\ndrive-put-wait 5 cut' % fwd)['key'],
+                            one['key'])
+        self.assertTrue(info('drive-put "%s" "/~T UP/~T A"' % fwd)['check']['errors'])   # no wait
+
+    def test_drive_put_args(self):
+        self.assertEqual(daemon.drive_put_args(['drive-put', 'a.wav', '/~T X/~T Y', 'gap=5']), ('a.wav', '/~T X/~T Y'))
+        for bad in (['drive-put', 'a.wav'], ['drive-put', 'a.wav', '~T X'], ['drive-put', 'a', 'b', 'c']):
+            with self.subTest(bad=bad), self.assertRaises(daemon.Refused):
+                daemon.drive_put_args(bad)
+
     def kit_request(self):
         req = os.path.join(TMP, 'kitreq.syx')
         with open(req, 'wb') as fh:

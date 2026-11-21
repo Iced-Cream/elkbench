@@ -43,10 +43,11 @@ import modsteps
 
 PROVES = ('setup', 'set-and-kept', 'works', 'evidence')
 # steps whose failure stops the run: machine assertions
-ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping', 'expect-mods')
+ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping', 'expect-mods',
+              'drive-put-wait')
 # steps that change what the unit holds or a value on it (keys only move through the UI)
 WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', 'at', 'pc', 'spp', 'turn', 'pad',
-             'padplay', 'mods-put', 'mods-active', 'mods-remove', 'tap-noreply')
+             'padplay', 'mods-put', 'mods-active', 'mods-remove', 'tap-noreply', 'drive-put')
 # steps that need a remote-key path in the OS (analoghealth, or a remote-only build)
 KEY_OPS = ('tap', 'hold', 'release', 'keys', 'turn', 'pad', 'padplay', 'tap-noreply')
 # steps that only move through menus or look: nothing between a save and a check but these
@@ -159,6 +160,39 @@ def noreply_rules(steps, unit):
     return errors, flags
 
 
+def drive_put_rules(steps):
+    """-> errors for `drive-put` (a +Drive upload in the background, analogrun's driveput.py): each
+    is followed by its `drive-put-wait` within the same part of the plan (the runner's process ends
+    at a power-cycle, replug-usb or elkbench's own mods steps, and the upload with it), one at a
+    time, and not in an [on fail] section; a drive-put-wait needs a drive-put before it."""
+    errors, open_ = [], None
+    for name, lines in steps:
+        for l in lines:
+            w = words(l)
+            if not w:
+                continue
+            op = w[0].lower()
+            if op == 'drive-put':
+                if on_fail(name):
+                    errors.append('[%s] drive-put: an [on fail] section reads only' % name)
+                if open_:
+                    errors.append('[%s] drive-put while the one in [%s] runs: drive-put-wait first'
+                                  % (name, open_))
+                open_ = name
+            elif op == 'drive-put-wait':
+                if not open_:
+                    errors.append('[%s] drive-put-wait with no drive-put before it' % name)
+                open_ = None
+            elif open_ and (op in PART_ENDS or op in modsteps.OPS):
+                errors.append('[%s] %s while the drive-put in [%s] runs: the runner (and the upload) ends '
+                              'there; drive-put-wait before it' % (name, op, open_))
+                open_ = None
+    if open_:
+        errors.append('[%s] drive-put with no drive-put-wait after it: say how it must end '
+                      '(drive-put-wait S completed|cut|error|any)' % open_)
+    return errors
+
+
 def is_assert(w):
     if not w:
         return False
@@ -257,6 +291,7 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
     errors, flags, proves = [], [], []
     contrasts = contrasts_of(steps)
     errors += arg_errors(steps)
+    errors += drive_put_rules(steps)
     e, f = noreply_rules(steps, unit)
     errors += e
     flags += f
