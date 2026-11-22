@@ -111,6 +111,9 @@ elif op == 'get':
 elif op == 'restore-active':
     m['active'] = open(rest[0]).read(); save()
 elif op == 'rm':
+    if rest[0] in os.environ.get('FAKE_HELD', '').split('|'):   # a file in use: the unit refuses the Clear
+        print('REFUSED: /mods/%s is in use (its mod runs with a payload the unit keeps): restart the unit first' % rest[0])
+        sys.exit(2)
     if rest[0] in m:
         m.pop(rest[0])
     else:
@@ -181,6 +184,35 @@ class ModsSteps(unittest.TestCase):
         rc, out = self.run_step('mods-remove "~T BASE"')         # gone: says so, removes nothing
         self.assertEqual(rc, 1)
         self.assertIn('not there', out)
+
+    def test_clear_refused(self):
+        """mods-clear-refused: a Clear of a file in use is refused, the file is listed at the same size
+        and its payload line stays; a file not in use is never sent a Clear; a Clear that deletes fails."""
+        self.addCleanup(os.environ.pop, 'FAKE_HELD', None)
+        self.assertEqual(self.run_step('mods-put "~T BASE" a.elemod')[0], 0)
+        with open(os.environ['FAKE_STATUS'], 'w') as fh:
+            fh.write('payloads: 1 kept, 0 lost\npayload 163e1d60 3 /mods/~T BASE/a.elemod\n')
+        os.environ['FAKE_HELD'] = '~T BASE/a.elemod'
+        rc, out = self.run_step('mods-clear-refused "~T BASE" a.elemod')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('the Clear was refused (REFUSED: /mods/~T BASE/a.elemod is in use', out)
+        self.assertIn('still listed at 6 bytes', out)   # the stand-in keeps hex
+        self.assertIn('~T BASE/a.elemod', self.mods())
+        os.environ['FAKE_HELD'] = ''                            # the unit would delete it
+        rc, out = self.run_step('mods-clear-refused "~T BASE" a.elemod')
+        self.assertEqual(rc, 1)
+        self.assertIn('not refused as in use', out)
+        self.assertNotIn('~T BASE/a.elemod', self.mods())
+        with open(os.environ['FAKE_STATUS'], 'w') as fh:        # not in use: nothing sent
+            fh.write('payloads: 0 kept, 0 lost\n')
+        self.assertEqual(self.run_step('mods-put "~T BASE" a.elemod')[0], 0)
+        rc, out = self.run_step('mods-clear-refused "~T BASE" a.elemod')
+        self.assertEqual(rc, 1)
+        self.assertIn('not in use', out)
+        self.assertIn('~T BASE/a.elemod', self.mods())
+        rc, out = self.run_step('mods-clear-refused "~T BASE" b.elemod')
+        self.assertEqual(rc, 1)
+        self.assertIn('not listed before', out)
 
     def test_put_pending(self):
         """mods-put --pending: an upload over a file in use, kept as NAME.new (0.12 pin: exit 0; older

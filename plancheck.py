@@ -44,10 +44,11 @@ import modsteps
 PROVES = ('setup', 'set-and-kept', 'works', 'evidence')
 # steps whose failure stops the run: machine assertions
 ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping', 'expect-mods', 'expect-status',
-              'drive-put-wait')
+              'drive-put-wait', 'mods-clear-refused')
 # steps that change what the unit holds or a value on it (keys only move through the UI)
 WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', 'at', 'pc', 'spp', 'turn', 'pad',
-             'padplay', 'mods-put', 'mods-active', 'mods-remove', 'tap-noreply', 'drive-put')
+             'padplay', 'mods-put', 'mods-active', 'mods-remove', 'tap-noreply', 'drive-put',
+             'mods-clear-refused')
 # steps that need a remote-key path in the OS (analoghealth, or a remote-only build)
 KEY_OPS = ('tap', 'hold', 'release', 'keys', 'turn', 'pad', 'padplay', 'tap-noreply')
 # steps that only move through menus or look: nothing between a save and a check but these

@@ -119,6 +119,19 @@ class Parse(unittest.TestCase):
                 modsteps.parse(line, self.d)
 
 
+    def test_clear_refused_parse(self):
+        self.assertEqual(modsteps.parse('mods-clear-refused "~T BASE" "~T x-0.1.elemod"', self.d),
+                         dict(op='mods-clear-refused', folder='~T BASE', file='~T x-0.1.elemod'))
+        for line in ('mods-clear-refused "~T BASE"', 'mods-clear-refused MINE x.elemod',
+                     'mods-clear-refused "~T BASE" a/x.elemod', 'mods-clear-refused "~T BASE" active',
+                     'mods-clear-refused "~T BASE" x.elemod y.elemod'):
+            with self.assertRaises(ValueError, msg=line):
+                modsteps.parse(line, self.d)
+        e = plancheck.check([('s', ['say proves works: the Clear of a file in use is refused',
+                                    'mods-clear-refused "~T BASE" x.elemod'])], unit='rytm', here=self.d)['errors']
+        self.assertFalse([x for x in e if 'machine assertion' in x], e)
+
+
 class Expect(unittest.TestCase):
     def test_pass(self):
         ok, lines = modsteps.expect(STATUS, 2, ['dl256-002'])

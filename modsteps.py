@@ -38,6 +38,12 @@ instead of a flashed build per test (decided 2026-11-09).
     mods-remove "~T NAME"          remove a ~T folder this session's mods-put made, with the files
                                    it put there, and list /mods to show it gone: before a stock
                                    flash, so stock never boots with a run's .elemod on /mods
+    mods-clear-refused "~T NAME" FILE
+                                   a Data RPC Clear (USB delete, modsgate rm) of a file in use that
+                                   this session's mods-put made: passes only when the unit refuses
+                                   it as in use, the file is still listed at the same size after,
+                                   and its `payload` line is still in /mods/.status (drive-loader
+                                   0.12: a running mod's file whose payload the unit keeps)
 
 Both loaders serve /mods through the same Data RPC route, so the steps and modsgate are the same
 on both units. The A4 has no +Drive file system: its loader keeps /mods (folders 3 deep, as the
@@ -54,7 +60,7 @@ import os
 import re
 import shlex
 
-OPS = ('mods-put', 'mods-active', 'expect-mods', 'expect-status', 'mods-remove')
+OPS = ('mods-put', 'mods-active', 'expect-mods', 'expect-status', 'mods-remove', 'mods-clear-refused')
 # the largest .elemod a mods-put uploads, per unit with a Drive Loader
 MAX_FILE = {
     'rytm': 512 * 1024,               # the loader's staging buffer (DL_STAGING_SIZE)
@@ -158,6 +164,13 @@ def parse(line, here, unit='rytm'):
         if not folder or '/' in folder or not tname_ok(folder):
             raise ValueError('mods-remove "~T NAME": one ~T folder below /mods that a mods-put made')
         return dict(op=op, folder=folder)
+    if op == 'mods-clear-refused':
+        folder = w[1].strip('/') if len(w) == 3 else ''
+        name = w[2] if len(w) == 3 else ''
+        if not folder or '/' in folder or not tname_ok(folder) or not name.lower().endswith('.elemod')                 or '/' in name or name.startswith('.'):
+            raise ValueError('mods-clear-refused "~T NAME" FILE: one .elemod file (a bare name) in a ~T folder '
+                             'below /mods that a mods-put made')
+        return dict(op=op, folder=folder, file=name)
     raise ValueError('%s is not a mods step' % w[0])
 
 

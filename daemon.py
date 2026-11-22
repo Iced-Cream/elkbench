@@ -311,7 +311,8 @@ def boot_from_flash(e):
 
 def is_stage_step(line):
     """A step elkbench runs itself between parts of a plan: `power-cycle`, `replug-usb`, or a
-    Drive Loader step (modsteps.py: mods-put, mods-active, expect-mods, expect-status, mods-remove)."""
+    Drive Loader step (modsteps.py: mods-put, mods-active, expect-mods, expect-status, mods-remove,
+    mods-clear-refused)."""
     return is_power_cycle(line) or is_replug_usb(line) or modsteps.is_mods_step(line)
 
 
@@ -4294,6 +4295,49 @@ class Daemon:
                         s.mods_gone.setdefault(unit, {})['/mods/' + step['folder']] = (
                             next(s.steps), time.strftime('%H:%M:%S'),
                             ', '.join(n + ('/' if d else '') for n, d in rows) or 'empty')
+                elif step['op'] == 'mods-clear-refused':
+                    # a USB delete (Data RPC Clear through modsgate rm, which the write policy allows only
+                    # for a ~T file this claim put) of a file in use: refused, the file listed at the same
+                    # size after, and its `payload` line still in .status (drive-loader 0.12)
+                    rel = step['folder'] + '/' + step['file']
+                    path = '/mods/' + rel
+                    held = dict(folder=step['folder'], files=[step['file']])
+
+                    def size_of():
+                        rc, out = self.modsgate(s, unit, tgt, log, 'ls', step['folder'])
+                        if rc:
+                            return rc, None
+                        for line in out.splitlines():
+                            w = line.rstrip().rsplit(' ', 1)
+                            if len(w) == 2 and w[1].isdigit() and w[0] == step['file']:
+                                return 0, int(w[1])
+                        return 0, None
+                    rc, before = size_of()
+                    if rc or before is None:
+                        return 1, 'fail mods-clear-refused: %s not listed before (%s): nothing sent\n' % (
+                            path, 'ls exit %d' % rc if rc else 'not in /mods/%s' % step['folder'])
+                    if path not in self.mods_in_use(s, unit, tgt, log, folder, held):
+                        return 1, ('fail mods-clear-refused: %s has no payload line in /mods/.status, so it is not '
+                                   'in use and a Clear would delete it: nothing sent\n' % path)
+                    rc, out = self.modsgate(s, unit, tgt, log, 'rm', rel)
+                    why = ' / '.join(l.strip() for l in out.splitlines()
+                                     if l.strip().startswith(('REFUSED', 'refused')))
+                    if rc == 3:
+                        return 1, 'fail mods-clear-refused: the write policy refused the Clear of %s (%s)\n' % (
+                            path, why)
+                    if rc != 2 or 'in use' not in out:
+                        return 1, ('fail mods-clear-refused: the Clear of %s was not refused as in use (modsgate rm '
+                                   'exit %d%s)\n' % (path, rc, ': ' + why if why else ''))
+                    rc, after = size_of()
+                    if rc or after != before:
+                        return 1, 'fail mods-clear-refused: %s after the refused Clear: %s, before %d bytes\n' % (
+                            path, 'ls exit %d' % rc if rc else 'not listed' if after is None else '%d bytes' % after,
+                            before)
+                    if path not in self.mods_in_use(s, unit, tgt, log, folder, held):
+                        return 1, ('fail mods-clear-refused: %s lost its payload line in /mods/.status after the '
+                                   'Clear\n' % path)
+                    said.append('ok mods-clear-refused %s: the Clear was refused (%s); still listed at %d bytes, '
+                                'its payload line still in /mods/.status' % (path, why, after))
                 else:                                       # expect-mods, expect-status
                     got = os.path.join(folder, 'mods-status-%s.txt' % time.strftime('%H%M%S'))
                     rc, _ = self.modsgate(s, unit, tgt, log, 'get', '.status', '--out', got, timeout=120)
