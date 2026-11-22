@@ -89,6 +89,29 @@ class Parse(unittest.TestCase):
         with self.assertRaises(ValueError):
             modsteps.parse('expect-mods two loaded', self.d)
 
+    def test_put_pending_parse(self):
+        st = modsteps.parse('mods-put "~T PAY" --pending a.elemod', self.d)
+        self.assertEqual((st['pending'], st['new'], st['files']), (True, False, [os.path.join(self.d, 'a.elemod')]))
+        self.assertFalse(modsteps.parse('mods-put "~T PAY" a.elemod', self.d)['pending'])
+        self.assertTrue(modsteps.parse('mods-put "~T PAY" --new a.elemod', self.d)['new'])
+        for line in ('mods-put "~T PAY" --pending', 'mods-put "~T PAY" --new --pending a.elemod',
+                     'mods-put "~T PAY" a.elemod --pending', 'mods-put "~T PAY" --later a.elemod'):
+            with self.assertRaises(ValueError, msg=line):
+                modsteps.parse(line, self.d)
+        # its file is part of what an emulator pass vouches for, as with the plain form
+        self.assertEqual(modsteps.put_files([('s', ['mods-put "~T PAY" --pending a.elemod'])], self.d),
+                         [os.path.join(self.d, 'a.elemod')])
+
+    def test_expect_status_parse(self):
+        st = modsteps.parse('expect-status "updates at boot: 1 applied" "pending /mods/~T PAY/x.elemod"', self.d)
+        self.assertEqual(st['texts'], ['updates at boot: 1 applied', 'pending /mods/~T PAY/x.elemod'])
+        for line in ('expect-status', 'expect-status ""'):
+            with self.assertRaises(ValueError, msg=line):
+                modsteps.parse(line, self.d)
+        e = plancheck.check([('s', ['say proves works: the boot swapped the update in',
+                                    'expect-status "updates at boot: 1 applied"'])], unit='rytm', here=self.d)['errors']
+        self.assertFalse([x for x in e if 'machine assertion' in x], e)
+
     def test_remove_parse(self):
         self.assertEqual(modsteps.parse('mods-remove "~T BASE"', self.d), dict(op='mods-remove', folder='~T BASE'))
         for line in ('mods-remove MINE', 'mods-remove "~T A/B"', 'mods-remove', 'mods-remove "~T A" "~T B"'):
@@ -153,6 +176,126 @@ class Expect(unittest.TestCase):
         two = a4 + 'drive-hello loaded 0 0\ndrive-pay loaded 0 0\n'
         self.assertTrue(modsteps.expect(two, 2, ['drive-hello', 'drive-pay'])[0])
         self.assertFalse(modsteps.expect(two, 1)[0])
+
+    # drive-loader-ar2 0.11's .status as the boot writes it (route.c at fork 8f39aca: stage and store,
+    # no payload lines)
+    STATUS_011 = ('drive-loader route\nfolder /mods\nlast: -\nio: 0 6 1100399900 6\ncheck: -\n'
+                  'boot: 311705 us (checks 25127, link 279801, inits 6776)\n'
+                  'stage: 4853760 bytes at 0x47b5e000, free tail\n'
+                  'store: id 0xf3ef8186, 5 fields, 0 parked, kept\n'
+                  'dl256-001 loaded 0 0\nduck loaded 0 0\n'
+                  'site duck 0x401c5500 4\nsite duck 0x401c5504 4\n')
+    # drive-loader-ar2 0.12 (fork drive-v2 d25b5ba), read word for word from the PCK2 emulator gate
+    # (Projects\ARMKII\work\drive-loader\payload-hooks\evidence\pck2\mods-status-112733.txt): the boot
+    # after an upload over a file in use, which swapped the update in
+    STATUS_012 = ('drive-loader route\nfolder /mods\nlast: -\nio: 0 6 1100399900 6\ncheck: -\n'
+                  'boot: 227939 us (checks 25320, link 202618, inits 0)\n'
+                  'stage: 4707120 bytes at 0x47b81cd0, free tail\n'
+                  'store: id 0xf869f328, 0 fields, 0 parked, kept\n'
+                  'payloads: 1 kept, 0 lost\n'
+                  'updates at boot: 1 applied, 0 failed\n'
+                  'payload 163e1d60 204800 /mods/~T PAY/~T payload-check-0.1.elemod\n'
+                  'payload-check loaded 0 0\n')
+    # ... and evidence\mods-status-110558.txt: an upload over the file waiting as <name>.new
+    STATUS_012_PENDING = ('drive-loader route\nfolder /mods\n'
+                          'last: pending restart: ~T PAY/~T payload-check-0.1.elemod\n'
+                          'io: 1 1459 1099941272 427443\ncheck: 1/1 /mods/~T PAY\n'
+                          'boot: 214538 us (checks 25329, link 189208, inits 0)\n'
+                          'stage: 4711216 bytes at 0x47b80cd0, free tail\n'
+                          'store: id 0xf869f328, 0 fields, 0 parked, written\n'
+                          'payloads: 1 kept, 0 lost\n'
+                          'payload 163e1d60 230400 /mods/~T PAY/~T payload-check-0.1.elemod\n'
+                          'pending /mods/~T PAY/~T payload-check-0.1.elemod\n'
+                          'payload-check loaded 0 0\n')
+
+    def test_011_status(self):
+        st = modsteps.status(self.STATUS_011)
+        self.assertEqual([r[0] for r in st['records']], ['dl256-001', 'duck'])
+        self.assertEqual(st['sites'], {'duck': 2})
+        self.assertEqual(st['payloads'], dict(summary=None, updates=None, entries=[], pending=[]))
+        self.assertEqual(st['unknown'], [])
+        ok, lines = modsteps.expect(self.STATUS_011, 2, ['duck=2'])
+        self.assertTrue(ok, lines)
+        self.assertFalse(any(l.startswith('payload') for l in lines), lines)
+
+    def test_012_payload_lines_are_not_records(self):
+        st = modsteps.status(self.STATUS_012)
+        self.assertEqual(st['records'], [('payload-check', 'loaded', '0', '0', '')])
+        self.assertEqual(st['payloads'], dict(
+            summary='1 kept, 0 lost', updates='1 applied, 0 failed',
+            entries=[('163e1d60', '204800', '/mods/~T PAY/~T payload-check-0.1.elemod')], pending=[]))
+        self.assertEqual(st['unknown'], [])
+        ok, lines = modsteps.expect(self.STATUS_012, 1, ['payload-check'])
+        self.assertTrue(ok, lines)
+        self.assertIn('payloads: 1 kept, 0 lost', lines)
+        self.assertIn('updates at boot: 1 applied, 0 failed', lines)
+        self.assertIn('1 records, 1 loaded', lines)
+        self.assertFalse(modsteps.expect(self.STATUS_012, 2)[0])
+        self.assertFalse(modsteps.expect(self.STATUS_012, 1, ['other'])[0])
+
+    def test_012_pending(self):
+        st = modsteps.status(self.STATUS_012_PENDING)
+        self.assertEqual(len(st['records']), 1)
+        self.assertEqual(st['payloads']['pending'], ['/mods/~T PAY/~T payload-check-0.1.elemod'])
+        self.assertIsNone(st['payloads']['updates'])
+        ok, lines = modsteps.expect(self.STATUS_012_PENDING, 1, ['payload-check'])
+        self.assertTrue(ok, lines)
+        self.assertIn('pending /mods/~T PAY/~T payload-check-0.1.elemod', lines)
+
+    def test_012_failures_still_fail(self):
+        refused = self.STATUS_012.replace('payload-check loaded 0 0', 'payload-check refused 16 3 core_machines')
+        self.assertFalse(modsteps.expect(refused, 0)[0])
+        self.assertFalse(modsteps.expect(refused, 1)[0])
+        skipped = self.STATUS_012.replace('payload-check loaded 0 0\n', 'skipped: after a failed start\n')
+        self.assertFalse(modsteps.expect(skipped, 0)[0])
+        self.assertFalse(modsteps.expect(self.STATUS_012.replace('kept\n', 'write failed\n', 1), 1)[0])
+        self.assertFalse(modsteps.expect(self.STATUS_012.replace('loaded 0 0', '? 0 0'), 1)[0])
+
+    def test_mod_named_like_a_metadata_word_is_a_record(self):
+        # shape decides before the payload words: a mod with the id `payload` or `pending` is a mod
+        text = self.STATUS_012 + 'payload loaded 0 0\npending refused 7 0 sites\n'
+        st = modsteps.status(text)
+        self.assertEqual([r[:2] for r in st['records']],
+                         [('payload-check', 'loaded'), ('payload', 'loaded'), ('pending', 'refused')])
+        self.assertEqual(len(st['payloads']['entries']), 1)
+        self.assertFalse(modsteps.expect(text, 2)[0])
+
+    def test_unknown_lines_kept_not_judged(self):
+        text = self.STATUS_012 + 'reads: 14 since boot, 0 damaged\n'
+        st = modsteps.status(text)
+        self.assertEqual(st['unknown'], ['reads: 14 since boot, 0 damaged'])
+        self.assertEqual(len(st['records']), 1)
+        ok, lines = modsteps.expect(text, 1)
+        self.assertTrue(ok, lines)
+        self.assertTrue(any(l.startswith('not mod records, not judged: reads:') for l in lines), lines)
+
+    def test_boot_and_store_lines_are_not_records(self):
+        st = modsteps.status(self.STATUS_012)
+        self.assertEqual(st['boot'], '227939 us (checks 25320, link 202618, inits 0)')
+        self.assertEqual(st['store'], 'id 0xf869f328, 0 fields, 0 parked, kept')
+        self.assertFalse([r for r in st['records'] if r[0] in ('boot:', 'store:')])
+        self.assertEqual(st['unknown'], [])
+
+    def test_failed_expect_shows_the_status(self):
+        ok, lines = modsteps.expect(self.STATUS_012, 2)
+        self.assertFalse(ok)
+        self.assertIn('/mods/.status as read:', lines)
+        self.assertIn('  | payloads: 1 kept, 0 lost', lines)
+        ok, lines = modsteps.expect(self.STATUS_012, 1)
+        self.assertNotIn('/mods/.status as read:', lines)
+
+    def test_expect_status(self):
+        ok, lines = modsteps.expect_status(self.STATUS_012, ['updates at boot: 1 applied',
+                                                             'payload 163e1d60 204800 /mods/~T PAY/'])
+        self.assertTrue(ok, lines)
+        self.assertIn("found 'updates at boot: 1 applied': updates at boot: 1 applied, 0 failed", lines)
+        ok, lines = modsteps.expect_status(self.STATUS_012_PENDING, ['pending /mods/~T PAY/~T payload-check-0.1.elemod'])
+        self.assertTrue(ok, lines)
+        ok, lines = modsteps.expect_status(self.STATUS_012_PENDING, ['updates at boot:', 'payloads: 1 kept'])
+        self.assertFalse(ok)
+        self.assertIn("FAIL: no /mods/.status line holds 'updates at boot:'", lines)
+        self.assertIn('  | pending /mods/~T PAY/~T payload-check-0.1.elemod', lines)
+        self.assertFalse(modsteps.expect_status(self.STATUS_012, ['Updates at boot'])[0])   # case-sensitive
 
     def test_v2_expect_parse(self):
         self.assertEqual(modsteps.parse('expect-mods 2 loaded a duck=18', '.')['ids'], ['a', 'duck=18'])

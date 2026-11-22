@@ -91,8 +91,17 @@ elif op == 'mkdir':
     m[rest[0] + '/.dir'] = ''; save()
 elif op == 'put':
     into = rest[1]
+    pend = os.environ.get('FAKE_PENDING')   # 'new': a 0.12 pin (exit 0), 'old': an older pin (exit 2)
     for f in rest[2:]:
-        m[into + '/' + os.path.basename(f)] = open(f, 'rb').read().hex()
+        k = into + '/' + os.path.basename(f)
+        if pend and k in m:                 # a file in use: the route keeps the upload as NAME.new
+            m[k + '.new'] = open(f, 'rb').read().hex(); save()
+            if pend == 'old':
+                print('REFUSED: the unit did not save /mods/%s: pending restart: %s' % (k, k))
+                sys.exit(2)
+            print('UPLOADED /mods/%s (3 bytes, CRC-32 0); in use, so it replaces the running file at the next restart' % k)
+        else:
+            m[k] = open(f, 'rb').read().hex()
     save()
 elif op == 'active':
     m['active'] = '\\n'.join(rest); save()
@@ -172,6 +181,69 @@ class ModsSteps(unittest.TestCase):
         rc, out = self.run_step('mods-remove "~T BASE"')         # gone: says so, removes nothing
         self.assertEqual(rc, 1)
         self.assertIn('not there', out)
+
+    def test_put_pending(self):
+        """mods-put --pending: an upload over a file in use, kept as NAME.new (0.12 pin: exit 0; older
+        pin: exit 2 with the route's pending restart note); both listed after."""
+        self.addCleanup(os.environ.pop, 'FAKE_PENDING', None)
+        rc, out = self.run_step('mods-put "~T BASE" --pending a.elemod')    # nothing there to be in use
+        self.assertEqual(rc, 1)
+        self.assertIn('is not there', out)
+        self.assertEqual(self.run_step('mods-put "~T BASE" a.elemod')[0], 0)
+        rc, out = self.run_step('mods-put "~T BASE" --pending a.elemod')    # saved in place: not pending
+        self.assertEqual(rc, 1)
+        self.assertIn('not all of a.elemod, a.elemod.new', out)
+        for pin in ('new', 'old'):
+            m = self.mods()
+            m.pop('~T BASE/a.elemod.new', None)
+            with open(os.environ['FAKE_MODS'], 'w') as fh:
+                json.dump(m, fh)
+            os.environ['FAKE_PENDING'] = pin
+            rc, out = self.run_step('mods-put "~T BASE" --pending a.elemod')
+            self.assertEqual(rc, 0, (pin, out))
+            self.assertIn('kept as .new', out)
+            self.assertIn('exit %d' % (0 if pin == 'new' else 2), out)
+            self.assertIn('~T BASE/a.elemod.new', self.mods())
+            rc, out = self.run_step('mods-put "~T BASE" --pending a.elemod')    # a .new already there
+            self.assertEqual(rc, 1)
+            self.assertIn('no .new of them before the put', out)
+        os.environ['FAKE_PENDING'] = 'old'                    # the plain form still fails on exit 2
+        rc, out = self.run_step('mods-put "~T BASE" a.elemod')
+        self.assertEqual(rc, 1)
+        self.assertIn('exit 2', out)
+
+    def test_expect_status(self):
+        with open(os.environ['FAKE_STATUS'], 'w') as fh:
+            fh.write('drive-loader route\nboot: 1 us (checks 0, link 0, inits 0)\npayloads: 1 kept, 0 lost\n'
+                     'updates at boot: 1 applied, 0 failed\npending /mods/~T PAY/~T p-0.1.elemod\np loaded 0 0\n')
+        rc, out = self.run_step('expect-status "updates at boot: 1 applied" "pending /mods/~T PAY/~T p-0.1.elemod"')
+        self.assertEqual(rc, 0, out)
+        self.assertIn('ok expect-status: 2 text(s) found', out)
+        rc, out = self.run_step('expect-status "updates at boot: 2 applied"')
+        self.assertEqual(rc, 1)
+        self.assertIn('/mods/.status as read:', out)
+        self.assertIn('  | payloads: 1 kept, 0 lost', out)
+        rc, out = self.run_step('expect-mods 2 loaded')                     # a failed expect-mods shows it too
+        self.assertEqual(rc, 1)
+        self.assertIn('  | p loaded 0 0', out)
+
+    def test_data_text(self):
+        """data text /mods/NAME: the file read through modsgate get, shown as plain text."""
+        self.s.folder = lambda unit: self.dir
+        rc = self.d.data_text(self.s, {'unit': 'rytm', 'name': 'act.txt'}, 'emulator', '/mods/active')
+        self.assertTrue(rc[0].startswith('ok: '), rc)
+        self.assertIn('  OWNER.elemod', rc)
+        with open(os.path.join(self.dir, 'act.txt')) as fh:
+            self.assertEqual(fh.read(), 'OWNER.elemod')
+        with open(os.environ['FAKE_STATUS'], 'w') as fh:
+            fh.write('drive-loader route\npayloads: 1 kept, 0 lost\n')
+        rc = self.d.data_text(self.s, {'unit': 'rytm'}, 'emulator', '/mods/.status')
+        self.assertIn('  payloads: 1 kept, 0 lost', rc)
+        for bad in ('/mods/', '/projects/1', '/mods/../x'):
+            with self.assertRaises(daemon.Refused):
+                self.d.data_text(self.s, {'unit': 'rytm'}, 'emulator', bad)
+        with self.assertRaises(daemon.Refused):
+            self.d.data_text(self.s, {'unit': 'digitone'}, 'emulator', '/mods/.status')
 
     def test_emulator_backup_never_reaches_the_unit(self):
         self.assertEqual(self.run_step('mods-active none')[0], 0)

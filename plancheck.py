@@ -43,7 +43,7 @@ import modsteps
 
 PROVES = ('setup', 'set-and-kept', 'works', 'evidence')
 # steps whose failure stops the run: machine assertions
-ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping', 'expect-mods',
+ASSERT_OPS = ('expect-screen', 'audio-dropouts', 'audio-compare', 'stats', 'ping', 'expect-mods', 'expect-status',
               'drive-put-wait')
 # steps that change what the unit holds or a value on it (keys only move through the UI)
 WRITE_OPS = ('save-project', 'save-kit', 'send', 'cc', 'nrpn', 'note', 'bend', 'at', 'pc', 'spp', 'turn', 'pad',
@@ -381,7 +381,7 @@ def check(steps, unit='rytm', refs=None, flash=None, stock=False, emulator=False
             errors.append('[%s] proves %r: KIND is one of %s' % (name, kind, ', '.join(PROVES)))
         elif kind in ('set-and-kept', 'works') and not has:
             errors.append('[%s] says it proves %s but has no machine assertion (expect-screen, '
-                          'capture any/none, audio-compare, audio-dropouts, stats, ping, expect-mods): a shot alone is '
+                          'capture any/none, audio-compare, audio-dropouts, stats, ping, expect-mods, expect-status): a shot alone is '
                           'judged by eye, so mark it evidence or add a check' % (name, kind))
         elif kind == 'evidence' and not flash_only:
             flags.append('[%s] judged by eye (evidence: shots only)' % name)

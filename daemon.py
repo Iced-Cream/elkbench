@@ -129,7 +129,7 @@ UNIT_FACTS = {
                      no_emu_audio='its digiemu stream was silent with notes playing, and its Overbridge '
                                   'channels are not the Digitone\'s twelve'),
 }
-DATA_OPS = ('ls', 'get', 'put', 'clear', 'roundtrip')
+DATA_OPS = ('ls', 'get', 'put', 'clear', 'roundtrip', 'text')
 # Digitone (digirun) steps that do not exist: no key-driven kit save, as a test project there is
 # marked by its pattern A01, not a kit. send and save-project ask the write policy as analogrun does.
 # capture and ping need a digirun that has them (digihealth's runner-capture-ping, merged with the
@@ -311,7 +311,7 @@ def boot_from_flash(e):
 
 def is_stage_step(line):
     """A step elkbench runs itself between parts of a plan: `power-cycle`, `replug-usb`, or a
-    Drive Loader step (modsteps.py: mods-put, mods-active, expect-mods)."""
+    Drive Loader step (modsteps.py: mods-put, mods-active, expect-mods, expect-status, mods-remove)."""
     return is_power_cycle(line) or is_replug_usb(line) or modsteps.is_mods_step(line)
 
 
@@ -4152,20 +4152,47 @@ class Daemon:
                         if there or step['folder'] in {n for n, _d in mods_rows(out)}:
                             return 1, 'fail mods-put --new: /mods/%s is already there (ls)\n' % step['folder']
                         said.append('/mods lists no %s: the upload makes it (no mkdir)' % step['folder'])
+                    elif step.get('pending'):       # an upload over files in use: they must be there
+                        if not there:
+                            return 1, 'fail mods-put --pending: /mods/%s is not there (ls)\n' % step['folder']
+                        rc, out = self.modsgate(s, unit, tgt, log, 'ls', step['folder'])
+                        before = {n for n, d in mods_rows(out) if not d}
+                        want = {os.path.basename(f) for f in step['files']}
+                        if rc or not want <= before or {w + '.new' for w in want} & before:
+                            return 1, ('fail mods-put --pending: /mods/%s must list each of %s and no .new of '
+                                       'them before the put; it lists %s\n' % (
+                                           step['folder'], ', '.join(sorted(want)), ', '.join(sorted(before))))
+                        said.append('/mods/%s lists %s, no .new yet' % (step['folder'], ', '.join(sorted(want))))
                     elif not there:
                         rc, _ = self.modsgate(s, unit, tgt, log, 'mkdir', step['folder'])
                         if rc:
                             return 1, 'fail mods-put: mkdir %s exit %d\n' % (step['folder'], rc)
-                    rc, _ = self.modsgate(s, unit, tgt, log, 'put', '--into', step['folder'], *step['files'])
-                    if rc:
+                    rc, out = self.modsgate(s, unit, tgt, log, 'put', '--into', step['folder'], *step['files'])
+                    if step.get('pending'):
+                        # drive-loader-ar2 0.12's route keeps an upload over a file in use as NAME.new and
+                        # notes `pending restart: NAME`: a 0.12 modsgate pin (datarpc d25b5ba) says so and
+                        # exits 0, an older one exits 2 with the note in its refusal
+                        if not (rc == 0 or (rc == 2 and 'pending restart:' in out)):
+                            return 1, 'fail mods-put --pending: put into %s exit %d\n' % (step['folder'], rc)
+                        said.append('put into /mods/%s exit %d: %s' % (step['folder'], rc, ' / '.join(
+                            l.strip() for l in out.splitlines() if 'in use' in l or 'pending restart:' in l)
+                            or 'no pending note'))
+                    elif rc:
                         return 1, 'fail mods-put: put into %s exit %d\n' % (step['folder'], rc)
                     rc, out = self.modsgate(s, unit, tgt, log, 'ls', step['folder'])
                     have = {n for n, d in mods_rows(out) if not d}
                     want = {os.path.basename(f) for f in step['files']}
+                    if step.get('pending'):
+                        want |= {w + '.new' for w in want}
                     if rc or not want <= have:
-                        return 1, 'fail mods-put: /mods/%s lists %s, not all of %s\n' % (
+                        return 1, 'fail mods-put%s: /mods/%s lists %s, not all of %s\n' % (
+                            ' --pending' if step.get('pending') else '',
                             step['folder'], ', '.join(sorted(have)), ', '.join(sorted(want)))
-                    said.append('ok mods-put %d files into /mods/%s (listed)' % (len(want), step['folder']))
+                    if step.get('pending'):
+                        said.append('ok mods-put --pending %d files into /mods/%s: each kept as .new for the next '
+                                    'boot (listed: %s)' % (len(want) // 2, step['folder'], ', '.join(sorted(want))))
+                    else:
+                        said.append('ok mods-put %d files into /mods/%s (listed)' % (len(want), step['folder']))
                     if tgt == 'hardware':           # on the unit again: an earlier removal proves nothing now
                         s.mods_gone.get(unit, {}).pop('/mods/' + step['folder'], None)
                 elif step['op'] == 'mods-active' and step['what'] == 'restore':
@@ -4230,15 +4257,19 @@ class Daemon:
                         s.mods_gone.setdefault(unit, {})['/mods/' + step['folder']] = (
                             next(s.steps), time.strftime('%H:%M:%S'),
                             ', '.join(n + ('/' if d else '') for n, d in rows) or 'empty')
-                else:                                       # expect-mods
+                else:                                       # expect-mods, expect-status
                     got = os.path.join(folder, 'mods-status-%s.txt' % time.strftime('%H%M%S'))
                     rc, _ = self.modsgate(s, unit, tgt, log, 'get', '.status', '--out', got, timeout=120)
                     if rc or not os.path.isfile(got):
-                        return 1, 'fail expect-mods: /mods/.status not read (exit %d)\n' % rc
-                    with open(got, encoding='utf-8', errors='replace') as fh:
-                        ok, lines = modsteps.expect(fh.read(), step['n'], step['ids'])
+                        return 1, 'fail %s: /mods/.status not read (exit %d)\n' % (step['op'], rc)
+                    with open(got, encoding='latin-1') as fh:     # the route's names are latin-1
+                        text = fh.read()
+                    if step['op'] == 'expect-status':
+                        ok, lines = modsteps.expect_status(text, step['texts'])
+                    else:
+                        ok, lines = modsteps.expect(text, step['n'], step['ids'])
                     if not ok:
-                        return 1, '\n'.join(lines + ['fail expect-mods (%s)' % got]) + '\n'
+                        return 1, '\n'.join(lines + ['fail %s (%s)' % (step['op'], got)]) + '\n'
                     said += lines
                 return 0, '\n'.join(said) + '\n'
             finally:
@@ -4858,6 +4889,46 @@ class Daemon:
             return ['pass: the screen equals %s' % os.path.basename(ref)]
         return ['fail: %s' % line.replace('failed: AssertionError: ', ''), 'folder: %s' % folder]
 
+    def data_text(self, s, a, tgt, path):
+        """`data text /mods/NAME`: a /mods file read through modsgate's `get` (elekloader's datarpc,
+        which takes the route's container apart) into the evidence folder as plain bytes, and shown
+        as text. `data get` gives the data store's TEXT object as stored (compressed), so .status
+        reads only in part there. A read: no write policy, no emulator write noted."""
+        unit = a.get('unit')
+        if unit not in UNITS or not UNITS[unit].get('mods'):
+            raise Refused('text reads /mods through the Drive Loader route (Rytm and A4)')
+        rel = path[len('/mods/'):] if path.startswith('/mods/') else ''
+        if not rel or rel.endswith('/') or '..' in rel.split('/'):
+            raise Refused('text PATH: a file below /mods, such as /mods/.status or /mods/active')
+        slug = re.sub(r'[^\w-]+', '_', rel)[:40]
+        name = a.get('name') or 'data-text-%s-%s.txt' % (slug, time.strftime('%H%M%S'))
+        if re.search(r'[\\/:]', name):
+            raise Refused('name is a bare file name')
+        folder = s.folder(unit)
+        os.makedirs(folder, exist_ok=True)
+        out = os.path.join(folder, name)
+        if tgt == 'hardware':
+            self.check_hardware(s, [unit])
+            self.check_connected(unit, tgt)
+            port = self.busy_port(unit, tgt, 'data text')
+        else:
+            port = self.busy_port('%s@%s' % (unit, self.emu_port(s, unit)), tgt, 'data text')
+        log = []
+        try:
+            rc, _ = self.modsgate(s, unit, tgt, log, 'get', rel, '--out', out, timeout=120)
+        finally:
+            port.release()
+            with open(os.path.join(folder, 'steps.log'), 'a', encoding='utf-8') as fh:
+                fh.write('$ data text %s\n%s\n' % (path, '\n'.join(log)))
+        if rc or not os.path.isfile(out):
+            return ['fail: modsgate get %s exit %d (log in %s)' % (rel, rc, os.path.join(folder, 'steps.log'))]
+        with open(out, 'rb') as fh:
+            body = fh.read()
+        lines = body.decode('latin-1').splitlines()
+        cut = len(lines) > 60
+        return ['ok: %s, %d bytes, %d line(s)%s' % (out, len(body), len(lines), ', the first 60:' if cut else ':')] + \
+            ['  ' + l for l in lines[:60]]
+
     def t_data(self, s, a):
         """The data store on the unit or its emulator, into or from the evidence folder: ls and
         get (analogrun, or digirun on the Digitone), and put, clear and roundtrip through
@@ -4870,6 +4941,8 @@ class Daemon:
             raise Refused('op is one of %s' % ', '.join(DATA_OPS))
         if not path.startswith('/'):
             raise Refused("path is a data store path starting with '/' ('/' lists the roots)")
+        if op == 'text':
+            return self.data_text(s, a, tgt, path)
         u = self.unit(a.get('unit'), need_runner='data')
         write = op in ('put', 'clear', 'roundtrip')
         if a.get('to') and op != 'roundtrip':
@@ -6082,7 +6155,8 @@ TOOLS = [
        record={'type': 'boolean'})),
     ('data', 'The data store (analogrun / digirun data): ls PATH (\'/\' gives the roots), get PATH (one object '
              'as Transfer stores it, into the evidence folder); put FILE into PATH, clear PATH, roundtrip PATH '
-             '(read, write back or to `to`, read back, compare). Writes ask the local write policy first and '
+             '(read, write back or to `to`, read back, compare); text /mods/NAME (Rytm, A4: a /mods file such as .status read '
+             'through modsgate as plain text, where get gives the stored, compressed object). Writes ask the local write policy first and '
              'keep a copy of what they replace; hardware needs the claim.',
      S(unit=UNIT(), target=TARGET(), op={'type': 'string', 'enum': list(DATA_OPS), 'req': True},
        path={'type': 'string', 'req': True}, name={'type': 'string', 'description': 'ls/get: bare file name for the result'},

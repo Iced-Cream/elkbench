@@ -7,6 +7,14 @@ instead of a flashed build per test (decided 2026-11-09).
     mods-put "~T NAME" --new FILE...
                                    the folder must not be in /mods; no mkdir: the upload names it,
                                    and the loader makes it (an upload into a missing folder)
+    mods-put "~T NAME" --pending FILE...
+                                   an upload over files in use (drive-loader-ar2 0.12: a running
+                                   mod's file whose payload the unit keeps): each FILE must already
+                                   be in the folder with no FILE.new beside it, the route must keep
+                                   the upload as FILE.new for the next boot (`pending restart:`;
+                                   modsgate exits 0 on a 0.12 pin, 2 on an older one), and both
+                                   FILE and FILE.new must be listed after. A put that saves in
+                                   place fails this form; the plain form is unchanged
     mods-active PATH...            write /mods/active: the mods the next boot links, in this order
                                    (paths below /mods, in ~T folders). The first one in a session
                                    saves the active that was there; release writes it back
@@ -16,7 +24,13 @@ instead of a flashed build per test (decided 2026-11-09).
                                    `loaded`, the IDs among them, nothing skipped, and a boot line.
                                    ID=K: that mod loaded with exactly K boot-linked sites applied
                                    (+Drive v2 `site` lines). A v2 `store:` line must not say
-                                   `write failed`
+                                   `write failed`. Only `ID STATE CODE ARG [DETAIL]` lines are mod
+                                   records; header, `boot:`, `store:`, `site`, the 0.12 payload
+                                   lines and any line a later loader adds are not
+    expect-status TEXT...          read /mods/.status: each TEXT is found inside one of its lines
+                                   (a plain, case-sensitive substring; quote TEXT with spaces, e.g.
+                                   expect-status "updates at boot: 1 applied" "pending /mods/~T PAY/x.elemod").
+                                   On a failure the whole .status is shown
     mods-remove "~T NAME"          remove a ~T folder this session's mods-put made, with the files
                                    it put there, and list /mods to show it gone: before a stock
                                    flash, so stock never boots with a run's .elemod on /mods
@@ -36,7 +50,7 @@ import os
 import re
 import shlex
 
-OPS = ('mods-put', 'mods-active', 'expect-mods', 'mods-remove')
+OPS = ('mods-put', 'mods-active', 'expect-mods', 'expect-status', 'mods-remove')
 # the largest .elemod a mods-put uploads, per unit with a Drive Loader
 MAX_FILE = {
     'rytm': 512 * 1024,               # the loader's staging buffer (DL_STAGING_SIZE)
@@ -80,11 +94,16 @@ def parse(line, here, unit='rytm'):
         if len(w) < 3:
             raise ValueError('mods-put "~T NAME" FILE...: a ~T folder and at least one .elemod')
         folder = w[1].strip('/')
-        new = len(w) > 2 and w[2] == '--new'
-        if new:
+        flags = [x for x in w[2:] if x in ('--new', '--pending')]
+        if len(flags) > 1 or any(x.startswith('--') and x not in ('--new', '--pending') for x in w[2:]):
+            raise ValueError('mods-put "~T NAME" [--new | --pending] FILE...: one of --new or --pending at most')
+        if flags and w[2] != flags[0]:
+            raise ValueError('mods-put "~T NAME" %s FILE...: %s comes before the files' % (flags[0], flags[0]))
+        new, pending = flags == ['--new'], flags == ['--pending']
+        if flags:
             w = w[:2] + w[3:]
             if len(w) < 3:
-                raise ValueError('mods-put "~T NAME" --new FILE...: at least one .elemod')
+                raise ValueError('mods-put "~T NAME" %s FILE...: at least one .elemod' % flags[0])
         if '/' in folder or not tname_ok(folder):
             raise ValueError('mods-put %r: the folder is one ~T name below /mods (`~T ` and at most 15 '
                              'characters A-Z 0-9 space + - = & / # @ ? %% $ ~)' % w[1])
@@ -104,7 +123,7 @@ def parse(line, here, unit='rytm'):
         if len(set(names)) != len(names):
             raise ValueError('mods-put: two files named the same: %s' % ', '.join(sorted(
                 n for n in set(names) if names.count(n) > 1)))
-        return dict(op=op, folder=folder, files=files, new=new)
+        return dict(op=op, folder=folder, files=files, new=new, pending=pending)
     if op == 'mods-active':
         if len(w) == 2 and w[1].lower() in ('restore', 'none'):
             return dict(op=op, what=w[1].lower(), paths=[])
@@ -126,6 +145,10 @@ def parse(line, here, unit='rytm'):
             if not name or (eq and not k.isdigit()):
                 raise ValueError('expect-mods N loaded [ID...]: ID or ID=K (K sites applied)')
         return dict(op=op, n=int(w[1]), ids=w[3:])
+    if op == 'expect-status':
+        if len(w) < 2 or not all(t.strip() for t in w[1:]):
+            raise ValueError('expect-status TEXT...: at least one non-empty text that a /mods/.status line holds')
+        return dict(op=op, texts=w[1:])
     if op == 'mods-remove':
         folder = w[1].strip('/') if len(w) == 2 else ''
         if not folder or '/' in folder or not tname_ok(folder):
@@ -145,17 +168,37 @@ def put_files(steps, here, unit='rytm'):
     return sorted(out)
 
 
+# a boot linker record's state word (drive-loader route.c dl_state_names; '?' for a state past them)
+RECORD_STATES = ('-', 'loaded', 'refused', 'dropped', '?')
+
+
+def _record(l):
+    """A boot linker record `ID STATE CODE ARG [DETAIL]` (CODE and ARG decimal) -> its 5 fields, else None."""
+    p = l.split(None, 4)
+    if len(p) >= 4 and p[1] in RECORD_STATES and p[2].isdigit() and p[3].isdigit():
+        return (p[0], p[1], p[2], p[3], p[4] if len(p) > 4 else '')
+    return None
+
+
 def status(text):
     """/mods/.status -> dict(records=[(id, state, code, arg, detail)], boot=str|None,
-    skipped=str|None, check=str|None)."""
-    out = dict(records=[], boot=None, skipped=None, check=None, store=None, sites={})
+    skipped=str|None, check=str|None, store=str|None, sites={id: n}, payloads=dict, unknown=[line])."""
+    out = dict(records=[], boot=None, skipped=None, check=None, store=None, sites={},
+               payloads=dict(summary=None, updates=None, entries=[], pending=[]), unknown=[])
     # `stage:` (top-staging loaders): the live stage, `stage: N bytes at 0xADDR, free tail|floor`;
     # the A4 MKII's loader names itself `drive-loader-a4mk2 route` and gives its sector store's
     # `room: N bytes in one run, M free; directory generation G` in place of a stage
     head = ('drive-loader route', 'drive-loader-a4mk2 route', 'folder ', 'last:', 'io:', 'stage:', 'room:')
+    pay = out['payloads']
     for l in text.splitlines():
         l = l.rstrip()
         if not l or l.startswith(head):
+            continue
+        # a record's shape decides first, so a mod whose id is a metadata word (`payload`, `pending`)
+        # still counts as a mod; no metadata line has a state word second and two numbers after it
+        r = _record(l)
+        if r:
+            out['records'].append(r)
             continue
         if l.startswith('check:'):
             out['check'] = l[6:].strip()
@@ -168,12 +211,45 @@ def status(text):
         elif l.startswith('site ') and len(l.split()) == 4:   # +Drive v2: site ID 0xADDR LEN, one per applied site
             sid = l.split()[1]
             out['sites'][sid] = out['sites'].get(sid, 0) + 1
-        else:
-            p = l.split(None, 4)
-            if len(p) >= 2:
-                out['records'].append((p[0], p[1], p[2] if len(p) > 2 else '', p[3] if len(p) > 3 else '',
-                                       p[4] if len(p) > 4 else ''))
+        # drive-loader-ar2 0.12's payload table (payload.c dl_payload_status): `payloads: N kept, M lost`,
+        # `updates at boot: A applied, B failed` (only after a boot that swapped a <name>.new in),
+        # `payload ID8 LEN PATH` per entry and `pending PATH` per upload waiting for the next boot
+        elif l.startswith('payloads:'):
+            pay['summary'] = l[9:].strip()
+        elif l.startswith('updates at boot:'):
+            pay['updates'] = l[16:].strip()
+        elif l.startswith('payload '):
+            p = l.split(None, 3)
+            pay['entries'].append(tuple(p[1:]))
+        elif l.startswith('pending '):
+            pay['pending'].append(l[8:].strip())
+        else:                                     # a later loader's line: kept and shown, never a mod
+            out['unknown'].append(l)
     return out
+
+
+def expect_status(text, texts):
+    """expect-status's verdict on /mods/.status text -> (ok, lines): each of `texts` inside one line
+    (a plain, case-sensitive substring). A failure shows the whole .status."""
+    have = [l.rstrip() for l in text.splitlines()]
+    lines, ok = [], True
+    for t in texts:
+        hit = next((l for l in have if t in l), None)
+        if hit is None:
+            lines.append('FAIL: no /mods/.status line holds %r' % t)
+            ok = False
+        else:
+            lines.append('found %r: %s' % (t, hit))
+    if ok:
+        lines.append('ok expect-status: %d text(s) found' % len(texts))
+    else:
+        lines += full_status(text)
+    return ok, lines
+
+
+def full_status(text):
+    """-> the whole .status, indented, for a failed step's output."""
+    return ['/mods/.status as read:'] + ['  | ' + l.rstrip() for l in text.splitlines()]
 
 
 def expect(text, n, ids=()):
@@ -194,6 +270,17 @@ def expect(text, n, ids=()):
         lines.append('store: %s' % st['store'])
     if st['sites']:
         lines.append('sites applied: %s' % ', '.join('%s %d' % kv for kv in sorted(st['sites'].items())))
+    pay = st['payloads']
+    if pay['summary'] is not None:
+        lines.append('payloads: %s' % pay['summary'])
+    if pay['updates'] is not None:
+        lines.append('updates at boot: %s' % pay['updates'])
+    for e in pay['entries']:
+        lines.append('payload %s' % ' '.join(e))
+    for p in pay['pending']:
+        lines.append('pending %s' % p)
+    if st['unknown']:
+        lines.append('not mod records, not judged: %s' % '; '.join(st['unknown'][:8]))
     ok = True
     if st['store'] and st['store'].endswith('write failed'):
         lines.append('FAIL: /mods/.store write failed')
@@ -224,6 +311,8 @@ def expect(text, n, ids=()):
         ok = False
     if ok:
         lines.append('ok expect-mods %d loaded%s' % (n, (' (' + ', '.join(ids) + ')') if ids else ''))
+    else:
+        lines += full_status(text)
     return ok, lines
 
 
