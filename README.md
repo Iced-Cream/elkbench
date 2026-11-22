@@ -200,7 +200,11 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   the IDs among them, no `skipped:` line, a `boot:` line; a machine assertion; only `ID STATE CODE ARG [DETAIL]` lines are records, so the header, `boot:`, `store:`, `site` lines, 0.12's `payloads:`/`updates at boot:`/`payload`/`pending` lines and lines a later loader adds are not; a failure shows the whole .status), `expect-status TEXT...` (reads /mods/.status: each TEXT is a plain, case-sensitive substring of one of its lines, quoted when it has spaces, e.g. `expect-status "updates at boot: 1 applied"`; a machine assertion; a failure shows the whole .status), `mods-remove
   "~T NAME"` (removes a ~T folder a mods-put made and the files in it, each through the write
   policy, then lists /mods to show it gone: the last plan on the base runs it before the stock
-  flash, so stock never boots with a run's .elemod on /mods). They run through
+  flash, so stock never boots with a run's .elemod on /mods), `mods-clear-refused "~T NAME" FILE`
+  (a USB delete, a Data RPC Clear through modsgate rm, of a file in use that a mods-put made:
+  passes only when the unit refuses it as in use, the file is listed at the same size after and
+  its `payload` line is still in /mods/.status; a file with no payload line gets no Clear; a
+  machine assertion; decided 2026-11-22). They run through
   modsgate and the write policy, on the unit under the claim or on the session's emulator (with
   a scratch lock folder, so emulator writes never enter the unit claim's manifest). elkbench
   runs the plan in parts around them, as around a `power-cycle`; a plan with them flashes
