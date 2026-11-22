@@ -3,7 +3,11 @@
 instead of a flashed build per test (decided 2026-11-09).
 
     mods-put "~T NAME" FILE...     make the ~T folder below /mods if it is not there and upload the
-                                   files into it (paths relative to the plan); release removes them
+                                   files into it (paths relative to the plan); release removes them.
+                                   Each file is saved in place or the step fails: a file in use (a
+                                   0.12 loader's .status `payload` line) is refused before the upload,
+                                   and an upload the unit kept as .new for the next boot fails it
+                                   (use --pending for that; decided 2026-11-22)
     mods-put "~T NAME" --new FILE...
                                    the folder must not be in /mods; no mkdir: the upload names it,
                                    and the loader makes it (an upload into a missing folder)

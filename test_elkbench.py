@@ -212,6 +212,40 @@ class ModsSteps(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertIn('exit 2', out)
 
+    def test_plain_put_refuses_a_file_in_use(self):
+        """A plain mods-put saves in place or fails (decided 2026-11-22): over a file in use it is refused
+        before the upload when .status names the file, else after it on either pin; --pending is the way."""
+        self.addCleanup(os.environ.pop, 'FAKE_PENDING', None)
+        self.assertEqual(self.run_step('mods-put "~T BASE" a.elemod')[0], 0)
+        rc, out = self.run_step('mods-put "~T BASE" a.elemod')                # in place, again: still fine
+        self.assertEqual(rc, 0, out)
+        with open(os.environ['FAKE_STATUS'], 'w') as fh:                      # .status: the file is in use
+            fh.write('drive-loader route\npayloads: 1 kept, 0 lost\npayload 163e1d60 3 /mods/~T BASE/a.elemod\n')
+        os.environ['FAKE_PENDING'] = 'new'
+        rc, out = self.run_step('mods-put "~T BASE" a.elemod')
+        self.assertEqual(rc, 1)
+        self.assertIn('/mods/~T BASE/a.elemod in use', out)
+        self.assertIn('nothing sent', out)
+        self.assertIn('--pending', out)
+        self.assertNotIn('~T BASE/a.elemod.new', self.mods())                 # refused before the upload
+        os.remove(os.environ['FAKE_STATUS'])                                   # no .status to go by: after it
+        for pin, code in (('new', 0), ('old', 2)):
+            m = self.mods()
+            m.pop('~T BASE/a.elemod.new', None)
+            with open(os.environ['FAKE_MODS'], 'w') as fh:
+                json.dump(m, fh)
+            os.environ['FAKE_PENDING'] = pin
+            rc, out = self.run_step('mods-put "~T BASE" a.elemod')
+            self.assertEqual(rc, 1, (pin, out))
+            self.assertIn('exit %d: the unit kept the upload as .new' % code, out)
+            self.assertIn('mods-put "~T BASE" --pending', out)
+        m = self.mods()
+        m.pop('~T BASE/a.elemod.new', None)
+        with open(os.environ['FAKE_MODS'], 'w') as fh:
+            json.dump(m, fh)
+        rc, out = self.run_step('mods-put "~T BASE" --pending a.elemod')      # --pending as before
+        self.assertEqual(rc, 0, out)
+
     def test_expect_status(self):
         with open(os.environ['FAKE_STATUS'], 'w') as fh:
             fh.write('drive-loader route\nboot: 1 us (checks 0, link 0, inits 0)\npayloads: 1 kept, 0 lost\n'

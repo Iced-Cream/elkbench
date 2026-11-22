@@ -4103,6 +4103,18 @@ class Daemon:
                                                                for x in args), r.returncode, r.stdout, r.stderr))
         return r.returncode, r.stdout
 
+    def mods_in_use(self, s, unit, tgt, log, folder, step):
+        """-> the /mods paths of a mods-put step's files that the loader holds in use (drive-loader-ar2
+        0.12: /mods/.status's `payload ID LEN PATH` lines), [] when none or .status can't be read."""
+        got = os.path.join(folder, 'mods-status-put-%s.txt' % time.strftime('%H%M%S'))
+        rc, _ = self.modsgate(s, unit, tgt, log, 'get', '.status', '--out', got, timeout=120)
+        if rc or not os.path.isfile(got):
+            return []
+        with open(got, encoding='latin-1') as fh:
+            held = {e[2] for e in modsteps.status(fh.read())['payloads']['entries'] if len(e) > 2}
+        return sorted(p for p in ('/mods/%s/%s' % (step['folder'], os.path.basename(f)) for f in step['files'])
+                      if p in held)
+
     def mods_restore(self, s, unit, tgt, log):
         """Writes back the /mods/active the session's first mods-active saved (or removes the
         one the run wrote, where there was none). -> (ok, line)"""
@@ -4167,7 +4179,26 @@ class Daemon:
                         rc, _ = self.modsgate(s, unit, tgt, log, 'mkdir', step['folder'])
                         if rc:
                             return 1, 'fail mods-put: mkdir %s exit %d\n' % (step['folder'], rc)
+                    plain_new = set()           # the plain form: the .new files listed before the put
+                    if not step.get('new') and not step.get('pending') and there:
+                        # a plain put saves in place or fails (decided 2026-11-22): a file in use (a 0.12
+                        # loader's `payload` line names it) is refused before anything is sent
+                        held = self.mods_in_use(s, unit, tgt, log, folder, step)
+                        if held:
+                            return 1, ('fail mods-put: %s in use (/mods/.status payload line): the unit would keep '
+                                       'the upload as .new for the next boot; nothing sent. Use mods-put "%s" '
+                                       '--pending to upload over it\n' % (', '.join(held), step['folder']))
+                        rc, out = self.modsgate(s, unit, tgt, log, 'ls', step['folder'])
+                        plain_new = {n for n, d in mods_rows(out) if not d and n.endswith('.new')}
                     rc, out = self.modsgate(s, unit, tgt, log, 'put', '--into', step['folder'], *step['files'])
+                    if not step.get('new') and not step.get('pending') and (
+                            (rc == 2 and 'pending restart:' in out) or (rc == 0 and 'in use, so it replaces' in out)):
+                        return 1, ('fail mods-put: put into %s exit %d: the unit kept the upload as .new for the next '
+                                   'boot instead of saving it (%s). A plain mods-put saves in place; use mods-put '
+                                   '"%s" --pending to upload over a file in use\n' % (
+                                       step['folder'], rc, ' / '.join(l.strip() for l in out.splitlines()
+                                                                      if 'in use' in l or 'pending restart:' in l),
+                                       step['folder']))
                     if step.get('pending'):
                         # drive-loader-ar2 0.12's route keeps an upload over a file in use as NAME.new and
                         # notes `pending restart: NAME`: a 0.12 modsgate pin (datarpc d25b5ba) says so and
@@ -4188,6 +4219,12 @@ class Daemon:
                         return 1, 'fail mods-put%s: /mods/%s lists %s, not all of %s\n' % (
                             ' --pending' if step.get('pending') else '',
                             step['folder'], ', '.join(sorted(have)), ', '.join(sorted(want)))
+                    kept = sorted(w + '.new' for w in want if w + '.new' in have and w + '.new' not in plain_new) \
+                        if not step.get('new') and not step.get('pending') else []
+                    if kept:                    # a .new the put made: kept for the next boot, not saved
+                        return 1, ('fail mods-put: /mods/%s now lists %s: the unit kept the upload for the next '
+                                   'boot instead of saving it. Use mods-put "%s" --pending to upload over a file '
+                                   'in use\n' % (step['folder'], ', '.join(kept), step['folder']))
                     if step.get('pending'):
                         said.append('ok mods-put --pending %d files into /mods/%s: each kept as .new for the next '
                                     'boot (listed: %s)' % (len(want) // 2, step['folder'], ', '.join(sorted(want))))
