@@ -48,7 +48,7 @@ instead of a flashed build per test (decided 2026-11-09).
 Both loaders serve /mods through the same Data RPC route, so the steps and modsgate are the same
 on both units. The A4 has no +Drive file system: its loader keeps /mods (folders 3 deep, as the
 Rytm's) in its own store in free +Drive sectors and writes an upload straight to them, so its file
-limit is the mods' area in core_ddr rather than a staging buffer (MAX_FILE).
+limit is the mods' area in core_ddr rather than the Rytm loader's stage (MAX_FILE).
 
 The loader links mods only at boot, so a new active takes effect after a reboot: a `power-cycle`
 step, or the base build flashed over itself in a plan of its own. The steps run through
@@ -63,9 +63,12 @@ import shlex
 OPS = ('mods-put', 'mods-active', 'expect-mods', 'expect-status', 'mods-remove', 'mods-clear-refused')
 # the largest .elemod a mods-put uploads, per unit with a Drive Loader
 MAX_FILE = {
-    'rytm': 512 * 1024,               # the loader's staging buffer (DL_STAGING_SIZE)
+    'rytm': 4 * 1024 * 1024,          # under the loader's live stage after boot (drive-loader-ar2's
+                                      # .status `stage:` line: 4,707,120 bytes, free tail, on PCK4 in
+                                      # T480; the 64 KB DL_STAGING_SIZE is only the floor); 4 MB stays
+                                      # under it (decided 2026-11-22)
     'a4': 0x47C00000 - 0x45650000,    # core-a4mk2's mods area in core_ddr (37.7 MB); uploads go
-}                                     # straight to the loader's sector store, no staging buffer
+}                                     # straight to the loader's sector store, no stage
 MAX_ACTIVE = 256                      # DL_MAX_MODS
 NAME_CHARS = re.compile(r"[A-Z0-9 +\-=&/#@?%$~]*")
 
@@ -127,7 +130,7 @@ def parse(line, here, unit='rytm'):
             if os.path.getsize(p) > MAX_FILE[unit]:
                 raise ValueError('mods-put %s: %d bytes, over the %s loader\'s %d-byte %s'
                                  % (f, os.path.getsize(p), unit, MAX_FILE[unit],
-                                    'mods area' if unit == 'a4' else 'staging buffer'))
+                                    'mods area' if unit == 'a4' else 'stage cap'))
             files.append(p)
         names = [os.path.basename(p) for p in files]
         if len(set(names)) != len(names):

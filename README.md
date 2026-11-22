@@ -190,7 +190,7 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   OS flash are allowed.
 - **Drive Loader steps** (`modsteps.py`, Rytm and A4, needs `tools.modsgate`; the A4 loader keeps
   /mods in its own sector store behind the same route, and modsgate gets `--unit a4` so the write
-  policy's manifest is the A4 claim's; a mods-put file may be up to 512 KB on the Rytm, up to the
+  policy's manifest is the A4 claim's; a mods-put file may be up to 4 MB on the Rytm (under the loader's live stage, decided 2026-11-22), up to the
   37.7 MB mods area on the A4): `mods-put "~T NAME"
   FILE...` (makes the ~T folder below /mods, uploads the files; release removes them from the
   claim's /mods manifest; with `--new` after the folder, the folder must not be there and no mkdir
