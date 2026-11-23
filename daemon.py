@@ -291,6 +291,36 @@ def replugs(steps):
     return ['[%s] replug-usb' % name for name, lines in steps for l in lines if is_replug_usb(l)]
 
 
+def flash_expected_os(image):
+    """The OS version `image` reports once it runs: the `version` an elekloader build writes
+    beside it (X.syx.json), else the OSn.nn in a stock file's name; None when unknown."""
+    try:
+        with open(image + '.json', encoding='utf-8') as fh:
+            v = json.load(fh).get('version')
+        if v:
+            return str(v)
+    except (OSError, ValueError, AttributeError):
+        pass
+    m = re.search(r'OS[ _-]?(\d+\.\d+)', os.path.basename(image), re.I)
+    return m.group(1) if m else None
+
+
+def flash_os_check(lines, image):
+    """After elkflash passed: its `back after N s: NAME, OS X` line against the version `image`
+    should report. elkflash passes when the device answers again, on whatever OS, so a new OS
+    that does not boot (an analog-emu that refuses the image keeps the old one) passed as a
+    flash (URB1, 2026-11-23). -> (0 or 1, a line for the result)."""
+    want = flash_expected_os(image)
+    back = next((l for l in reversed(lines) if re.search(r'back after .*, OS \S+\s*$', l)), None)
+    got = re.search(r', OS (\S+)\s*$', back).group(1) if back else None
+    if not want:
+        return 0, 'OS version not checked: no %s.json version or OSn.nn in its name' % os.path.basename(image)
+    if got != want:
+        return 1, 'fail: the flash came back on OS %s, not %s: the flashed OS is not running' % (
+            got or '(none reported)', want)
+    return 0, 'OS %s after the flash, as expected' % want
+
+
 def boot_from_flash(e):
     """After a flash into an analog-emu: its command line drops the OS file it was started with.
     analog-emu boots a FIRMWARE it is given and the OS in --flash only when given none, so a
@@ -4731,6 +4761,9 @@ class Daemon:
 
         def done(job, rc, out):
             lines = [l.strip() for l in out.splitlines() if l.strip()]
+            os_note = None
+            if rc == 0:
+                rc, os_note = flash_os_check(lines, img)
             job.state = 'pass' if rc == 0 else 'fail'
             # --quiet prints only the last line; the lines that say what happened are in the log
             try:
@@ -4741,7 +4774,7 @@ class Daemon:
             except OSError:
                 said = []
             job.lines = [quiet] + ([job.midisrv] if job.midisrv else []) + \
-                [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + ['log: %s' % flog]
+                [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + ['log: %s' % flog] +                 ([os_note] if os_note else [])
             if tgt == 'hardware':
                 if rc == 0:
                     s.os_left[a['unit']] = (os.path.basename(img), self.is_stock(a['unit'], d), d)
@@ -5998,6 +6031,9 @@ class Daemon:
             if flash:
                 out = [l.strip() for l in p.stdout.splitlines() if l.strip()]
                 ok, line = p.returncode == 0, (out or ['exit %d' % p.returncode])[-1]
+                if ok:
+                    rc, note = flash_os_check(out, v['image'])
+                    ok, line = rc == 0, '%s (%s)' % (line, note)
             elif v.get('start'):                       # passes, or stops where its contrast says
                 ok, line = start_verdict(v['expect'], p.returncode, self.plan_run_dir(p.stdout))
             else:

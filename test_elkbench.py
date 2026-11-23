@@ -4493,3 +4493,29 @@ def tearDownModule():
 
 if __name__ == '__main__':
     unittest.main(verbosity=2)
+
+
+class FlashOsCheck(unittest.TestCase):
+    """elkflash passes when the device answers again; the flash passes only on the new OS."""
+
+    def test_build_version_from_json(self):
+        d = tempfile.mkdtemp(dir=TMP)
+        img = os.path.join(d, 'URB1.syx')
+        open(img, 'wb').close()
+        with open(img + '.json', 'w') as fh:
+            json.dump({'version': 'URB1'}, fh)
+        self.assertEqual(daemon.flash_os_check(['back after 21 s: Unit, OS URB1'], img)[0], 0)
+        rc, line = daemon.flash_os_check(['sent 52 messages', 'back after 12 s: Unit, OS URA1'], img)
+        self.assertEqual(rc, 1)
+        self.assertIn('OS URA1, not URB1', line)
+        self.assertEqual(daemon.flash_os_check(['no answer'], img)[0], 1)
+
+    def test_stock_version_from_name(self):
+        img = os.path.join(TMP, 'Unit_MKII_OS1.56.syx')
+        self.assertEqual(daemon.flash_os_check(['back after 13 s: Unit, OS 1.56'], img)[0], 0)
+        self.assertEqual(daemon.flash_os_check(['back after 13 s: Unit, OS URB1'], img)[0], 1)
+
+    def test_unknown_version_not_checked(self):
+        rc, line = daemon.flash_os_check(['back after 13 s: Unit, OS X'], os.path.join(TMP, 'RK56.syx'))
+        self.assertEqual(rc, 0)
+        self.assertIn('not checked', line)
