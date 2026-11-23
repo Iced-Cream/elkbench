@@ -207,7 +207,9 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   machine assertion; decided 2026-11-22). They run through
   modsgate and the write policy, on the unit under the claim or on the session's emulator (with
   a scratch lock folder, so emulator writes never enter the unit claim's manifest). elkbench
-  runs the plan in parts around them, as around a `power-cycle`; a plan with them flashes
+  runs the plan in parts around them, as around a `power-cycle`, also after a setup snapshot
+  (`snapshot-after`, which they may not be inside: the steps after it run in parts whether the
+  snapshot is resumed or taken now; fixed 2026-11-23); a plan with them flashes
   nothing (reboot with the base flashed over itself in a plan of its own, or a `power-cycle`).
   The uploaded files' sha256s are part of the pass key, and the go request lists each file,
   each step and the /mods/active backup. The plan checker refuses mods steps after a stock

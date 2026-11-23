@@ -4027,7 +4027,9 @@ class Daemon:
         run with the setup's own report, and no snapshot is kept."""
         cut = info['setup']
         run = lambda plan: [sys.executable, RUNNER, '--port', addr] + list(din) + ['--quiet', 'run', plan]
-        if info['power_cycles'] or info['replugs']:    # the rest in parts, a power cycle or replug between
+        # the rest in parts, elkbench's own step between each two (a power cycle, a replug, a mods
+        # step): the runner knows none of them, so a rest run as one part fails at the first
+        if info['stages']:
             rest = self.plan_stages(s, info, job, 'emulator', info['steps'][cut:], tag=' after setup')
         else:
             rest = [run(self.twin(info, False, s.sid, sections=info['steps'][cut:], tag=' after setup'))]
@@ -4481,6 +4483,7 @@ class Daemon:
         cycles = info['power_cycles']
         staged = bool(cycles or info['replugs'] or info['mods_steps'])   # in parts, elkbench's own steps between
         st, want = (a.get('start') or '').strip().lower() or None, None
+        snap = None                         # the setup snapshot an emulator run resumes or saves
         if st:
             # A start run outside a gate batch (proposal A): batches do not run power-cycle or mods
             # steps, so a plan with them gets its start runs here. With build, a fresh emulator
@@ -4603,7 +4606,11 @@ class Daemon:
             run_dir = run_dirs[-1] if run_dirs else None
             summs = [read_json(os.path.join(d, 'summary.json'), {}) for d in run_dirs]
             summ = summs[-1] if summs else {}
-            parts = sum(1 for p in stage_parts(info['steps']) if p) if staged else 1
+            # a snapshot run's parts are those of the steps after the setup (setup_then_save adds
+            # no verdict line on a pass): counted on the whole plan, a rest that starts with a
+            # stage step has one part fewer and its pass would read as a fail
+            ran = info['steps'][info['setup']:] if snap else info['steps']
+            parts = sum(1 for p in stage_parts(ran) if p) if staged else 1
             ok = rc == 0 and len(summs) >= parts and all(x.get('pass') for x in summs)
             job.state = 'pass' if ok else 'fail'
             kept = [l for l in lines if not l.startswith(('claimed', 'already yours', 'last handoff',

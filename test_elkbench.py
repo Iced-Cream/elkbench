@@ -383,6 +383,33 @@ class ModsSteps(unittest.TestCase):
         self.assertEqual([os.path.basename(f) for f, _d, _n in info['mods_files']], ['a.elemod'])
         self.assertEqual(len(daemon.stage_parts(info['steps'])), 5)
 
+    def test_snapshot_rest_splits_at_mods_steps(self):
+        """snapshot-after with mods steps after the setup: the rest runs in parts with a mods
+        stage between (T488: it ran as one testplan part, which failed at 'unknown step mods-put')."""
+        plan = os.path.join(self.dir, 'p.txt')
+        with open(plan, 'w') as fh:
+            fh.write('format = 1\nname = m\nunit = rytm\nsnapshot-after = setup\n\n[setup]\nexpect-screen s\n\n'
+                     '[load]\nsay proves setup: mods\nmods-put "~T BASE" a.elemod\nexpect-screen t\n')
+        try:
+            info = self.d.plan_info(plan)
+        except daemon.Refused as e:
+            self.skipTest('plan_info needs testplan here: %s' % e)
+        self.assertEqual(info['setup'], 1)
+        self.assertFalse(info['power_cycles'] or info['replugs'])
+        self.d.twin = lambda info, rec, sid, sections=None, tag='', **k: [n for n, _ in sections]
+        self.d.emu_port = lambda s, unit: 'tcp:127.0.0.1:1'
+        self.d.emulators[(self.s.sid, 'rytm')] = {}
+        for have in (True, False):
+            started = []
+            st = self.d.snapshot_stages(self.s, info, {'have': have, 'store': os.path.join(self.dir, 'none')},
+                                        'tcp:127.0.0.1:1', started)
+            names = [getattr(x, '__name__', None) for x in st]
+            rest = names[-3:]
+            self.assertEqual(rest[0], 'part 1 of the plan', names)
+            self.assertTrue(callable(st[-2]) and rest[1] != 'part 2 of the plan', names)   # the mods stage
+            self.assertEqual(rest[2], 'part 2 of the plan', names)
+            self.assertEqual(len(st), 3 if have else 4, names)
+
 
 needs_runner = unittest.skipUnless(ANALOGHEALTH, 'no analoghealth checkout (ELKBENCH_TEST_ANALOGHEALTH)')
 
