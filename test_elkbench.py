@@ -1377,7 +1377,7 @@ class InProcess(unittest.TestCase):
         proc = type('P', (), {'poll': lambda self: None, 'pid': 99, 'terminate': lambda self: calls.append('stop'),
                               'wait': lambda self, t: 0})()
 
-        def start(s, a, snapshot=None, power_off=False):
+        def start(s, a, snapshot=None, power_off=False, usb_audio=False):
             calls.append(('start', a['build']))
             self.d.emulators[(s.sid, a['unit'])] = dict(proc=proc, session=s.sid, build='b',
                                                         address='tcp:127.0.0.1:7400')
@@ -1732,6 +1732,40 @@ class InProcess(unittest.TestCase):
         self.assertEqual(len(hand), 1)
         self.assertTrue(hand[0].startswith('[a] replug-usb (') and 'not tested in the emulator' in hand[0], hand)
 
+    def test_usb_audio_play_parts(self):
+        """`usb-audio play SECS` is a stage step: the plan runs in parts around it; it needs the
+        seconds (1-600), a line of its own, the Rytm, and no (hardware) section or setup."""
+        steps = [('a', ['tap NO', 'usb-audio play 4  # speakers', 'expect-screen x 1']), ('b', ['usb-audio play 4'])]
+        self.assertTrue(daemon.is_usb_audio_play('usb-audio play 4'))
+        self.assertFalse(daemon.is_usb_audio_play('say usb-audio play 4'))
+        self.assertTrue(daemon.is_stage_step('usb-audio play 4'))
+        self.assertEqual(daemon.usb_audio_secs('usb-audio play 4  # x'), 4)
+        for bad in ('usb-audio play', 'usb-audio play 0', 'usb-audio play 601', 'usb-audio play x', 'usb-audio play 4 5'):
+            self.assertIsNone(daemon.usb_audio_secs(bad), bad)
+        self.assertEqual(daemon.stage_steps(steps), ['usb-audio play 4  # speakers', 'usb-audio play 4'])
+        self.assertEqual(len(daemon.stage_parts(steps)), 3)
+        self.assertEqual(daemon.usb_audio_plays(steps), ['[a] usb-audio play 4', '[b] usb-audio play 4'])
+        self.d.check_usb_audio('rytm', steps, 0)
+        for unit, st, setup, why in (
+                ('a4', steps, 0, 'runs on the Rytm'),
+                ('rytm', [('a', ['usb-audio play'])], 0, 'takes the seconds'),
+                ('rytm', [('a', ['usb-audio play 4; wait 1'])], 0, 'on a line of its own'),
+                ('rytm', [('a (hardware)', ['usb-audio play 4'])], 0, r'\(hardware\) section'),
+                ('rytm', [('a', ['usb-audio play 4']), ('b', ['ping'])], 1, 'in the setup')):
+            with self.assertRaisesRegex(daemon.Refused, why, msg=why):
+                self.d.check_usb_audio(unit, st, setup)
+
+    def test_usb_audio_emulator_args(self):
+        """The plan's play steps start analog-emu idle (it plays only in them); the emulator tool's
+        usb_audio switches USB CONFIG at 9 s; a build without the host is refused."""
+        self.assertEqual(self.d.emu_usb_audio_args('rytm', False), [])
+        self.d.emu_help = lambda unit: 'usage: rytm [--usb-audio [SECS]] [--usb-audio-idle]'
+        self.assertEqual(self.d.emu_usb_audio_args('rytm', True), ['--usb-audio-idle'])
+        self.assertEqual(self.d.emu_usb_audio_args('rytm', False, True), ['--usb-audio'])
+        self.d.emu_help = lambda unit: 'usage: rytm [--usb-midi-real]'
+        with self.assertRaisesRegex(daemon.Refused, 'has no USB AUDIO/MIDI host'):
+            self.d.emu_usb_audio_args('rytm', True)
+
     def replug_sample(self, unit='rytm'):
         """power-cycle.txt with its power-cycle step a USB replug, for `unit`."""
         path = os.path.join(PLANS, 'replug-usb-%s.txt' % unit)
@@ -1781,7 +1815,7 @@ class InProcess(unittest.TestCase):
             self.d.plan_info(early)
         os.makedirs(os.environ['ELKBENCH_DIR'], exist_ok=True)
         build = os.path.join(TMP, 'os', 'test-build.syx')
-        with self.assertRaisesRegex(daemon.Refused, 'replug-usb or mods steps: batches do not run those yet'):
+        with self.assertRaisesRegex(daemon.Refused, 'replug-usb, usb-audio or mods steps: batches do not run those yet'):
             self.d.t_batch(self.s, {'plan': plan, 'variants': [{}], 'build': build})
 
     @needs_runner
