@@ -291,6 +291,40 @@ def replugs(steps):
     return ['[%s] replug-usb' % name for name, lines in steps for l in lines if is_replug_usb(l)]
 
 
+USB_AUDIO_MAX = 600                     # s: the longest `usb-audio play`
+USB_AUDIO_LOG = ('usb audio: play', 'usb audio: stop', 'usb audio: streaming', 'usb audio: not played')
+
+
+def is_usb_audio_play(line):
+    """`usb-audio play SECS`: a computer plays SECS s of audio to the unit's class-compliant USB
+    audio device (USB CONFIG = USB AUDIO/MIDI; the Rytm's "Speakers", interface 1 alternate setting
+    1, OUT 0x03 with feedback 0x82), then closes it (alternate setting 0). elkbench runs the plan in
+    parts around it, as at a replug. In the emulator, analog-emu's class-compliant host plays silence
+    for SECS s of emulated time (stdin `usb-audio play SECS`; the emulator starts with
+    --usb-audio-idle, so nothing plays outside these steps); on the unit, the person plays audio from
+    the computer by hand and says when it is done. The plan switches USB CONFIG itself (keys, as on
+    the unit); the emulator's host follows the switch. A line that starts with it counts too, so the
+    plan check refuses a malformed one."""
+    w = shlex.split(line.split(';')[0], comments=True)
+    return len(w) >= 2 and w[0].lower() == 'usb-audio' and w[1].lower() == 'play'
+
+
+def usb_audio_secs(line):
+    """`usb-audio play SECS` -> SECS (a number 1..USB_AUDIO_MAX), or None when it does not read so."""
+    w = shlex.split(line, comments=True)
+    try:
+        v = float(w[2]) if len(w) == 3 else None
+    except ValueError:
+        return None
+    return v if v is not None and 1 <= v <= USB_AUDIO_MAX else None
+
+
+def usb_audio_plays(steps):
+    """-> lines naming every `usb-audio play` step of a plan, for run results and the go request."""
+    return ['[%s] %s' % (name, l.split('#')[0].strip()) for name, lines in steps for l in lines
+            if is_usb_audio_play(l)]
+
+
 def flash_expected_os(image):
     """The OS version `image` reports once it runs: the `version` an elekloader build writes
     beside it (X.syx.json), else the OSn.nn in a stock file's name; None when unknown."""
@@ -340,10 +374,11 @@ def boot_from_flash(e):
 
 
 def is_stage_step(line):
-    """A step elkbench runs itself between parts of a plan: `power-cycle`, `replug-usb`, or a
+    """A step elkbench runs itself between parts of a plan: `power-cycle`, `replug-usb`,
+    `usb-audio play SECS`, or a
     Drive Loader step (modsteps.py: mods-put, mods-active, expect-mods, expect-status, mods-remove,
     mods-clear-refused)."""
-    return is_power_cycle(line) or is_replug_usb(line) or modsteps.is_mods_step(line)
+    return is_power_cycle(line) or is_replug_usb(line) or is_usb_audio_play(line) or modsteps.is_mods_step(line)
 
 
 def stage_steps(steps):
@@ -795,6 +830,10 @@ REPLUG_HAND = ('replug the %s\'s USB cable by hand%s (a USB replug, not a power 
                'switched on): unplug the USB cable, wait 5 s, plug it in again')
 REPLUG_WAIT = 90                                # s for the port to answer a ping after a replug
 # what the person does at a hardware run's power-cycle step: unit, then ' (n of m)' or ''
+# what the person does at a hardware run's usb-audio play step: unit, seconds, then ' (n of m)' or ''
+USB_AUDIO_HAND = ('on the computer the %s is cabled to by USB (USB CONFIG is USB AUDIO/MIDI now), play about %g s '
+                  'of audio to its playback device (the Rytm\'s "Speakers" / Analog Rytm MKII output)%s, then stop '
+                  'and close the player; touch nothing on the unit')
 POWER_CYCLE_HAND = ('power cycle the %s%s by hand: switch it off, wait 10 s, switch it on, and let it '
                     'boot to its start screen; nothing is sent to it meanwhile')
 FALLBACK = CFG['approval_fallback']       # when the client cannot show the prompt: popup, thread or both
@@ -1224,6 +1263,7 @@ class Job:
         self.listening = None             # what the person listens for while the plan waits
         self.power_cycle = False          # ... and whether it waits for a power cycle by hand
         self.replug = False               # ... or for a USB replug by hand
+        self.usb_audio = False            # ... or for USB audio played by hand
         self.batch = None                 # a batch's batch.Batch: its progress while it runs
         self.limit = None                 # s before the job's commands are killed, or None
         self.midisrv = None               # the midisrv line logged when it started (hardware)
@@ -1366,19 +1406,23 @@ class Daemon:
         raise Refused('this session has no %s emulator: give build (the OS .syx to boot), or start '
                       'one with the emulator tool (emulators started by hand are not used)' % unit)
 
-    def emu_ready(self, s, unit, build, snapshot=None, power_off=False):
+    def emu_ready(self, s, unit, build, snapshot=None, power_off=False, usb_audio=False):
         """-> (address, lines): with `build`, a fresh emulator of this session boots it first
         (any it runs is stopped), saving the separate emulator calls; else the running one.
-        power_off: it starts with --power-off, for a plan's power-cycle steps."""
+        power_off: it starts with --power-off, for a plan's power-cycle steps. usb_audio: with
+        --usb-audio-idle, for a plan's usb-audio play steps."""
         if not build:
             if power_off and not (self.emulators.get((s.sid, unit)) or {}).get('power_off'):
                 raise Refused('this plan has power-cycle steps: give build, so that its emulator starts '
                               'with the power-off save (the running one did not)')
+            if usb_audio and not (self.emulators.get((s.sid, unit)) or {}).get('usb_audio'):
+                raise Refused('this plan has usb-audio play steps: give build, so that its emulator starts '
+                              'with --usb-audio-idle (the running one did not)')
             return self.emu_port(s, unit), []
         mine = self.emulators.get((s.sid, unit))
         if mine and mine['proc'].poll() is None:
             self.stop_emulator(mine)
-        lines = self.t_emulator(s, {'action': 'start', 'unit': unit, 'build': build}, snapshot, power_off)
+        lines = self.t_emulator(s, {'action': 'start', 'unit': unit, 'build': build}, snapshot, power_off, usb_audio)
         addr = self.emu_port(s, unit)
         if UNITS[unit].get('emulator') != 'digiemu':   # digiemu_start waits for its OS itself
             self.wait_for_os(addr)
@@ -1887,6 +1931,9 @@ class Daemon:
         plugs = replugs(steps)
         if plugs:
             self.check_replugs(unit, steps, flash, setup)
+        plays = usb_audio_plays(steps)
+        if plays:
+            self.check_usb_audio(unit, steps, setup)
         if mods_lines:
             self.check_mods_steps(unit, steps, flash, setup, here)
         # the plan checker's rules (plancheck.py): errors refuse the go, flags go into it
@@ -1896,7 +1943,7 @@ class Daemon:
                                 starts=tuple(unit_starts(unit)), here=here)
         return dict(path=path, here=here, settings=settings, steps=steps, unit=unit, key=key, check=check,
                     old_key=old_key, os_file=os_file, os_sha=os_sha, flash=flash, flash_sha=flash_sha, refs=refs, writes=writes, stock_writes=stock_writes, setup=setup, din=bool(din),
-                    audio_waits=audio_waits(steps), power_cycles=cycles, replugs=plugs, home=home,
+                    audio_waits=audio_waits(steps), power_cycles=cycles, replugs=plugs, usb_audio=plays, home=home,
                     mods_steps=mods_lines, mods_files=mods_files, stages=stage_steps(steps),
                     drive_puts=drive_puts,
                     name=settings.get('name') or os.path.splitext(os.path.basename(path))[0],
@@ -1964,6 +2011,89 @@ class Daemon:
                 raise Refused('USB replug %d has no machine assertion after it (a ping or an expect-screen '
                               'before the next power cycle, replug, mods step or the end): the run must see the '
                               'unit answer on the new connection; a try readout checks nothing' % n)
+
+    def check_usb_audio(self, unit, steps, setup):
+        """Refused unless this plan's `usb-audio play SECS` steps can run: on the Rytm (analog-emu's
+        class-compliant host knows its USB AUDIO/MIDI mode), alone on their line with SECS 1..600,
+        outside (hardware) sections and the setup (a snapshot cannot hold the host's state)."""
+        if unit != 'rytm' or UNITS[unit].get('emulator') == 'digiemu':
+            raise Refused('usb-audio play runs on the Rytm (analog-emu\'s USB AUDIO/MIDI host); not on the %s' % unit)
+        for i, (name, lines) in enumerate(steps):
+            for l in lines:
+                if not is_usb_audio_play(l):
+                    continue
+                if ';' in l or usb_audio_secs(l) is None:
+                    raise Refused('[%s] %r: usb-audio play takes the seconds to play (1-%d), on a line of its own'
+                                  % (name, l, USB_AUDIO_MAX))
+                if name.endswith('(hardware)'):
+                    raise Refused('[%s] usb-audio play in a (hardware) section: the emulator skips those, so its '
+                                  'pass would not cover it' % name)
+                if setup and i < setup:
+                    raise Refused('[%s] usb-audio play in the setup (snapshot-after): a setup snapshot cannot hold '
+                                  'the USB host\'s state; put it after the setup' % name)
+
+    def emu_usb_audio_args(self, unit, plays, switch=False):
+        """analog-emu arguments for its class-compliant USB audio host: --usb-audio-idle (with
+        --stdin-commands) when a plan has `usb-audio play` steps, so it plays only in them;
+        --usb-audio when the emulator tool's call asks for the USB CONFIG switch at 9 s
+        (usb_audio). Refused when this analog-emu has no such host."""
+        if not plays and not switch:
+            return []
+        if UNITS[unit].get('emulator') == 'digiemu' or unit != 'rytm':
+            raise Refused('the USB AUDIO/MIDI host is analog-emu\'s, for the Rytm; not on the %s' % unit)
+        if '--usb-audio-idle' not in self.emu_help(unit):
+            raise Refused('this analog-emu (%s) has no USB AUDIO/MIDI host (--usb-audio, --usb-audio-idle): build '
+                          'one from analog-emu branch usb-audio-host' % ANALOG_EMU)
+        return (['--usb-audio'] if switch else []) + (['--usb-audio-idle'] if plays else [])
+
+    def usb_audio_stage(self, s, unit, job, tgt, line, n, of):
+        """A stage for the plan's `usb-audio play SECS` n (of `of`). In the emulator: `usb-audio
+        play SECS` on analog-emu's stdin; its log must then say the host streamed (it selected the
+        audio alternate settings of a USB AUDIO/MIDI device) and stopped after SECS s of emulated
+        time. On the unit, the run waits until the person has played audio from the computer and
+        said so (listen_done)."""
+        secs = usb_audio_secs(line)
+        if tgt == 'emulator':
+            def play(rc, out):
+                e = self.emulators.get((s.sid, unit))
+                if not e or e['proc'].poll() is not None:
+                    return 1, 'fail: usb-audio play: this session\'s %s emulator is not running\n' % unit
+                if not e.get('usb_audio'):
+                    return 1, ('fail: usb-audio play: the emulator did not start with --usb-audio-idle '
+                               '(give build, so a fresh one starts with it)\n')
+                with open(e['log'], encoding='utf-8', errors='replace') as fh:
+                    seen = len(fh.read())
+                try:
+                    e['proc'].stdin.write(b'usb-audio play %g\n' % secs)
+                    e['proc'].stdin.flush()
+                except (OSError, ValueError, AttributeError):
+                    return 1, 'fail: usb-audio play: the emulator takes no commands (%s)\n' % e['log']
+                limit = secs * 20 + 60
+                end, text = time.time() + limit, ''
+                while time.time() < end and e['proc'].poll() is None:
+                    with open(e['log'], encoding='utf-8', errors='replace') as fh:
+                        text = fh.read()[seen:]
+                    if 'usb audio: stop' in text or 'usb audio: not played' in text:
+                        break
+                    time.sleep(0.5)
+                said = [l for l in text.splitlines() if l.startswith(USB_AUDIO_LOG)]
+                if 'usb audio: not played' in text:
+                    return 1, ('fail: usb-audio play: no USB AUDIO/MIDI device enumerated (switch USB CONFIG '
+                               'first): %s (%s)\n' % (said[-1], e['log']))
+                if 'usb audio: streaming' not in text or 'usb audio: stop' not in text:
+                    return 1, ('fail: usb-audio play: the host did not stream and stop within %d s: %s (%s)\n'
+                               % (limit, '; '.join(said) or 'nothing said', e['log']))
+                return 0, 'ok usb-audio play %g: %s\n' % (secs, '; '.join(said))
+        else:
+            def play(rc, out):
+                what = USB_AUDIO_HAND % (unit, secs, ' (%d of %d)' % (n, of) if of > 1 else '')
+                write_json(job.listen_file, {'what': what, 'since': time.time(), 'usb_audio': True})
+                while os.path.exists(job.listen_file):
+                    time.sleep(0.5)
+                return 0, 'ok usb-audio play %g by hand: %s said it is done\n' % (secs, PERSON)
+        play.__name__ = 'USB audio play %d (%g s%s)' % (n, secs, ', emulator: silence from its class-compliant host'
+                                                       if tgt == 'emulator' else ', by hand, waits for the person')
+        return play
 
     def check_mods_steps(self, unit, steps, flash, setup, here):
         """Refused unless this plan's Drive Loader steps (modsteps.py) can run: on a unit with a
@@ -2261,6 +2391,7 @@ class Daemon:
                 what = flag.get('what') or '(see the plan)'
                 job.power_cycle = bool(flag.get('power_cycle'))
                 job.replug = bool(flag.get('replug_usb'))
+                job.usb_audio = bool(flag.get('usb_audio'))
                 job.listening = what
                 subprocess.run([sys.executable, ELKLOCK, 'listen', job.unit, '--for', what],
                                env=job.sess.env(), capture_output=True, timeout=30, **NOWIN)
@@ -2832,6 +2963,12 @@ class Daemon:
             deadline = time.time() + max(0, min(STATUS_WAIT_MAX, float(a.get('wait_s', STATUS_WAIT))))
             while j.state in ('running', 'asking') and time.time() < deadline and not j.listening:
                 time.sleep(0.5)
+            if j.state == 'running' and j.listening and j.usb_audio:
+                return j.summary() + [
+                    'USB audio play: the run waits for audio played by hand: %s. Ask %s in your thread to '
+                    'do exactly that and to say when it is done, then wait for their reply, however long it '
+                    'takes; send nothing to the unit. When they say it is done, call listen_done with the id of '
+                    'that reply, then status again.' % (j.listening, PERSON)]
             if j.state == 'running' and j.listening and j.replug:
                 return j.summary() + [
                     'USB replug: the run waits for a USB replug by hand: %s. Ask %s in your thread to '
@@ -2927,6 +3064,9 @@ class Daemon:
                 ''.join('\n  USB REPLUG BY HAND, not a power cycle (the run waits until you say it is done, then '
                         'for the unit to answer a ping; not tested in the emulator, whose pass reconnected to '
                         'the same emulator): ' + c for c in info.get('replugs') or []) +
+                ''.join('\n  USB AUDIO PLAY BY HAND (the run waits until you have played audio from the computer to the '
+                        'Rytm and said so; the emulator pass played silence from its class-compliant host): ' + c
+                        for c in info.get('usb_audio') or []) +
                 ''.join('\n  SHORT IN THE EMULATOR, IN FULL ON THE UNIT: ' + w for w in info['audio_waits']) +
                 ''.join('\n  MODS FILE %s\n    sha256 %s, %d bytes' % (os.path.basename(f), d, n)
                         for f, d, n in info['mods_files']) +
@@ -3307,6 +3447,10 @@ class Daemon:
         job.title = 'Listening test: finished?'
         job.body = ('An AI session holds the %s for your listening test:\n\n  %s\n\nHave you finished '
                     'listening? Yes gives the unit back to the session; No keeps it waiting.' % (u, what))
+        if plan_job and plan_job.usb_audio:
+            job.title = 'USB audio play: done?'
+            job.body = ('An AI session\'s test plan waits for you to %s.\n\nHave you played it and closed the '
+                        'player? Yes lets the plan go on; No keeps it waiting.' % what)
         if plan_job and plan_job.replug:
             job.title = 'USB replug: done?'
             job.body = ('An AI session\'s test plan waits for you to %s.\n\nHave you done it, with the '
@@ -3353,7 +3497,7 @@ class Daemon:
                     'lines': ['asking: %s, the client asks %s whether they have finished listening' % (job.id, PERSON)]}
         return self.popup(job)
 
-    def t_emulator(self, s, a, snapshot=None, power_off=False):
+    def t_emulator(self, s, a, snapshot=None, power_off=False, usb_audio=False):
         """Start, stop or list the emulators: always headless (no window) and each session its
         own, its USB MIDI port on a TCP port of its own (analog-emu --usb-midi-tcp, digiemu's
         usbrun), so emulators need no loopMIDI and never queue for one another."""
@@ -3431,7 +3575,8 @@ class Daemon:
             tcp = probe.getsockname()[1]
         cmd = [exe] + ([build] if build else []) + [
             '--flash', flash, '--no-audio', '--headless', '--no-midi',
-            '--usb-midi-tcp', '127.0.0.1:%d' % tcp, '--after', str(minutes * 60)] + self.emu_usb_args(a['unit'])
+            '--usb-midi-tcp', '127.0.0.1:%d' % tcp, '--after', str(minutes * 60)] + self.emu_usb_args(a['unit']) + \
+            self.emu_usb_audio_args(a['unit'], usb_audio, bool(a.get('usb_audio')))
         din = None
         if self.emu_has_din(a['unit']):              # and its DIN MIDI, for send/capture ... din
             with socket.socket() as probe:
@@ -3446,8 +3591,10 @@ class Daemon:
             cmd += ['--snapshot', snapshot, '--stdin-commands']
         if power_off:                   # `quit` on stdin switches it off: the OS saves to the card
             cmd += ['--power-off'] + ([] if snapshot else ['--stdin-commands'])
+        if usb_audio and not (snapshot or power_off):   # `usb-audio play SECS` on stdin
+            cmd += ['--stdin-commands']
         proc = subprocess.Popen(cmd, cwd=work, stdout=log, stderr=subprocess.STDOUT,
-                                stdin=subprocess.PIPE if snapshot or power_off else None, **NOWIN)
+                                stdin=subprocess.PIPE if snapshot or power_off or usb_audio else None, **NOWIN)
         # what ran on this card before: nothing on a fresh copy; the old list on a card kept
         history = list((mine or {}).get('history') or []) if keep and not a.get('fresh_card') else []
         if keep:
@@ -3457,6 +3604,7 @@ class Daemon:
                                                  snapshot=snapshot, log=log_path,
                                                  din='tcp:127.0.0.1:%d' % din if din else None,
                                                  cmd=cmd, work=work, power_off=power_off, boots=1,
+                                                 usb_audio=bool(usb_audio),
                                                  boot_os=build, card_clean=bool(card_clean and not keep))
         for _ in range(30):                           # until it listens (an older build never does)
             time.sleep(0.2)
@@ -4074,7 +4222,8 @@ class Daemon:
         between = stage_steps(steps)
         cycles = sum(1 for l in between if is_power_cycle(l))
         plugs = sum(1 for l in between if is_replug_usb(l))
-        here, c, r = os.path.dirname(info['path']), 0, 0
+        plays = sum(1 for l in between if is_usb_audio_play(l))
+        here, c, r, u = os.path.dirname(info['path']), 0, 0, 0
         for i, part in enumerate(parts):
             if i and is_power_cycle(between[i - 1]):
                 c += 1
@@ -4082,6 +4231,9 @@ class Daemon:
             elif i and is_replug_usb(between[i - 1]):
                 r += 1
                 stages.append(self.replug_stage(s, unit, job, tgt, r, plugs))
+            elif i and is_usb_audio_play(between[i - 1]):
+                u += 1
+                stages.append(self.usb_audio_stage(s, unit, job, tgt, between[i - 1], u, plays))
             elif i:
                 stages.append(self.mods_stage(s, unit, tgt, between[i - 1], here))
             if not part:
@@ -4481,7 +4633,7 @@ class Daemon:
         unit = info['unit']
         job = Job(s, 'plan', unit, tgt, 'plan ' + info['name'])
         cycles = info['power_cycles']
-        staged = bool(cycles or info['replugs'] or info['mods_steps'])   # in parts, elkbench's own steps between
+        staged = bool(cycles or info['replugs'] or info['usb_audio'] or info['mods_steps'])   # in parts, elkbench's own steps between
         st, want = (a.get('start') or '').strip().lower() or None, None
         snap = None                         # the setup snapshot an emulator run resumes or saves
         if st:
@@ -4558,7 +4710,8 @@ class Daemon:
             snap = None if st else self.setup_snapshot(s, info, a)
             if a.get('build'):              # a fresh emulator: no /mods/active saved on it yet
                 s.mods_saved.pop((unit, 'emulator'), None)
-            addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'], bool(cycles))
+            addr, started = self.emu_ready(s, unit, a.get('build'), snap and snap['live'], bool(cycles),
+                                           bool(info['usb_audio']))
             if a.get('build'):
                 (self.emulators.get((s.sid, unit)) or {})['from_start'] = st
             if snap and snap.get('digi'):           # digiemu says at its start whether it had it stored
@@ -4639,6 +4792,7 @@ class Daemon:
                                else 'power cycled by hand: ') + c for c in cycles]
             if tgt == 'hardware':                     # the emulator's are among the hand steps below
                 job.lines += ['USB replugged by hand (then pinged): ' + r for r in info['replugs']]
+                job.lines += ['USB audio played by hand: ' + r for r in info['usb_audio']]
             if tgt == 'emulator':
                 job.lines += ['not tested here (skipped in the emulator): ' + h for h in hand_steps(info['steps'])]
                 job.lines += ['short here (%g s in the emulator, in full on the unit): %s' % (AUDIO_WAIT_EMULATOR, w)
@@ -4768,10 +4922,6 @@ class Daemon:
 
         def done(job, rc, out):
             lines = [l.strip() for l in out.splitlines() if l.strip()]
-            os_note = None
-            if rc == 0:
-                rc, os_note = flash_os_check(lines, img)
-            job.state = 'pass' if rc == 0 else 'fail'
             # --quiet prints only the last line; the lines that say what happened are in the log
             try:
                 with open(flog, encoding='utf-8', errors='replace') as fh:
@@ -4780,6 +4930,11 @@ class Daemon:
                             if re.match(r'\s*(sent \d|Committed|back after|note:|Press YES|SUCCESS|no reply to PING)', l)]
             except OSError:
                 said = []
+            os_note = None
+            if rc == 0:
+                # the `back after N s: NAME, OS X` line is in the log, not in --quiet's one line of output
+                rc, os_note = flash_os_check(said + lines, img)
+            job.state = 'pass' if rc == 0 else 'fail'
             job.lines = [quiet] + ([job.midisrv] if job.midisrv else []) + \
                 [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + ['log: %s' % flog] +                 ([os_note] if os_note else [])
             if tgt == 'hardware':
@@ -5397,7 +5552,7 @@ class Daemon:
             else:
                 x['info'] = info
                 if info['stages'] and not gate:
-                    raise Refused('%s has power-cycle, replug-usb or mods steps: batches do not run those yet, run it with '
+                    raise Refused('%s has power-cycle, replug-usb, usb-audio or mods steps: batches do not run those yet, run it with '
                                   'run_plan target emulator (a gate batch runs only its start runs)'
                                   % info['name'])
                 units.add(info['unit'])
@@ -6211,7 +6366,11 @@ TOOLS = [
                                                      'emulator (no build), on its card as left'},
        power_off={'type': 'boolean', 'description': 'Rytm / A4 / Digitone: start it with the power-off save, so that a '
                                                     'plan with power-cycle steps can run on it later without '
-                                                    'build (after the plans that set up its state)'})),
+                                                    'build (after the plans that set up its state)'},
+       usb_audio={'type': 'boolean', 'description': 'Rytm: start it with analog-emu --usb-audio: USB CONFIG becomes '
+                                                    'USB AUDIO/MIDI at 9 s and its class-compliant host enumerates '
+                                                    'and plays (ad-hoc checks; a plan switches USB CONFIG with keys '
+                                                    'and plays with usb-audio play SECS steps)'})),
     ('run_plan', 'Run a test plan (analogrun run, format 1) in the background; returns a run_id. target '
                  'emulator records the pass a hardware run needs; hardware needs the claim and an approval token. '
                  'A plan\'s power-cycle steps power the emulator off (its OS saves to the card) and cold-boot it; '

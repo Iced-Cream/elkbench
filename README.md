@@ -135,6 +135,20 @@ tests away from the owner's own projects (a `~T` name prefix, reserved slots 121
   step "not tested in the emulator". Each replug needs a machine assertion after it (`ping`,
   `expect-screen`; a `try` does not count), and a plan with one cannot flash or put it in a
   `(hardware)` section or the setup.
+- **`usb-audio play SECS`**: a plan step on a line of its own (Rytm, SECS 1-600): a computer plays
+  SECS s of audio to the Rytm's class-compliant USB audio device ("Speakers": USB CONFIG = USB
+  AUDIO/MIDI, interface 1 alternate setting 1, OUT 0x03 with feedback 0x82), then closes it
+  (alternate setting 0). The plan switches USB CONFIG itself, with keys, as on the unit. elkbench
+  splits the plan there as at a `replug-usb`. In the emulator, analog-emu (branch `usb-audio-host`)
+  starts with `--usb-audio-idle --stdin-commands`; its simulated host follows the menu's switch
+  (it enumerates again when the OS stops the controller, and takes the class-compliant path for
+  1935:1048), and the step sends `usb-audio play SECS` on its stdin: the host selects the audio
+  alternate settings, streams silence at 48 kHz and reads the feedback for SECS s of emulated
+  time, then selects alternate setting 0; the step fails unless the log says it streamed and
+  stopped. On the unit the run waits for `listen_done` ("USB audio play: done?") after the person
+  has played audio from the computer. Not in a `(hardware)` section or the setup; batches refuse
+  it. The emulator tool's `usb_audio` starts an emulator whose USB CONFIG becomes USB AUDIO/MIDI
+  at 9 s (`--usb-audio`) and plays from then on, for checks outside plans.
 - **`wait N audio`**: a wait that only lets the unit make sound (a recording, a tone, a pause to
   hear something). The runner waits N s on the unit; every emulator twin (run_plan, batch)
   waits 0.5 s instead, as the emulator makes no voice sound. The pass is keyed by the plan as
