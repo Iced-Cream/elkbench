@@ -693,6 +693,27 @@ def release(dev, reason):
     return False
 
 
+def os_from_info(dev, port, out, err=''):
+    """The handoff's `os` line from `elkflash info` output. Only a version read from the unit
+    itself counts: when the port answered as another device (a moved or re-enumerated port, a
+    MIDI host relaying a different box), or gave no version, the OS is recorded as unknown with
+    what did answer, never as a bare version that reads like the unit's (stock) OS. A version
+    alone does not tell stock from a build on that OS, so the line says it is the version only."""
+    field = {}
+    for l in out.splitlines():
+        m = re.match(r'\s*(port|device|OS)\s*:\s*(.*\S)', l)
+        if m and m.group(1) not in field:
+            field[m.group(1)] = m.group(2)
+    ver, device = field.get('OS'), field.get('device')
+    if not ver or ver == '?':
+        why = ((err.strip() or out.strip() or 'no output').splitlines() or [''])[-1][:160]
+        return 'unknown: no OS version came back on port %s (%s)' % (port, why)
+    if not device or not re.search(DEVICES[dev][0], device, re.I):
+        return ('unknown: port %s answered as %s (OS %s), not the %s; the %s\'s OS was not read'
+                % (field.get('port', port), device or 'no device name', ver, dev, dev))
+    return 'OS %s on %s (version only: stock and builds of this OS read the same)' % (ver, device)
+
+
 def snapshot(dev, note, skip, port=None):
     """The handoff record: OS version, a screenshot and the note. Best-effort, read-only.
     `port`: the MIDI port to read them on (default: port_of)."""
@@ -712,8 +733,7 @@ def snapshot(dev, note, skip, port=None):
         r = subprocess.run([sys.executable, '-m', 'elkflash', 'info', '--port', port,
                             '--screenshot', png],
                            cwd=ELKFLASH_REPO, capture_output=True, text=True, timeout=30)
-        line = [l for l in r.stdout.splitlines() if re.search(r'\bOS\b|version', l, re.I)]
-        rec['os'] = (line[0].strip() if line else (r.stdout.strip() or r.stderr.strip())[:200])
+        rec['os'] = os_from_info(dev, port, r.stdout, r.stderr)
         rec['screen_file'] = png if os.path.exists(png) else 'no screen came back'
     except Exception as e:                       # noqa: BLE001 - record and go on
         rec['os'] = 'elkflash info failed: %s' % e
