@@ -711,7 +711,7 @@ def os_from_info(dev, port, out, err=''):
     if not device or not re.search(DEVICES[dev][0], device, re.I):
         return ('unknown: port %s answered as %s (OS %s), not the %s; the %s\'s OS was not read'
                 % (field.get('port', port), device or 'no device name', ver, dev, dev))
-    return 'OS %s on %s (version only: stock and builds of this OS read the same)' % (ver, device)
+    return 'OS %s on %s (version only: it does not tell stock from a build)' % (ver, device)
 
 
 def snapshot(dev, note, skip, port=None):
