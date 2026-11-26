@@ -264,5 +264,41 @@ class Lock(unittest.TestCase):
         self.assertFalse(elklock.pid_alive(p.pid))
 
 
+class HandoffOs(unittest.TestCase):
+    """The `os` line a handoff note (release, or a claim that ended by itself) records from the
+    unit info read. 2026-11-26 run VA1: a lapsed claim's note gave the Rytm 'OS: 1.56' (the A4's
+    stock version) and the A4 'OS: 1.74', read as both boxes on stock when the port had answered
+    as the other box."""
+
+    def info(self, device, ver, port='Analog Rytm MKII'):
+        return ('port:     %s\ndevice:   %s (product id 0x0C)\nOS:       %s\n'
+                'limits:   sysex 4096, file chunk 1024\n' % (port, device, ver))
+
+    def test_other_device_answering_is_unknown(self):
+        line = elklock.os_from_info('rytm', 'Analog Rytm', self.info('Analog Four MKII', '1.56'))
+        self.assertTrue(line.startswith('unknown:'), line)
+        self.assertIn('Analog Four MKII', line)
+        self.assertIn('not the rytm', line)
+        line = elklock.os_from_info('a4', 'Analog Four', self.info('Analog Rytm MKII', '1.74'))
+        self.assertTrue(line.startswith('unknown:'), line)
+
+    def test_no_version_is_unknown(self):
+        self.assertTrue(elklock.os_from_info('rytm', 'Analog Rytm', self.info('Analog Rytm MKII', '?'))
+                        .startswith('unknown:'))
+        line = elklock.os_from_info('rytm', 'Analog Rytm', '',
+                                    "no MIDI in/out pair matches 'Analog Rytm' (see: elkflash list)")
+        self.assertTrue(line.startswith('unknown:'), line)
+        self.assertIn('no MIDI in/out pair', line)
+        self.assertTrue(elklock.os_from_info('a4', 'Analog Four', '', '').startswith('unknown:'))
+
+    def test_own_device_gives_version_only(self):
+        line = elklock.os_from_info('rytm', 'Sidecar', self.info('Analog Rytm MKII', '1.74', 'Sidecar'))
+        self.assertTrue(line.startswith('OS 1.74 on Analog Rytm MKII'), line)
+        self.assertIn('version only', line)       # never a bare version that reads as stock
+        self.assertNotIn('unknown', line)
+        line = elklock.os_from_info('a4', 'Analog Four', self.info('Analog Four MKII', '1.56'))
+        self.assertTrue(line.startswith('OS 1.56 on Analog Four MKII'), line)
+
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)
