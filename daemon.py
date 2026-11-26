@@ -4922,10 +4922,6 @@ class Daemon:
 
         def done(job, rc, out):
             lines = [l.strip() for l in out.splitlines() if l.strip()]
-            os_note = None
-            if rc == 0:
-                rc, os_note = flash_os_check(lines, img)
-            job.state = 'pass' if rc == 0 else 'fail'
             # --quiet prints only the last line; the lines that say what happened are in the log
             try:
                 with open(flog, encoding='utf-8', errors='replace') as fh:
@@ -4934,6 +4930,11 @@ class Daemon:
                             if re.match(r'\s*(sent \d|Committed|back after|note:|Press YES|SUCCESS|no reply to PING)', l)]
             except OSError:
                 said = []
+            os_note = None
+            if rc == 0:
+                # the `back after N s: NAME, OS X` line is in the log, not in --quiet's one line of output
+                rc, os_note = flash_os_check(said + lines, img)
+            job.state = 'pass' if rc == 0 else 'fail'
             job.lines = [quiet] + ([job.midisrv] if job.midisrv else []) + \
                 [l for l in said if not any(l in x for x in lines[-3:])] + lines[-3:] + ['log: %s' % flog] +                 ([os_note] if os_note else [])
             if tgt == 'hardware':
